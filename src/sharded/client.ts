@@ -29,6 +29,12 @@ const CACHE_ORIGIN = "https://do-kit.invalid/";
  */
 const knownSplits = new Map<string, Set<string>>();
 const loadedFromCache = new Set<string>();
+/**
+ * Objects whose splits an isolate keeps, the most recently used: a Worker that reaches one object
+ * per account would otherwise grow these for the isolate's life. A forgotten object costs a read
+ * of the colo cache, or a few hops.
+ */
+export const MAX_KNOWN_OBJECTS = 10_000;
 
 /** A hop limit: deeper than any maxDepth, so a loop is a bug, not a slow call. */
 const MAX_HOPS = 64;
@@ -70,8 +76,23 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   private get splits(): Set<string> {
     let set = knownSplits.get(this.identity);
-    if (!set) knownSplits.set(this.identity, (set = new Set()));
+    if (!set) {
+      knownSplits.set(this.identity, (set = new Set()));
+      if (knownSplits.size > MAX_KNOWN_OBJECTS) {
+        const oldest = knownSplits.keys().next().value!;
+        knownSplits.delete(oldest);
+        loadedFromCache.delete(oldest);
+      }
+    }
     return set;
+  }
+
+  /** Marks this object as just used, so it is the last its isolate forgets. */
+  private touch(): void {
+    const set = knownSplits.get(this.identity);
+    if (!set) return;
+    knownSplits.delete(this.identity);
+    knownSplits.set(this.identity, set);
   }
 
   /** The deepest known node owning a hash. */
@@ -215,6 +236,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   }
 
   private async loadCache(): Promise<void> {
+    this.touch();
     if (loadedFromCache.has(this.identity) || typeof caches === "undefined") return;
     loadedFromCache.add(this.identity);
     try {

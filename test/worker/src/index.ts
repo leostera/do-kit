@@ -2,6 +2,7 @@
 //   POST /call {cls, name, method, keys, payloads}  POST /scan {cls, name, method}
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
+import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 
@@ -369,6 +370,11 @@ export default {
         case "/wipe":
           await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).wipe().catch(() => {});
           return Response.json(null);
+        case "/useManyObjects": {
+          // Clients of many other objects, each used once: the isolate keeps at most MAX_KNOWN_OBJECTS.
+          for (let i = 0; i <= MAX_KNOWN_OBJECTS; i++) sharded(ns, `${body.name}-other-${i}`).knownSplits();
+          return Response.json(MAX_KNOWN_OBJECTS);
+        }
         case "/splits":
           return Response.json(sharded(ns, body.name).knownSplits());
       }
