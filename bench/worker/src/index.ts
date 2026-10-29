@@ -5,7 +5,7 @@ import { splittable as legacySplittable, SplittableObject as LegacySplittableObj
 
 const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
-type Target = "single" | "split" | "legacy";
+type Target = "single" | "split" | "legacy" | "presplit";
 type Operation = "read" | "write";
 type Distribution = "uniform" | "hot";
 
@@ -19,6 +19,7 @@ interface Env {
   readonly TWO_COPY_MANUAL: DurableObjectNamespace<ManualTwoCopySplitObject>;
   readonly BENCH_TOKEN: string;
   readonly SPLIT_JOBS: DurableObjectNamespace<SplitBenchJob>;
+  readonly PRESPLIT: DurableObjectNamespace<PresplitObject>;
 }
 
 interface MeasureConfig {
@@ -101,6 +102,14 @@ export class SplitObject extends SplittableObject<Env, string> {
 
   async seed(_keys: readonly string[], _payloads: null, start: number, count: number, bytes: number): Promise<Seeded> {
     return seedRows((keys, values) => this.put(keys, values), start, count, bytes);
+  }
+}
+
+/** Starts as 16 leaves, before its first call: steady-state capacity, with no split while measuring. */
+export class PresplitObject extends SplitObject {
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, initialDepth: 4, copy: "native" };
+  protected override nodes(): DurableObjectNamespace<SplittableObject<Env, string>> {
+    return this.env.PRESPLIT as never;
   }
 }
 
@@ -248,7 +257,7 @@ export class BenchDriver extends DurableObject<Env> {
       return;
     }
     if (target === "legacy") await legacySplittable(this.env.LEGACY, name).call(keys, "put", values);
-    else await splittable(this.env.SPLIT, name).call(keys, "put", values);
+    else await splittable(target === "presplit" ? this.env.PRESPLIT : this.env.SPLIT, name).call(keys, "put", values);
   }
 
   private async read(target: Target, name: string, key: string): Promise<string | null> {
@@ -256,7 +265,7 @@ export class BenchDriver extends DurableObject<Env> {
       const stub = this.env.SINGLE.get(this.env.SINGLE.idFromName(name));
       return (await stub.get([key], null))[0] ?? null;
     }
-    const [leaf] = target === "legacy" ? await legacySplittable(this.env.LEGACY, name).call([key], "get", null) : await splittable(this.env.SPLIT, name).call([key], "get", null);
+    const [leaf] = target === "legacy" ? await legacySplittable(this.env.LEGACY, name).call([key], "get", null) : await splittable(target === "presplit" ? this.env.PRESPLIT : this.env.SPLIT, name).call([key], "get", null);
     return leaf?.result[0] ?? null;
   }
 }
@@ -271,10 +280,10 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   const durationMs = body.durationMs;
   const keyCount = body.keyCount ?? 10_000;
   const payloadBytes = body.payloadBytes ?? 1024;
-  if (target !== "single" && target !== "split" && target !== "legacy") throw new Error("target must be single, split or legacy");
+  if (target !== "single" && target !== "split" && target !== "legacy" && target !== "presplit") throw new Error("target must be single, split, presplit or legacy");
   if (operation !== "read" && operation !== "write") throw new Error("operation must be read or write");
   if (distribution !== "uniform" && distribution !== "hot") throw new Error("distribution must be uniform or hot");
-  if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > 1024) throw new Error("concurrency must be an integer from 1 to 1024");
+  if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > 4096) throw new Error("concurrency must be an integer from 1 to 4096");
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");
   if (!Number.isSafeInteger(keyCount) || (keyCount as number) < 1 || (keyCount as number) > 100_000) throw new Error("keyCount must be from 1 to 100000");
   if (!Number.isSafeInteger(payloadBytes) || (payloadBytes as number) < 16 || (payloadBytes as number) > 64 * 1024) throw new Error("payloadBytes must be from 16 to 65536");
@@ -295,12 +304,12 @@ function percentile(histogram: readonly number[], p: number): number {
   return 120_000;
 }
 
-async function describeTree(env: Env, name: string, bits = ""): Promise<{ leaves: number; rows: number; depth: number }> {
-  const namespace = env.SPLIT as DurableObjectNamespace<SplittableObject<Env, string>>;
+async function describeTree(env: Env, name: string, bits = "", ns: DurableObjectNamespace<SplittableObject<Env, string>> = env.SPLIT as never): Promise<{ leaves: number; rows: number; depth: number }> {
+  const namespace = ns;
   const description = await namespace.get(namespace.idFromName(leafObjectName(name, bits))).splittableDescribe();
   // The object hosting `bits` hosts a deeper leaf once `bits` has split.
   if (description.state === "new" || description.bits === bits) return { leaves: 1, rows: description.rows, depth: bits.length };
-  const [zero, one] = await Promise.all([describeTree(env, name, `${bits}0`), describeTree(env, name, `${bits}1`)]);
+  const [zero, one] = await Promise.all([describeTree(env, name, `${bits}0`, ns), describeTree(env, name, `${bits}1`, ns)]);
   return { leaves: zero.leaves + one.leaves, rows: zero.rows + one.rows, depth: Math.max(zero.depth, one.depth) };
 }
 
@@ -489,7 +498,8 @@ export default {
       return Response.json({ error: error instanceof Error ? error.message : "invalid request" }, { status: 400 });
     }
 
-    const driverCount = Math.min(16, input.concurrency);
+    // About 64 in-flight calls per driver at most, up to 64 drivers.
+    const driverCount = Math.min(64, Math.max(Math.min(16, input.concurrency), Math.ceil(input.concurrency / 64)));
     const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount }));
     const drivers = configs.map((config, i) => {
       const id = env.BENCH_DRIVERS.idFromName(`${input.objectName}-driver-${i}`);
@@ -516,6 +526,7 @@ export default {
     let topology: Awaited<ReturnType<typeof describeTree>> | null = null;
     if (input.target === "split") topology = await describeTree(env, input.objectName);
     if (input.target === "legacy") topology = await describeLegacyTree(env, input.objectName);
+    if (input.target === "presplit") topology = await describeTree(env, input.objectName, "", env.PRESPLIT as never);
     return Response.json({
       ...input,
       concurrency: Math.ceil(input.concurrency / driverCount) * driverCount,

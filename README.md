@@ -1,8 +1,49 @@
 # splittable-object
 
-A TypeScript base class and client for **Cloudflare Durable Objects** that split a busy keyspace into independently addressable Durable Object leaves. Keys are assigned by the leading bits of their SHA-256 hash. Splits are permanent; clients learn the tree lazily and retry calls when their route is stale.
+**Durable Objects that split themselves when they get busy.**
 
-> This package is an early-stage library. The API and persistence format may change before `1.0.0`.
+A Durable Object is a great home for state, but it is one object: one thread, 10 GB of storage. When a hot account, repository or room outgrows it, you are left sharding by hand. `splittable-object` lets you write the object as if it were one, and splits it for you. When a leaf stays busy, it hands half of its keys to a new object, and your Workers follow the split without you changing a line.
+
+A split moves that half with a single storage snapshot, so it takes seconds, not minutes, and the object keeps serving while it happens.
+
+![Time to split vs data size](docs/bench/split-time.svg)
+
+![Slowest write during a split](docs/bench/split-latency.svg)
+
+Measured on Cloudflare's network: an object seeded with 1 to 128 MiB of 1 KiB rows, split once while 8 writers kept writing to random keys. No write failed in any run.
+
+| Data in the object | splittable-object | Freeze, snapshot into two new objects | v0.1: copy rows to two new objects |
+|---|---|---|---|
+| 1 MiB | 1.9 s | 1.5 s | 1.4 s |
+| 16 MiB | **2.0 s** | 3.0 s | 7.4 s |
+| 128 MiB | **5.7 s**, slowest write 5.4 s | 24.3 s, every write blocked for it | 235 s, write p95 2.4 s throughout |
+
+The times are until the new object serves with all of its data. See [what was measured and how](docs/performance.md).
+
+## Why it is fast
+
+- **Only half moves.** A leaf lives in the object named by its bits without trailing zeros, so when `01` splits, `010` stays where it is and only `011` goes to a new object. That means one copy, not two, and no object is left behind as a router.
+- **One snapshot, not a row stream.** The new object restores from `ctx.storage.snapshot()`, a point-in-time copy of the whole database made by the storage layer. It still takes longer for a bigger database, but far less than a row-by-row copy: 5.7 s against 235 s at 128 MiB.
+- **Most traffic never notices.** While the copy is made, reads go on, and so do writes to the half that stays. Only writes to the half that moves wait, and then they are sent to the new owner.
+- **Cleanup stays out of the way.** Each side deletes the half it gave away in small batches in the background. Those rows are invisible from the moment of the switch.
+
+## What you get
+
+- **One object to write.** You write methods that read and update keys, and the base class runs them on whichever leaf owns those keys.
+- **Splits under load, by itself.** A leaf splits when its call rate stays above a threshold. There are no shard counts to choose up front.
+- **Clients that find their way.** Workers learn about splits lazily, and share what they learn in the isolate and the colo cache. A stale map costs one extra hop, never a wrong answer, because splits are final.
+- **Correctness you can check.** The split protocol is an executable [Feynman](https://github.com/leostera/feynman) model, [`specs/snapshot-split.ts`](specs/snapshot-split.ts). It checks that no acknowledged write is lost or applied twice, that two objects never serve the same key, and that no read is stale, across lost messages and restarts.
+
+## When it helps, and when it does not
+
+**It helps** when one logical object holds many independent keys and outgrows one Durable Object: too many writes per second, or too much data for 10 GB. Each leaf is a full Durable Object with its own thread and storage limit.
+
+**It does not help:**
+- **One hot key.** A key always lives on one leaf.
+- **Cross-key transactions.** `update` is transactional within one leaf, and `callOneLeaf` refuses (before applying anything) when keys span leaves. Nothing spans leaves.
+- **Small loads.** Below what one object can take, a plain Durable Object is simpler and as fast.
+
+The throughput benchmarks (operations per second against concurrency, against a plain Durable Object) are still being measured; see [docs/performance.md](docs/performance.md).
 
 ## Install
 
@@ -10,31 +51,27 @@ A TypeScript base class and client for **Cloudflare Durable Objects** that split
 bun add github:leostera/splittable-object
 ```
 
-The package imports `cloudflare:workers` and requires a Workers runtime with **SQLite-backed Durable Objects** and `nodejs_compat`. Bind the same Durable Object namespace to every class that extends `SplittableObject`.
+You need SQLite-backed Durable Objects, `nodejs_compat`, and, for snapshot splits, the `durable_object_snapshots` compatibility flag. Without that flag, or in local development (where workerd has no snapshots), splits copy rows over RPC instead. That copy is slower, but it works the same way.
 
 ## Quick start
 
 ```ts
-import {
-  SplittableObject,
-  splittable,
-  type UpdateResult,
-} from "splittable-object";
+import { SplittableObject, splittable, type UpdateResult } from "splittable-object";
 
 interface Env {
   COUNTERS: DurableObjectNamespace<Counter>;
 }
 
-class Counter extends SplittableObject<Env, number> {
+export class Counter extends SplittableObject<Env, number> {
   protected nodes() {
     return this.env.COUNTERS;
   }
 
-  async add(keys: readonly string[], payloads: readonly number[]) {
+  async add(keys: readonly string[], amounts: readonly number[]) {
     return this.update(keys, (current): UpdateResult<number, number[]> => {
       const writes = new Map<string, number>();
       const result = keys.map((key, i) => {
-        const value = (current.get(key) ?? 0) + payloads[i]!;
+        const value = (current.get(key) ?? 0) + amounts[i]!;
         writes.set(key, value);
         return value;
       });
@@ -48,72 +85,52 @@ class Counter extends SplittableObject<Env, number> {
   }
 }
 
-// In a Worker handler:
+// In a Worker:
 const counters = splittable(env.COUNTERS, "account-123");
 const leaves = await counters.call(["apples", "pears"], "add", [2, 1]);
 ```
 
-Each method callable with `client.call` takes `keys` first and `payloads` second (`null` when unused); any further arguments follow. Keys and payloads are partitioned together. A `LeafResult` contains the input `keys`, their original `positions`, and that leaf's result. Use those positions to reconstruct the caller's original order.
+A method called through `client.call` takes its `keys` first and their `payloads` second (`null` when it needs none), then any other arguments. The client groups keys by leaf and returns one `LeafResult` per leaf, with the `positions` of its keys in your list.
 
-### Keeping keys together
-
-For an atomic update that requires all keys to be handled by one leaf, use `callOneLeaf`. It throws `SpansLeaves` **before applying the method** if the keys currently belong to multiple leaves. The client does not silently turn a cross-leaf operation into a non-atomic one.
-
-### Scanning all leaves
-
-A scan method takes no keys and can use `this.allRows()` to enumerate the rows owned by that leaf. Invoke it with `client.scan("methodName")`; the result is one value per leaf, not a globally ordered or transactional snapshot. During active splitting, plan for split-level results to reflect the individual calls' timing.
-
-## How splitting works
-
-1. The root Durable Object is named `${name}#`; descendants use `${name}#${bits}`, where `bits` is a hash-prefix such as `01`.
-2. A leaf counts calls (and, optionally, key counts) over a rolling window. Once its configured threshold is exceeded, it creates both children and then marks itself split. New work no longer runs on the parent.
-3. A child is adopted and begins inheriting only the rows whose hashes fall in its range. Foreground reads/updates for keys not inherited yet fetch those keys from the parent first; a background alarm copies the remaining rows in bounded batches.
-4. The parent releases each range only after the corresponding child has finished inheriting. A crash or retry can repeat adoption/copy/release safely; rows are not handed out based on an incomplete child.
-5. The client keeps known splits in isolate memory and the Workers Cache API. If a stale route reaches a split node, it learns that prefix and retries. Cached routing is only an optimization: because splits are final, a stale map may add a hop but cannot send a key to the wrong leaf.
-6. An empty object may presplit to `initialDepth` before its first user call, useful when SHA-256 keys are expected to be uniformly distributed. A node with rows does not presplit; it waits for the load policy.
-
-The implementation currently hashes keys with the first 64 bits of SHA-256. A key's ownership is determined by the corresponding most-significant-first prefix bits.
+- **All-or-nothing updates:** `callOneLeaf` runs a method on one leaf, or throws `SpansLeaves` before applying anything.
+- **Scans:** `client.scan("method")` calls a method on every leaf. It can enumerate that leaf's rows with `this.allRows()`. There is one result per leaf, not a global snapshot.
 
 ## Split policy
 
-Override `protected splitPolicy` in a subclass, or use `DEFAULT_SPLIT_POLICY` as a starting point:
-
 ```ts
 protected override splitPolicy: SplitPolicy = {
-  callsPerSecond: 400,
+  callsPerSecond: 400, // a leaf splits above this, sustained over windowSeconds
   windowSeconds: 5,
-  maxDepth: 12,
-  keysPerCall: 25,
-  initialDepth: 0,
+  maxDepth: 12,        // at most 2^12 leaves
+  keysPerCall: 25,     // a call weighs 1 + keys / keysPerCall
+  initialDepth: 0,     // presplit an empty object, for uniformly distributed keys
+  copy: "auto",        // "native" snapshots, "logical" row copy, or auto-detect
+  splitTimeoutMs: 60_000,
 };
 ```
 
-`callsPerSecond` is a per-leaf threshold. Each call weighs `1 + keys.length / keysPerCall`; `keysPerCall` defaults to 25. `maxDepth` caps the tree depth, and `initialDepth` is optional and defaults to zero. This is a request-rate heuristic, not a CPU or storage-capacity measurement. Tune it against your workload and test on the Workers runtime you deploy to. See [performance expectations and benchmark guidance](docs/performance.md) for the reference Durable Object capacity data, limitations, and a fair comparison methodology.
+The default threshold is about half of what one object handles on the edge, which leaves headroom for real work and for the split itself. Tune it with your own workload.
 
-## Subclass contract and caveats
+## Writing a subclass
 
-- `nodes()` must return the namespace used to address **all** nodes of the subclass. The class binding must include SQLite storage.
-- Routed methods must accept `(keys, payloads, ...args)` and use `read`/`update` for keyed state. `update` runs its `decide` callback synchronously inside a storage transaction; do not perform I/O there.
-- `update` provides per-node transactional updates. `callOneLeaf` can keep an operation on one leaf, but there is no cross-leaf transaction.
-- If the subclass overrides `alarm`, it must call `await super.alarm()` so inheritance and parent-release work continues.
-- If work external to the stored rows must finish before rows leave a parent (for example an outbox), override `beforeHandOut()` and make it safe to call more than once.
-- Deletions are represented by `null` in `UpdateResult.writes`. Do not mutate the input map passed to `decide` as a substitute for returning writes.
-- `allRows()` is for a leaf's scan method and is valid only while that object is a leaf.
-- Cache API failures are ignored; cache contents are not authoritative. Split depth and method arguments should stay within practical Durable Object RPC limits.
+- `nodes()` returns the namespace that every leaf of the class lives in.
+- Routed methods take `(keys, payloads, ...args)` and use `read` and `update` for keyed state. The `decide` callback of `update` runs synchronously inside a transaction, so it cannot do I/O.
+- A split copies **every table**, yours too. The original keeps its tables and any work queued in them, such as an outbox it is still delivering. The new object drops its share in `afterClone(owns)`.
+- `beforeHandOut()` runs before the copy, while writes to the moving half wait. Use it to finish work tied to rows that are about to move.
+- If you override `alarm`, call `await super.alarm()`, which activates new leaves and runs the background cleanup.
+- `splittableDescribe()` reports a leaf's bits, rows, call rate, last split and, if it gave one up, why.
 
 ## Development
 
-Requires Bun 1.3+ and a local Workers-compatible runtime. The integration suite starts the test Worker via `cf dev`; it exercises concurrent updates, compare-and-swap, manual and automatic splitting, empty presplitting, and row inheritance.
-
 ```sh
 bun install
-bun run check
-bun test
-bun run specs:check
+bun run check        # types
+bun test             # integration tests under cf dev: concurrent writes and CAS across splits, load splits, presplit, large rows, subclass tables
+bun run specs:check  # model-check the split protocol
 ```
 
-The executable system explanation lives in [`specs/splitting-and-routing.ts`](specs/splitting-and-routing.ts). It models stale-route retries and the parent/child row-handoff invariant. Run `bunx feynman run splitting-and-routing` to read its scenario traces.
+The benchmark Worker and the scripts that produced the graphs above are in [`bench/`](bench/README.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT

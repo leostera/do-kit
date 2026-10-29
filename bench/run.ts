@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-type Target = "single" | "split" | "legacy";
+type Target = "single" | "split" | "legacy" | "presplit";
 type Operation = "read" | "write";
 type Distribution = "uniform" | "hot";
 
@@ -100,9 +100,9 @@ if (!process.env.BENCH_RESULTS_NAME) writeFileSync(join(resultsDir, "latest.csv"
 console.log(`Saved ${points.length} points in ${resultsDir}`);
 }
 
-if (suites.has("load")) for (const operation of ["write", "read"] as const) {
-  for (const distribution of ["uniform", "hot"] as const) {
-    for (const target of ["single", "split", "legacy"] as const) {
+if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ?? "write,read").split(",") as Operation[]) {
+  for (const distribution of (process.env.BENCH_DISTRIBUTIONS ?? "uniform,hot").split(",") as Distribution[]) {
+    for (const target of (process.env.BENCH_TARGETS ?? "single,split,presplit,legacy").split(",") as Target[]) {
       const objectName = `${suite}-${target}-${operation}-${distribution}`;
       for (const concurrency of concurrencyLevels) {
         if (warmup) await measure({ target, operation, distribution, concurrency, objectName });
