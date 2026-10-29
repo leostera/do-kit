@@ -137,3 +137,40 @@ A separate load test of no-op Durable Object RPC calls topped out at about 1,800
 ## Running it yourself
 
 See [`bench/README.md`](../bench/README.md).
+
+## Sharded tables
+
+`ShardedTable` with 10,000 rows of 1 KiB and two indexes (`createdAt`, and `owner, createdAt`), on 1, 4, 16 and 64 shards from the start (never splitting during the run). One shard is one Durable Object running the same SQL and indexes. Writes are one-row puts of uniform keys (each updates both indexes); reads are one-row gets by key; a list operation is one page of 50 rows newest first, each caller walking its own cursor. 10 s per point; drivers scale with the calls a page makes, so the load generator is not what is measured.
+
+![Table writes](bench/table-write-throughput.svg)
+
+![Table reads](bench/table-read-throughput.svg)
+
+| Writes | 1 shard | 4 shards | 16 shards | 64 shards |
+|---|---|---|---|---|
+| 64 in flight | 638/s, p50 56 ms | 667/s | 424/s | 458/s |
+| 256 | 867/s, p50 181 ms | 1,573/s | 1,292/s | 1,357/s, p50 101 ms |
+| 1,024 | 1,011/s, p50 838 ms, p99 1,582 ms | 1,815/s | 3,666/s | 4,391/s, p50 108 ms, p99 971 ms |
+
+| Reads | 1 shard | 4 shards | 16 shards | 64 shards |
+|---|---|---|---|---|
+| 64 in flight | 783/s, p50 35 ms | 973/s | 1,005/s | 817/s |
+| 256 | 1,231/s, p50 108 ms | 1,614/s | 1,490/s | 1,468/s |
+| 1,024 | 1,488/s, p50 705 ms | 2,942/s | 5,271/s, p50 113 ms | 5,180/s, p50 130 ms |
+
+![Table listings](bench/table-list-throughput.svg)
+
+![Table listing p99](bench/table-list-p99.svg)
+
+| List pages | 1 shard | 4 shards | 16 shards | 64 shards |
+|---|---|---|---|---|
+| 1 in flight | 31/s, p50 27 ms | noisy (cold) | 8/s, p50 114 ms | 4/s, p50 246 ms |
+| 64 | 250/s, p50 231 ms | 269/s, p50 165 ms | 184/s, p50 210 ms | 50/s, p50 805 ms |
+| 256 | 363/s, p50 701 ms | 366/s | 373/s | 78/s, p50 1,394 ms |
+| 1,024 | 362/s | 397/s | 219/s, 9,671 calls failed | 231/s, 986 failed |
+
+- **Writes and reads scale with shards** once one object is the bottleneck, from about 256 in flight. Below that, one object is as fast or faster: a sharded call is a routed call.
+- **Listings do not.** A page asks every shard for its share of the page (twice limit / shards, plus two), so each shard serves every page. Throughput stays near one object's, about 370–400 pages/s, and a page waits for its slowest shard, so latency grows with the number of shards. At high load, more shards shed load sooner, because every one of them sees every page.
+- Two fixes went in while measuring: pages first scanned rows instead of seeking (10,000 rows listed at a third of the speed of 2,000), and every shard returned a full page (16 shards moved 800 rows to list 50).
+- An index stored by sort order (range-partitioned) would let a page touch one or two index shards. That is the next layer.
+

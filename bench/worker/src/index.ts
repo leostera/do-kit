@@ -757,7 +757,9 @@ export default {
 
     // One driver tops out at about 90 calls/s, whatever its concurrency: 16 in-flight calls each, so
     // the drivers are not what is measured. Fleets of 256 drivers start them.
-    const driverCount = Math.min(MAX_DRIVERS, Math.max(Math.min(16, input.concurrency), Math.ceil(input.concurrency / CALLS_PER_DRIVER)));
+    // A listing calls every shard for each page: drivers scale with the calls, not the pages.
+    const fanOut = input.operation === "list" && isTable(input.target) ? Number(input.target.slice("table-".length)) : 1;
+    const driverCount = Math.min(MAX_DRIVERS, input.concurrency, Math.max(Math.min(16, input.concurrency), Math.ceil((input.concurrency * fanOut) / CALLS_PER_DRIVER)));
     const perDriver = Math.ceil(input.concurrency / driverCount);
     const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount, concurrency: perDriver }));
     const fleets: { stub: DurableObjectStub<BenchFleet>; configs: typeof configs }[] = [];

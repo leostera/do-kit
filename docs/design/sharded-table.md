@@ -1,6 +1,6 @@
 # Design: ShardedTable
 
-Status: accepted, being built. Layer 2 of do-kit, on top of `ShardedObject`.
+Status: built. Layer 2 of do-kit, on top of `ShardedObject`.
 
 ## What it is
 
@@ -101,12 +101,31 @@ The guarantee is for rows whose sort columns do not change during the listing. A
 value changes between pages moves in the order, and may be seen twice or not at all, as with any
 keyset pagination.
 
-Nulls sort first, as in SQLite: first ascending, last descending. The client compares positions
-exactly as SQLite does: null, then numbers, then text by code point.
+### Positions and index keys
 
-The cost of a page is one call per shard, so listings slow down as an object splits. A smaller
-per-shard limit (from what earlier pages returned), or skipping shards with nothing after the
-cursor, can come later.
+Each index keeps one hidden column per row: its **index key**, the index's values and the row's
+primary key in an order-preserving encoding, as hex. Null is `00`; a number is `01` and an
+order-preserving float64; text is `02`, its UTF-8 with `00` escaped as `00 FF`, then `00`. Byte
+order is then the values' order: nulls first ascending and last descending, numbers before text,
+text by code point. The SQL index is on that column alone.
+
+A page is one range seek: `INDEXED BY` that index, `key > cursor` (or `<` descending), in index
+order. A first version compared the index's columns one by one with null-aware `OR`s; SQLite
+could not seek on that, and pages got slower as the table grew. Positions are plain strings, so
+the client compares them as strings and needs no model of SQLite's ordering. A property test
+checks the encoding against SQLite's order on random tuples.
+
+Primary-key order uses the primary key itself as the position, through SQLite's index on it.
+
+### The cost of a page
+
+A page asks each shard for its share: twice `limit / shards`, plus two, since keys spread over
+shards by hash. If the merged page comes up short, the client asks again from the frontier, up to
+three rounds. Still, every shard serves every page, so **listing throughput stays near one
+object's** however many shards there are, and a page waits for its slowest shard. Measured: about
+370–400 pages/s at 1, 4 and 16 shards; at 64 shards, a page's median at 64 in flight is 805 ms
+against 231 ms on one. Listings that must scale with shards need an index partitioned by sort
+order, not by key: the index layer.
 
 ## Counting
 

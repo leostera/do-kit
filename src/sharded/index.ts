@@ -237,8 +237,12 @@ interface Meta {
  */
 export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableObject<Env> {
   protected splitPolicy: SplitPolicy = DEFAULT_SPLIT_POLICY;
-  /** The namespace this class is bound to: to reach siblings. */
-  protected abstract nodes(): DurableObjectNamespace<ShardedObject<Env, V>>;
+  /**
+   * The binding of this class, to reach its other shards: `return this.env.COUNTERS`. Typed loosely
+   * because a binding's type names the subclass, which a base class cannot.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  protected abstract nodes(): DurableObjectNamespace<any>;
 
   /** `splitPolicy`, checked once (a subclass sets it after the constructor here runs). */
   private get policy(): SplitPolicy {
@@ -742,7 +746,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   private node(bits: string): DurableObjectStub<ShardedObject<Env, V>> {
-    const nodes = this.nodes();
+    const nodes = this.nodes() as DurableObjectNamespace<ShardedObject<Env, V>>;
     return nodes.get(nodes.idFromName(shardObjectName(this.meta!.name, bits)));
   }
 

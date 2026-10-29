@@ -12,6 +12,7 @@ The numbers and graphs in the [README](../README.md) and [docs/performance.md](.
 | `split` | Sharded object, splitting by load (400 calls/s per shard). |
 | `presplit` | Sharded object, starting as 16 shards: steady-state capacity with no split while measuring. |
 | `legacy` | v0.1 of this library (then `splittable-object`), which split by streaming rows to two children (`worker/src/legacy/`, for comparison only). |
+| `table-1`, `table-4`, `table-16`, `table-64` | A `ShardedTable` (10,000 rows of 1 KiB, two indexes) starting as that many shards and never splitting: `write` (put), `read` (get) and `list` (a page of 50 newest first, walking a cursor). Drivers scale with the calls a page makes. |
 | `two-copy` | A design that freezes, snapshots into two children and stays as a router (`worker/src/two-copy/`, for comparison only). |
 
 Driver Durable Objects generate the load from several regions, using `locationHint` (placement is advisory). Each driver keeps at most 16 calls in flight, because one driver completes only about 90 calls/s. With fewer drivers, you measure the drivers, not the target.
