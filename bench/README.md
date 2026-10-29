@@ -1,38 +1,56 @@
-# Deployed performance benchmark
+# Benchmarks
 
-This is a separate `cf` CLI Worker project. It deploys three SQLite-backed Durable Object classes: an ordinary single-object key/value baseline, the same API built on `SplittableObject`, and distributed load-driver objects. The driver classes use advisory `locationHint`s across several regions; placement is not guaranteed.
+The numbers and graphs in the [README](../README.md) and [docs/performance.md](../docs/performance.md) come from here. You can run them on your own account.
+
+## What is in the Worker
+
+`worker/` is a Worker with SQLite-backed Durable Objects that all serve the same one-key `put`/`get` interface:
+
+| Target | What it is |
+|---|---|
+| `single` | One plain Durable Object, the baseline. |
+| `split` | `splittable-object`, splitting by load (400 calls/s per leaf). |
+| `presplit` | `splittable-object`, starting as 16 leaves: steady-state capacity with no split while measuring. |
+| `legacy` | `splittable-object` v0.1, which split by streaming rows to two children (`worker/src/legacy/`, for comparison only). |
+| `two-copy` | A design that freezes, snapshots into two children and stays as a router (`worker/src/two-copy/`, for comparison only). |
+
+Driver Durable Objects generate the load from several regions, using `locationHint` (placement is advisory).
 
 ## What a run measures
 
-`bun run bench:run` exercises one-key RPC reads and writes with 1 KiB values at 1, 16, 64, and 128 concurrent in-flight operations. Each workload uses a fresh object name; concurrency steps run in increasing order so adaptive splits can settle. Read workloads seed their keyspace before timing. The run tests both uniform keys and one hot key. A hot key should remain bound to one leaf and demonstrates the limit of key-based splitting.
+`bun run bench:run` runs two suites. Pick them with `BENCH_SUITES=load,split`.
 
-Each result includes successful operations/s, errors, logical MiB/s, p50/p95/p99 latency, maximum observed per-method latency, and split leaf/row/depth counts. Percentiles use one-millisecond histogram buckets; max is kept separately at hundredth-millisecond precision. Driver-to-object RPC latency is measured, not the time for the external control request.
+- **load:** one-key writes and reads of 1 KiB values, on uniform keys and on one hot key, at 1, 16, 64, 256 and 1,024 in-flight calls (`BENCH_CONCURRENCY`). Each level runs once unmeasured, so splits settle, then for 10 s measured. It records operations/s, MiB/s, p50/p95/p99/max latency, errors, and how many leaves the object had.
+- **split:** for each size in `BENCH_SPLIT_MIB` (default 1, 16, 128 and 1,024 MiB), it seeds a fresh object, starts 8 writers on random keys, and splits it once. It records:
+  - when the new owner served;
+  - when every row lived only at its owner;
+  - write latency throughout;
+  - errors.
 
-The driver count is capped at eight and spread with location hints. Results are specific to the deployment, placement, workload, and runtime version. Run the suite more than once before drawing conclusions. Increasing offered concurrency is not the same as increasing throughput; report both.
+  Each split runs as a background job on the Worker that the script polls, since a large one takes minutes.
 
-## Deploy and run
+Results go to `results/latest.json` (or `results/$BENCH_RESULTS_NAME.json`) after every point, and `bun run bench:plot` draws the graphs into `docs/bench/`.
 
-Requires Bun 1.4+, the `cf` CLI, and an authenticated `work` profile with access to the intended account. Never commit `.dev.vars` or a bearer token.
+## Running it
+
+You need Bun, the `cf` CLI, and an account you are happy to fill with test objects. Runs create Durable Objects and data that are not cleaned up.
 
 ```sh
 cd bench/worker
-bun install --frozen-lockfile
-cf auth activate work
-# Set CLOUDFLARE_ACCOUNT_ID to the intended account before deploying.
-# Generate a unique BENCH_TOKEN locally and save it in .dev.vars (ignored by Git).
+bun install
+# A random token that guards the endpoints, kept out of git:
+echo "BENCH_TOKEN=$(openssl rand -hex 32)" > .dev.vars
 cf deploy --secrets-file .dev.vars
 ```
 
-Copy the deployed Worker URL to `BENCH_URL`, and load `BENCH_TOKEN` from `.dev.vars`. If the Worker is behind Access, provide a short-lived `BENCH_ACCESS_TOKEN` in the shell; it is sent only as an HTTP header and is never written to result files.
+Then run it from the repository root:
 
 ```sh
-BENCH_URL=https://<deployed-worker> \
-BENCH_TOKEN=<from-.dev.vars> \
-BENCH_ACCESS_TOKEN=<short-lived-access-token-if-required> \
-bun run bench:run
+set -a; . bench/worker/.dev.vars; set +a
+BENCH_URL=https://<your-worker>.workers.dev bun run bench:run
 bun run bench:plot
 ```
 
-The endpoint requires both the bearer token and any applicable Access authentication. Keep the secret local. Use an account and Worker dedicated to benchmarking; the run creates persistent Durable Objects and writes test data. Current defaults seed 10,000 keys with 1 KiB values for read workloads. Results do not automatically clean up these objects, so use fresh names and explicitly remove test data through an approved cleanup plan rather than reusing production objects.
+If the Worker is behind Cloudflare Access, set `BENCH_ACCESS_TOKEN` to a short-lived token (`cloudflared access token -app=$BENCH_URL`). It is sent as a header and never written to results.
 
-`bench/results/latest.json` and `.csv` contain raw results; `docs/performance.svg` is generated from the latest run. Results should be reviewed before committing: they can contain account-specific performance details. Do not commit credentials, Access tokens, or private account identifiers.
+Results depend on placement, load, runtime version and the day. Run more than once before drawing conclusions.

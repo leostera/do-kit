@@ -1,0 +1,133 @@
+{
+  "suite": "split-2026-10-29",
+  "generatedAt": "2026-10-29T14:12:29Z",
+  "points": [],
+  "splits": [
+    {
+      "target": "split",
+      "bytes": 1048576,
+      "copy": "native",
+      "servingMs": 1890,
+      "doneMs": 2002,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 29,
+        "p95": 69,
+        "p99": 1815,
+        "max": 1896
+      }
+    },
+    {
+      "target": "two-copy",
+      "bytes": 1048576,
+      "copy": "native",
+      "servingMs": 1498,
+      "doneMs": 1498,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 25,
+        "p95": 42,
+        "p99": 1530,
+        "max": 1546
+      }
+    },
+    {
+      "target": "legacy",
+      "bytes": 1048576,
+      "copy": "rows",
+      "servingMs": 1061,
+      "doneMs": 1380,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 25,
+        "p95": 54,
+        "p99": 100,
+        "max": 180
+      }
+    },
+    {
+      "target": "split",
+      "bytes": 16777216,
+      "copy": "native",
+      "servingMs": 1985,
+      "doneMs": 5779,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 23,
+        "p95": 102,
+        "p99": 458,
+        "max": 1951
+      }
+    },
+    {
+      "target": "two-copy",
+      "bytes": 16777216,
+      "copy": "native",
+      "servingMs": 2998,
+      "doneMs": 2998,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 24,
+        "p95": 116,
+        "p99": 2993,
+        "max": 3029
+      }
+    },
+    {
+      "target": "legacy",
+      "bytes": 16777216,
+      "copy": "rows",
+      "servingMs": 997,
+      "doneMs": 7413,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 25,
+        "p95": 264,
+        "p99": 886,
+        "max": 1584
+      }
+    },
+    {
+      "target": "split",
+      "bytes": 134217728,
+      "copy": "native",
+      "servingMs": 5697,
+      "doneMs": 43809,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 74,
+        "p95": 179,
+        "p99": 363,
+        "max": 5428
+      }
+    },
+    {
+      "target": "two-copy",
+      "bytes": 134217728,
+      "copy": "native",
+      "servingMs": 24279,
+      "doneMs": 24279,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 22,
+        "p95": 42,
+        "p99": 24326,
+        "max": 24349
+      }
+    },
+    {
+      "target": "legacy",
+      "bytes": 134217728,
+      "copy": "rows",
+      "servingMs": 951,
+      "doneMs": 234822,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 24,
+        "p95": 2380,
+        "p99": 5332,
+        "max": 11617
+      }
+    }
+  ]
+}

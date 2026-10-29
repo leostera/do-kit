@@ -14,6 +14,7 @@ export default defineConfig(() => ({
     env: {
       BENCH_DRIVERS: bindings.durableObject({ worker: NAME, exportName: "BenchDriver" }),
       SPLIT_JOBS: bindings.durableObject({ worker: NAME, exportName: "SplitBenchJob" }),
+      PRESPLIT: bindings.durableObject({ worker: NAME, exportName: "PresplitObject" }),
       SINGLE: bindings.durableObject({ worker: NAME, exportName: "SingleObject" }),
       SPLIT: bindings.durableObject({ worker: NAME, exportName: "SplitObject" }),
       LEGACY: bindings.durableObject({ worker: NAME, exportName: "LegacySplitObject" }),
@@ -24,6 +25,7 @@ export default defineConfig(() => ({
     exports: {
       BenchDriver: exports.durableObject({ storage: "sqlite" }),
       SplitBenchJob: exports.durableObject({ storage: "sqlite" }),
+      PresplitObject: exports.durableObject({ storage: "sqlite" }),
       SingleObject: exports.durableObject({ storage: "sqlite" }),
       SplitObject: exports.durableObject({ storage: "sqlite" }),
       LegacySplitObject: exports.durableObject({ storage: "sqlite" }),

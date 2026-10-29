@@ -2,7 +2,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-type Target = "single" | "split" | "legacy";
+type Target = "single" | "split" | "presplit" | "legacy";
 interface Point {
   target: Target;
   operation: "read" | "write";
@@ -42,15 +42,15 @@ const results = JSON.parse(await readFile(join(import.meta.dir, "results", "late
 const outDir = join(import.meta.dir, "..", "docs", "bench");
 await mkdir(outDir, { recursive: true });
 
-const COLORS: Record<Target | "two-copy", string> = { single: "#667085", split: "#e4572e", legacy: "#2e86ab", "two-copy": "#7a5af8" };
-const SPLIT_NAMES = { split: "this package: move one half, one snapshot", "two-copy": "freeze, snapshot into two children", legacy: "v0.1: copy rows to both children" };
-const NAMES: Record<Target, string> = { single: "one Durable Object", split: "splittable (snapshot splits)", legacy: "splittable (row-copy splits, v0.1)" };
+const COLORS: Record<Target | "two-copy", string> = { single: "#667085", split: "#e4572e", presplit: "#f79009", legacy: "#2e86ab", "two-copy": "#7a5af8" };
+const SPLIT_NAMES = { split: "splittable-object: move one half (snapshot)", "two-copy": "freeze, snapshot into two new objects", legacy: "v0.1: copy rows to two new objects" };
+const NAMES: Record<Target, string> = { single: "one Durable Object", split: "splittable-object", presplit: "splittable-object, 16 leaves from the start", legacy: "splittable-object v0.1 (row copy)" };
 const W = 1200;
-const H = 560;
+const PLOT_H = 380;
 const L = 96;
 const R = 40;
 const T = 92;
-const B = 120;
+const LEGEND_ROW = 28;
 
 function niceMax(v: number): number {
   const p = 10 ** Math.floor(Math.log10(v));
@@ -71,7 +71,9 @@ function chart(c: Chart): string {
   const yMin = c.yLog ? 10 ** Math.floor(Math.log10(Math.max(1, Math.min(...ys)))) : 0;
   const yMax = c.yLog ? 10 ** Math.ceil(Math.log10(Math.max(...ys) * 1.05)) : niceMax(Math.max(1, ...ys) * 1.08);
   const pw = W - L - R;
-  const ph = H - T - B;
+  const ph = PLOT_H;
+  const perRow = 2;
+  const H = T + ph + 84 + Math.ceil(c.series.length / perRow) * LEGEND_ROW + 12;
   const sx = (x: number) => L + (c.xLog ? Math.log2(x / xMin) / Math.log2(xMax / xMin) : (x - xMin) / (xMax - xMin)) * pw;
   const sy = (y: number) => T + ph - (c.yLog ? Math.log10(Math.max(y, yMin) / yMin) / Math.log10(yMax / yMin) : y / yMax) * ph;
   const yTicks = c.yLog ? Array.from({ length: Math.log10(yMax / yMin) + 1 }, (_, i) => yMin * 10 ** i) : Array.from({ length: 6 }, (_, i) => (yMax * i) / 5);
@@ -85,8 +87,7 @@ function chart(c: Chart): string {
       return `<polyline points="${path}" fill="none" stroke="${s.color}" stroke-width="4" stroke-linejoin="round" ${s.dash ? `stroke-dasharray="${s.dash}"` : ""}/>${pts.map(([x, y]) => `<circle cx="${sx(x).toFixed(1)}" cy="${sy(y).toFixed(1)}" r="5.5" fill="${s.color}"/>`).join("")}`;
     })
     .join("");
-  const perRow = c.series.length > 4 ? 3 : 4;
-  const legend = c.series.map((s, i) => `<g transform="translate(${L + (i % perRow) * (pw / perRow)},${H - 40 + Math.floor(i / perRow) * 24 - (Math.ceil(c.series.length / perRow) - 1) * 24})"><line x1="0" x2="30" y1="0" y2="0" stroke="${s.color}" stroke-width="4" ${s.dash ? `stroke-dasharray="${s.dash}"` : ""}/><text x="40" y="5" class="legend">${s.label}</text></g>`).join("");
+  const legend = c.series.map((s, i) => `<g transform="translate(${L + (i % perRow) * (pw / perRow)},${T + ph + 92 + Math.floor(i / perRow) * LEGEND_ROW})"><line x1="0" x2="30" y1="0" y2="0" stroke="${s.color}" stroke-width="4" ${s.dash ? `stroke-dasharray="${s.dash}"` : ""}/><text x="40" y="5" class="legend">${s.label}</text></g>`).join("");
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 <style>text{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;fill:#101828}.title{font-size:26px;font-weight:700}.sub{font-size:15px;fill:#475467}.tick{font-size:14px;fill:#667085}.label{font-size:15px;font-weight:600;fill:#344054}.legend{font-size:15px}.grid{stroke:#eaecf0}.axisline{stroke:#344054}</style>
 <rect width="${W}" height="${H}" fill="#fff"/>
@@ -102,7 +103,7 @@ ${legend}
 const uniform = results.points.filter((p) => p.distribution === "uniform");
 const payload = uniform[0]?.payloadBytes ?? 1024;
 const levels = [...new Set(uniform.map((p) => p.concurrency))].sort((a, b) => a - b);
-const targets = (["single", "split", "legacy"] as const).filter((t) => uniform.some((p) => p.target === t));
+const targets = (["single", "split", "presplit", "legacy"] as const).filter((t) => uniform.some((p) => p.target === t));
 const sel = (target: Target, operation: "read" | "write", value: (p: Point) => number): [number, number][] => uniform.filter((p) => p.target === target && p.operation === operation).map((p) => [p.concurrency, value(p)]);
 const runNote = `${payload}-byte values, uniform keys, 10 s per point · run ${results.suite}, ${results.generatedAt.slice(0, 10)}`;
 
