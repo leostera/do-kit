@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-2b84a8b65f9e",
+  "generatedAt": "2026-10-29T16:22:22.368Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1024,
+      2048
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-2b84a8b65f9e-presplit-read-control-plane",
+      "driverCount": 64,
+      "successes": 37013,
+      "errors": 0,
+      "elapsedMs": 10924,
+      "operationsPerSecond": 3388.227755400952,
+      "mebibytesPerSecond": 3.308816167383742,
+      "latencyMs": {
+        "p50": 191,
+        "p95": 746,
+        "p99": 963,
+        "max": 1637
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-2b84a8b65f9e-presplit-read-control-plane",
+      "driverCount": 128,
+      "successes": 41786,
+      "errors": 0,
+      "elapsedMs": 10987,
+      "operationsPerSecond": 3803.2219896241013,
+      "mebibytesPerSecond": 3.7140839742422864,
+      "latencyMs": {
+        "p50": 400,
+        "p95": 1368,
+        "p99": 1692,
+        "max": 2679
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 4
+      }
+    }
+  ],
+  "splits": []
+}

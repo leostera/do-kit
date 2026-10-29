@@ -10,12 +10,14 @@ A split moves that half with a single storage snapshot, so it takes seconds, not
 
 ![Throughput vs concurrency](docs/bench/throughput.svg)
 
-At 2,048 writes in flight, a single Durable Object is past its limit. It completes 1,435 writes/s and refuses 26,816 calls in 10 seconds. The same object split into 16 leaves completes **9,960 writes/s and refuses none**.
+At 2,048 writes in flight, a single Durable Object is past its limit. It completes 1,435 writes/s and refuses 26,816 calls in 10 seconds. The same object split into 16 leaves completes **9,960 writes/s and refuses none**. Reads tell the same story: 1,425 reads/s with 16,901 failed calls, against **8,182 reads/s with none**.
 
-| 1 KiB writes, uniform keys | One Durable Object | splittable-object, 16 leaves |
+| 1 KiB values, uniform keys | One Durable Object | splittable-object, 16 leaves |
 |---|---|---|
 | **Throughput**, 1,024 in flight | 1,499 writes/s | **5,207 writes/s** |
 | **Throughput**, 2,048 in flight | 1,435 writes/s, 26,816 calls refused in 10 s | **9,960 writes/s, none refused** |
+| **Reads**, 1,024 in flight | 1,653 reads/s, median 479 ms | **4,587 reads/s, median 106 ms** |
+| **Reads**, 2,048 in flight | 1,425 reads/s, 16,901 calls failed in 10 s | **8,182 reads/s, none failed** |
 | **Data written**, 2,048 in flight | 1.4 MiB/s | **9.7 MiB/s** |
 | **Median latency**, 1,024 in flight | 613 ms | **103 ms** |
 | **p99 latency**, 2,048 in flight | 1,822 ms | **765 ms** |
@@ -27,7 +29,21 @@ At 2,048 writes in flight, a single Durable Object is past its limit. It complet
 
 ![Data throughput vs concurrency](docs/bench/bandwidth.svg)
 
-These were measured on Cloudflare's network, with up to 128 load-driver Durable Objects in several regions. Each point is 10 s of one-key writes. The 16-leaf object was presplit, so these numbers show the capacity that splitting gives, not the cost of the splits along the way. That cost is next. More latency graphs ([p50](docs/bench/latency-p50.svg), [p95](docs/bench/latency-p95.svg), [max](docs/bench/latency-max.svg)) and the method are in [docs/performance.md](docs/performance.md).
+These were measured on Cloudflare's network, with up to 128 load-driver Durable Objects in several regions. Each point is 10 s of one-key reads or writes. The 16-leaf object was presplit, so these numbers show the capacity that splitting gives, not the cost of the splits along the way. That cost is next. More latency graphs ([p50](docs/bench/latency-p50.svg), [p95](docs/bench/latency-p95.svg), [max](docs/bench/latency-max.svg)) and the method are in [docs/performance.md](docs/performance.md).
+
+### A control plane: a handful of hot objects
+
+Ten configuration objects, a few far more popular than the rest (Zipf), read 95% of the time.
+
+![Control plane: throughput vs concurrency](docs/bench/control-plane-throughput.svg)
+
+| In flight | One Durable Object | splittable-object, splitting by load | splittable-object, 16 leaves |
+|---|---|---|---|
+| 256 | 633/s, p99 1,165 ms | 745/s | 1,849/s, p99 977 ms |
+| 1,024 | 867/s, p99 1,999 ms | 2,894/s | 3,388/s, p99 963 ms |
+| 2,048 | 665/s, **43,951 calls failed** | 3,081/s, 11,175 calls failed | **3,803/s, none failed** |
+
+With only ten keys, splitting still spreads them over several objects. It cannot split a single key, though, and the most popular object takes about a third of all calls, so throughput levels off near 3,800/s: the most one object can serve of that one key. Splitting by load also kept splitting past the number of keys (to 25 leaves for 10 keys), which cannot help. If one object is your bottleneck, look at the [control plane graphs](docs/performance.md#a-control-plane-a-handful-of-hot-objects).
 
 ## Splits take seconds
 
@@ -84,7 +100,7 @@ These are estimates from the [published prices](https://developers.cloudflare.co
 **It helps** when one logical object holds many independent keys and outgrows one Durable Object: too many writes per second, or too much data for 10 GB. Each leaf is a full Durable Object with its own thread and storage limit.
 
 **It does not help:**
-- **One hot key.** A key always lives on one leaf.
+- **One hot key.** A key always lives on one leaf, so the most popular key caps what a leaf can serve. The split policy does not yet know this, and keeps splitting a leaf that is hot because of one key.
 - **Cross-key transactions.** `update` is transactional within one leaf, and `callOneLeaf` refuses (before applying anything) when keys span leaves. Nothing spans leaves.
 - **Small loads.** Below what one object can take, a plain Durable Object is simpler and as fast.
 

@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-1940e2e8601a",
+  "generatedAt": "2026-10-29T16:24:53.814Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1,
+      16,
+      64,
+      256,
+      1024,
+      2048
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 1,
+      "successes": 660,
+      "errors": 0,
+      "elapsedMs": 10004,
+      "operationsPerSecond": 65.9736105557777,
+      "mebibytesPerSecond": 0.06442735405837666,
+      "latencyMs": {
+        "p50": 15,
+        "p95": 23,
+        "p99": 30,
+        "max": 117
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 16,
+      "successes": 3688,
+      "errors": 0,
+      "elapsedMs": 10122,
+      "operationsPerSecond": 364.354870578937,
+      "mebibytesPerSecond": 0.35581530329974315,
+      "latencyMs": {
+        "p50": 21,
+        "p95": 151,
+        "p99": 216,
+        "max": 395
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 16,
+      "successes": 10531,
+      "errors": 0,
+      "elapsedMs": 10496,
+      "operationsPerSecond": 1003.3346036585366,
+      "mebibytesPerSecond": 0.9798189488852896,
+      "latencyMs": {
+        "p50": 34,
+        "p95": 265,
+        "p99": 390,
+        "max": 593
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 16,
+      "successes": 13497,
+      "errors": 0,
+      "elapsedMs": 10976,
+      "operationsPerSecond": 1229.682944606414,
+      "mebibytesPerSecond": 1.200862250592201,
+      "latencyMs": {
+        "p50": 111,
+        "p95": 753,
+        "p99": 1116,
+        "max": 1565
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 64,
+      "successes": 17976,
+      "errors": 0,
+      "elapsedMs": 10876,
+      "operationsPerSecond": 1652.8135343876427,
+      "mebibytesPerSecond": 1.6140757171754323,
+      "latencyMs": {
+        "p50": 479,
+        "p95": 1056,
+        "p99": 1300,
+        "max": 1990
+      },
+      "topology": null
+    }
+  ],
+  "splits": []
+}

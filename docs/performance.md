@@ -61,6 +61,16 @@ The throughput benchmark sends one-key writes of 1 KiB values to uniform keys fr
 | 1,024 | 1,499 writes/s, p50 613 ms, p99 1,334 ms | 5,207 writes/s, p50 103 ms, p99 709 ms |
 | 2,048 | 1,435 writes/s, p99 1,822 ms, **26,816 calls refused** | 9,960 writes/s, p50 126 ms, p99 765 ms, none refused |
 
+Reads, in the same way:
+
+| In flight | One Durable Object | splittable-object, 16 leaves |
+|---|---|---|
+| 1 | 66 reads/s, p50 15 ms | 103 reads/s, p50 10 ms |
+| 64 | 1,003 reads/s, p50 34 ms | 1,181 reads/s, p50 34 ms |
+| 256 | 1,230 reads/s, p50 111 ms | 1,839 reads/s, p50 85 ms |
+| 1,024 | 1,653 reads/s, p50 479 ms, p99 1,300 ms | 4,587 reads/s, p50 106 ms, p99 1,088 ms |
+| 2,048 | 1,425 reads/s, p99 1,837 ms, **16,901 calls failed** | 8,182 reads/s, p50 118 ms, p99 1,129 ms, none failed |
+
 ![Write latency p99 vs concurrency](bench/latency-p99.svg)
 
 ![Failed calls vs concurrency](bench/errors.svg)
@@ -71,9 +81,32 @@ The throughput benchmark sends one-key writes of 1 KiB values to uniform keys fr
 - **16 leaves keep their median latency near 100 ms** while writes grow from 1,438/s to 9,960/s, and they had not saturated at the highest load we offered.
 - **At low load, one object can be faster.** With one call in flight, a leaf answered in 69 ms against 14 ms. A new leaf is placed near the object that created it, not near the caller, so some keys live farther away. Splitting pays off when one object is the bottleneck, not before.
 - **The load generator matters.** A driver Durable Object completes about 90 calls/s, however many it keeps in flight. An earlier run with 64 calls per driver capped every target near 1,500 writes/s, and made splitting look useless. The graphs above use the fixed harness.
-- **Not yet measured with this harness:** reads, an object that splits by load while measured (the run stopped with an error from the controlling Worker at 256 in flight), and a single hot key. A hot key cannot be split: it always lives on one leaf. In an earlier run, a hot key also kept triggering splits that could not help, which is a known gap in the split policy.
+- **Read runs seed their keys from one driver, with retries.** When a hundred drivers seeded at once, they overloaded the single object before it was measured.
 
 More graphs from the same run: [latency p50](bench/latency-p50.svg), [p95](bench/latency-p95.svg), [max](bench/latency-max.svg), and [storage ceiling](bench/capacity.svg) (leaves × the 10 GB limit of one object).
+
+## A control plane: a handful of hot objects
+
+Ten objects, `config-0` to `config-9`, with Zipf popularity (s = 1.1): the most popular gets about a third of the calls. 95% of calls read and 5% write 1 KiB.
+
+![Control plane: throughput vs concurrency](bench/control-plane-throughput.svg)
+
+![Control plane: p99 latency vs concurrency](bench/control-plane-p99.svg)
+
+![Control plane: failed calls vs concurrency](bench/control-plane-errors.svg)
+
+| In flight | One Durable Object | splittable-object, splitting by load | splittable-object, 16 leaves |
+|---|---|---|---|
+| 1 | 37/s, p50 26 ms | 5/s (p99 8.7 s: splitting began) | 132/s, p50 8 ms |
+| 16 | 206/s, p50 56 ms | 164/s, p50 79 ms | 321/s, p50 37 ms |
+| 64 | 558/s, p50 68 ms | 377/s, 2 leaves | 1,100/s, p50 36 ms |
+| 256 | 633/s, p50 239 ms, p99 1,165 ms | 745/s, 6 leaves, p99 6.3 s | 1,849/s, p50 78 ms, p99 977 ms |
+| 1,024 | 867/s, p50 1,023 ms, p99 1,999 ms | 2,894/s, 15 leaves | 3,388/s, p50 191 ms, p99 963 ms |
+| 2,048 | 665/s, **43,951 calls failed** | 3,081/s, 25 leaves, 11,175 failed | 3,803/s, p50 400 ms, p99 1,692 ms, none failed |
+
+- **Even ten keys gain from splitting.** They land on different leaves, so the object's work is shared.
+- **The most popular key sets the ceiling.** A key always lives on one leaf, and here one key takes a third of the calls. That leaf runs out of capacity near 3,800 calls/s in total.
+- **Splitting by load overshoots.** It went to 25 leaves for 10 keys. Splits that leave a hot key where it was do not help, but they still pause writes to the half that moves. The split policy should stop splitting a leaf whose load comes from one key. That is not done yet.
 
 ## Cost
 
