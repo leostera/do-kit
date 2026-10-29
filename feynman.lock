@@ -20,11 +20,11 @@
     "src/sharded/index.ts#ShardedObject.owns": "d1a6c9106512",
     "src/sharded/index.ts#ShardedObject.read": "9a5dcf8d68f9",
     "src/sharded/index.ts#ShardedObject.shardedActivate": "a39f8ab29aa7",
-    "src/sharded/index.ts#ShardedObject.shardedCall": "832bc31573a6",
+    "src/sharded/index.ts#ShardedObject.shardedCall": "4b235a87d16d",
     "src/sharded/index.ts#ShardedObject.shardedClaim": "26e7c24ac952",
     "src/sharded/index.ts#ShardedObject.shardedReceive": "8dd469e2bc6c",
     "src/sharded/index.ts#ShardedObject.shardedRestore": "9af6ac56dff1",
-    "src/sharded/index.ts#ShardedObject.shardedScan": "f9c00c77219a",
+    "src/sharded/index.ts#ShardedObject.shardedScan": "5089e00bdda4",
     "src/sharded/index.ts#ShardedObject.split": "8555e800d9a1",
     "src/sharded/index.ts#ShardedObject.update": "e757c263164b",
     "src/sharded/index.ts#ShardedObject.waitForHold": "b4d682f943bf",
@@ -33,7 +33,7 @@
     "src/table/client.ts#perShardLimit": "4fb242e403e9",
     "src/table/index.ts#ShardedTable.cleanupForeign": "46ce9716e350",
     "src/table/index.ts#ShardedTable.page": "39b409eb6be6",
-    "src/table/index.ts#ShardedTable.tablePage": "1ebd0ecefa89",
+    "src/table/index.ts#ShardedTable.tablePage": "d4a1840db67f",
     "src/table/schema.ts#pageRequest": "c129ce2d7ccb"
   }
 }

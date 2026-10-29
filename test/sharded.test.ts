@@ -384,6 +384,8 @@ test("a shard keeps a record of its splits, and counts what it answered", async 
   expect(root.counters.notReady).toBeGreaterThanOrEqual(record!.notReady);
   expect(root.counters.held).toBe(record!.held);
   expect(root.counters.calls).toBeGreaterThanOrEqual(2);
+  expect(root.counters.ok).toBeGreaterThanOrEqual(1); // the first add
+  expect(root.counters.ok).toBeLessThan(root.counters.calls); // held writes answered "not ready" from inside
 
   const sibling = await describe("m", name, "1");
   expect(sibling.splits).toEqual([]); // a new shard starts its own record

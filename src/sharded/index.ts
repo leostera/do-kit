@@ -139,8 +139,17 @@ export interface SplitRecord {
 export interface CallCounters {
   /** When counting started: when this object was last started. */
   readonly since: number;
-  /** Routed calls and scans this object served (whatever they then answered). */
+  /**
+   * Routed calls and scans that reached a method here: `ok` of them returned, the rest answered
+   * "moved" or "not ready" from inside it (a write released by a split as "moved", or held past
+   * `holdWaitMs`) or threw.
+   */
   readonly calls: number;
+  readonly ok: number;
+  /**
+   * Every "moved", "not ready" and "stale" answer, whether given on arrival (the caller's map is
+   * out of date; not in `calls`) or from inside a method (in `calls`).
+   */
   readonly moved: number;
   readonly notReady: number;
   readonly stale: number;
@@ -307,7 +316,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private quietUntil = Date.now();
   /** The split in progress here: writes to `right` wait for `released`. */
   private hold: Hold | null = null;
-  private counters = { since: Date.now(), calls: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
+  private counters = { since: Date.now(), calls: 0, ok: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
   /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
   private receiving: number | null = null;
   /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
@@ -524,7 +533,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.countCall(keys.length);
     const fn = this.routedMethod(method);
     try {
-      return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args) };
+      const ok = await (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args);
+      this.counters.ok++;
+      return { ok };
     } catch (error) {
       if (error instanceof Moved) return this.answered(this.moved(bits));
       if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
@@ -539,7 +550,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.counters.calls++;
     const fn = this.routedMethod(method);
     try {
-      return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, ...args) };
+      const ok = await (fn as (...a: unknown[]) => Promise<unknown>).call(this, ...args);
+      this.counters.ok++;
+      return { ok };
     } catch (error) {
       if (error instanceof Moved) return this.answered(this.moved(bits));
       throw error;
