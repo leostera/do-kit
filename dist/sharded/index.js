@@ -134,6 +134,8 @@ export class ShardedObject extends DurableObject {
     quietUntil = Date.now();
     /** The split in progress here: writes to `right` wait for `released`. */
     hold = null;
+    /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
+    receiving = null;
     /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
     presplitting = null;
     /** This shard had rows when it could have presplit: it splits by load only. */
@@ -584,7 +586,7 @@ export class ShardedObject extends DurableObject {
             .exec("SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY type DESC, name")
             .toArray()
             .filter((o) => o.sql !== null);
-        await target.shardedReceiveSchema(meta.name, right, schema);
+        await target.shardedReceiveSchema(meta.name, right, epoch, schema);
         let first = true;
         for (const table of this.tables()) {
             const order = this.pageOrder(table, schema.find((o) => o.name === table)?.sql ?? "");
@@ -610,7 +612,7 @@ export class ShardedObject extends DurableObject {
                 }
                 if (rows.length === 0 && !first)
                     break;
-                await target.shardedReceive(meta.name, right, first, table, order.rowid ? names.slice(1) : names, rows);
+                await target.shardedReceive(meta.name, right, epoch, first, table, order.rowid ? names.slice(1) : names, rows);
                 first = false;
                 if (rows.length === 0 || (rows.length < COPY_PAGE_ROWS && bytes < COPY_BATCH_BYTES))
                     break;
@@ -794,10 +796,12 @@ export class ShardedObject extends DurableObject {
      * The logical copy's tables and indexes: replaces this object's with them. What is here is
      * not a serving shard's (an unused object, or the copy of an abandoned attempt, maybe made
      * under an older schema), so it all goes: the copy must have the source's schema exactly.
+     * From here on this object takes the batches of attempt `epoch` only.
      */
-    async shardedReceiveSchema(_name, _bits, objects) {
+    async shardedReceiveSchema(_name, _bits, epoch, objects) {
         if (this.serving())
             throw new Error("refusing to change a serving shard");
+        this.receiving = epoch;
         this.ctx.storage.transactionSync(() => {
             for (const t of this.tables())
                 this.sql.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(t)}`);
@@ -806,10 +810,17 @@ export class ShardedObject extends DurableObject {
                 this.sql.exec(o.sql);
         });
     }
-    /** One batch of the logical copy: rows of one table. The first batch wipes every table. */
-    async shardedReceive(_name, _bits, first, table, columns, rows) {
-        if (first && this.serving())
+    /**
+     * One batch of the logical copy, from attempt `epoch`: rows of one table. The first batch wipes
+     * every table. A batch can arrive late, after its attempt was abandoned (and another began, or
+     * even finished): it would put back rows as they were then, so only the batches of the attempt
+     * whose schema this object took are written, and never on a serving shard.
+     */
+    async shardedReceive(_name, _bits, epoch, first, table, columns, rows) {
+        if (this.serving())
             throw new Error("refusing to overwrite a serving shard");
+        if (this.receiving !== epoch)
+            throw new Error(`refusing a batch of split attempt ${epoch}: this object takes attempt ${this.receiving ?? "none"}`);
         this.ctx.storage.transactionSync(() => {
             if (first) {
                 for (const t of this.tables())
@@ -828,6 +839,8 @@ export class ShardedObject extends DurableObject {
     }
     /** The logical copy is complete: it holds the source's meta, from this split. */
     async shardedReceiveDone(name, bits, epoch) {
+        if (this.receiving !== epoch)
+            return false;
         this.meta = this.loadMeta();
         const meta = this.meta;
         return meta !== null && meta.name === name && meta.splitting === epoch && `${meta.bits}1` === bits && this.isUnclaimedCopy();
@@ -856,6 +869,7 @@ export class ShardedObject extends DurableObject {
             return meta.epoch === epoch && meta.state === "copy"; // claimed already
         if (!this.isUnclaimedCopy() || meta.bits !== parent || meta.splitting !== epoch)
             return false; // not this copy
+        this.receiving = null; // claimed: no batch may change it now
         this.ctx.storage.transactionSync(() => {
             this.afterClone((key) => ownsHash(bits, keyHash(key)));
             this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, parent, splitAt: Date.now() });
