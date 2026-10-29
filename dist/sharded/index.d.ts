@@ -86,6 +86,44 @@ export interface NodeDescription {
     } | null;
     /** Why the last abandoned split attempt was abandoned. */
     readonly lastSplitError: string | null;
+    /** This shard's last split attempts, newest last (at most `SPLIT_HISTORY`); a new shard's is empty. */
+    readonly splits: readonly SplitRecord[];
+    /** What this object answered since it started in this process (counters reset on restart). */
+    readonly counters: CallCounters;
+}
+/** One split attempt of a shard. */
+export interface SplitRecord {
+    /** When it started (ms since the epoch) and how long until it was claimed or given up. */
+    readonly at: number;
+    readonly ms: number;
+    readonly outcome: "split" | "abandoned";
+    /** How the right half was copied; null if abandoned before it was. */
+    readonly copy: "native" | "logical" | null;
+    /** Rows this shard owned when it started, and of them the right half's (what was copied). */
+    readonly rows: number;
+    readonly rightRows: number;
+    /** Writes that waited on it; of them, the ones answered "not ready" after `holdWaitMs`. */
+    readonly held: number;
+    readonly notReady: number;
+    /** The longest a held write waited, released or not. */
+    readonly heldMsMax: number;
+    readonly error: string | null;
+}
+/**
+ * Calls this object answered, by answer. Calls the runtime sheds as overloaded never reach the
+ * object, so they are not here: compare `calls` with what the caller sent.
+ */
+export interface CallCounters {
+    /** When counting started: when this object was last started. */
+    readonly since: number;
+    /** Routed calls and scans this object served (whatever they then answered). */
+    readonly calls: number;
+    readonly moved: number;
+    readonly notReady: number;
+    readonly stale: number;
+    /** Writes that waited on a split, and the longest wait. */
+    readonly held: number;
+    readonly heldMsMax: number;
 }
 /** The writes of an update (null deletes) and what the method returns. */
 export interface UpdateResult<V, R> {
@@ -125,6 +163,7 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private quietUntil;
     /** The split in progress here: writes to `right` wait for `released`. */
     private hold;
+    private counters;
     /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
     private receiving;
     /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
@@ -197,6 +236,8 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private assertOwner;
     /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
     private waitForHold;
+    /** Counts an answer other than "ok". */
+    private answered;
     /** What an update of these keys waits for, if any. */
     private holding;
     /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */

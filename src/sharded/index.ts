@@ -107,7 +107,53 @@ export interface NodeDescription {
   readonly lastSplit: { readonly copy: "native" | "logical"; readonly ms: number } | null;
   /** Why the last abandoned split attempt was abandoned. */
   readonly lastSplitError: string | null;
+  /** This shard's last split attempts, newest last (at most `SPLIT_HISTORY`); a new shard's is empty. */
+  readonly splits: readonly SplitRecord[];
+  /** What this object answered since it started in this process (counters reset on restart). */
+  readonly counters: CallCounters;
 }
+
+/** One split attempt of a shard. */
+export interface SplitRecord {
+  /** When it started (ms since the epoch) and how long until it was claimed or given up. */
+  readonly at: number;
+  readonly ms: number;
+  readonly outcome: "split" | "abandoned";
+  /** How the right half was copied; null if abandoned before it was. */
+  readonly copy: "native" | "logical" | null;
+  /** Rows this shard owned when it started, and of them the right half's (what was copied). */
+  readonly rows: number;
+  readonly rightRows: number;
+  /** Writes that waited on it; of them, the ones answered "not ready" after `holdWaitMs`. */
+  readonly held: number;
+  readonly notReady: number;
+  /** The longest a held write waited, released or not. */
+  readonly heldMsMax: number;
+  readonly error: string | null;
+}
+
+/**
+ * Calls this object answered, by answer. Calls the runtime sheds as overloaded never reach the
+ * object, so they are not here: compare `calls` with what the caller sent.
+ */
+export interface CallCounters {
+  /** When counting started: when this object was last started. */
+  readonly since: number;
+  /** Routed calls and scans this object served (whatever they then answered). */
+  readonly calls: number;
+  readonly moved: number;
+  readonly notReady: number;
+  readonly stale: number;
+  /** Writes that waited on a split, and the longest wait. */
+  readonly held: number;
+  readonly heldMsMax: number;
+}
+
+/** A split in progress: writes to `right` wait for `released`, and are counted for its record. */
+type Hold = { epoch: number; right: string; released: Promise<void>; deadline: number; held: number; notReady: number; heldMsMax: number };
+
+/** How many split attempts a shard remembers. */
+const SPLIT_HISTORY = 8;
 
 /** The writes of an update (null deletes) and what the method returns. */
 export interface UpdateResult<V, R> {
@@ -225,6 +271,8 @@ interface Meta {
   lastSplit?: { copy: "native" | "logical"; ms: number };
   /** Why the last abandoned split attempt was abandoned. */
   lastSplitError?: string;
+  /** The last split attempts, newest last. */
+  splits?: SplitRecord[];
 }
 
 /**
@@ -255,7 +303,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private readonly calls = new Map<number, number>();
   private quietUntil = Date.now();
   /** The split in progress here: writes to `right` wait for `released`. */
-  private hold: { epoch: number; right: string; released: Promise<void>; deadline: number } | null = null;
+  private hold: Hold | null = null;
+  private counters = { since: Date.now(), calls: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
   /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
   private receiving: number | null = null;
   /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
@@ -410,15 +459,47 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
   private async waitForHold(keys: readonly string[]): Promise<void> {
-    const deadline = Date.now() + (this.policy.holdWaitMs ?? HOLD_WAIT_MS);
+    if (!this.holding(keys)) return;
+    const start = Date.now();
+    const deadline = start + (this.policy.holdWaitMs ?? HOLD_WAIT_MS);
+    const counted = new Set<Hold>();
+    // Counted on every split this write waits on (one, unless a split follows another).
+    const waited = (gaveUp: boolean) => {
+      const ms = Date.now() - start;
+      this.counters.heldMsMax = Math.max(this.counters.heldMsMax, ms);
+      for (const split of counted) {
+        split.heldMsMax = Math.max(split.heldMsMax, ms);
+        if (gaveUp && split === this.hold) split.notReady++;
+      }
+    };
+    this.counters.held++;
     for (let hold = this.holding(keys); hold; hold = this.holding(keys)) {
+      if (this.hold && !counted.has(this.hold)) {
+        counted.add(this.hold);
+        this.hold.held++;
+      }
       const left = deadline - Date.now();
-      if (left <= 0) throw new NotReady(this.hold?.deadline ?? Date.now());
+      if (left <= 0) {
+        waited(true);
+        throw new NotReady(this.hold?.deadline ?? Date.now());
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
       const released = await Promise.race([hold.then(() => true), new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
       clearTimeout(timer);
-      if (!released) throw new NotReady(this.hold?.deadline ?? Date.now());
+      if (!released) {
+        waited(true);
+        throw new NotReady(this.hold?.deadline ?? Date.now());
+      }
     }
+    waited(false);
+  }
+
+  /** Counts an answer other than "ok". */
+  private answered<A extends CallAnswer<unknown>>(answer: A): A {
+    if ("moved" in answer) this.counters.moved++;
+    else if ("notReady" in answer) this.counters.notReady++;
+    else if ("stale" in answer) this.counters.stale++;
+    return answer;
   }
 
   /** What an update of these keys waits for, if any. */
@@ -434,15 +515,16 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
   async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<CallAnswer<unknown>> {
     const answer = await this.arriveSettled(name, bits);
-    if (answer) return answer;
+    if (answer) return this.answered(answer);
+    this.counters.calls++;
     for (const key of keys) if (!ownsHash(bits, keyHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
     this.countCall(keys.length);
     const fn = this.routedMethod(method);
     try {
       return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args) };
     } catch (error) {
-      if (error instanceof Moved) return this.moved(bits);
-      if (error instanceof NotReady) return { notReady: bits, until: error.until };
+      if (error instanceof Moved) return this.answered(this.moved(bits));
+      if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
       throw error;
     }
   }
@@ -450,12 +532,13 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** A call to every shard: `method(...args)`, with no keys. */
   async shardedScan(name: string, bits: string, method: string, args: readonly unknown[]): Promise<CallAnswer<unknown>> {
     const answer = await this.arriveSettled(name, bits);
-    if (answer) return answer;
+    if (answer) return this.answered(answer);
+    this.counters.calls++;
     const fn = this.routedMethod(method);
     try {
       return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, ...args) };
     } catch (error) {
-      if (error instanceof Moved) return this.moved(bits);
+      if (error instanceof Moved) return this.answered(this.moved(bits));
       throw error;
     }
   }
@@ -591,19 +674,27 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     let release!: () => void;
     const started = Date.now();
     const timeout = this.policy.splitTimeoutMs ?? 60_000;
-    const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)), deadline: started + timeout };
+    const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)), deadline: started + timeout, held: 0, notReady: 0, heldMsMax: 0 };
     this.hold = hold;
+    const [lo, hi] = hashRange(meta.bits);
+    const [rightLo] = hashRange(right);
+    const counted = this.sql.exec<{ rows: number; rightRows: number }>("SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM sharded_rows WHERE hash >= ? AND hash <= ?", rightLo, lo, hi).one();
+    let copy: "native" | "logical" | null = null;
+    const record = (outcome: SplitRecord["outcome"], error: string | null): SplitRecord[] => [
+      ...(this.meta?.splits ?? []),
+      { at: started, ms: Date.now() - started, outcome, copy, rows: counted.rows, rightRows: counted.rightRows, held: hold.held, notReady: hold.notReady, heldMsMax: hold.heldMsMax, error },
+    ].slice(-SPLIT_HISTORY);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });
       const live = () => this.hold === hold && Date.now() - started < timeout;
-      const copied = this.copyAndClaim(right, epoch, live);
+      const copied = this.copyAndClaim(right, epoch, live, (method) => (copy = method));
       copied.catch(() => {}); // after a timeout nobody waits for it
       const expired = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`split did not finish in ${timeout} ms`)), timeout)));
       const method = await Promise.race([copied, expired]);
       // The copy is claimed: from this transaction on, the right half is the sibling's.
       const now = this.meta!;
-      this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, activate: { bits: right, epoch }, cleanup: [...now.cleanup, hashRange(right)], foreign: true, parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started } });
+      this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, activate: { bits: right, epoch }, cleanup: [...now.cleanup, hashRange(right)], foreign: true, parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started }, splits: record("split", null) });
       this.calls.clear();
       this.quietUntil = Date.now();
       console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), copy: method, ms: Date.now() - started }));
@@ -614,7 +705,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       return true;
     } catch (error) {
       const now = this.meta;
-      if (now) this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, lastSplitError: String(error).slice(0, 500) });
+      if (now) this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, lastSplitError: String(error).slice(0, 500), splits: record("abandoned", String(error).slice(0, 500)) });
       this.quietUntil = Date.now();
       console.error(JSON.stringify({ event: "split-abandoned", node: nodeName(meta.name, meta.bits), error: String(error), ms: Date.now() - started }));
       return false;
@@ -628,9 +719,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   /** Copies this object's storage to the right sibling, then claims the copy there. */
-  private async copyAndClaim(right: string, epoch: number, live: () => boolean): Promise<"native" | "logical"> {
+  private async copyAndClaim(right: string, epoch: number, live: () => boolean, copied: (method: "native" | "logical") => void): Promise<"native" | "logical"> {
     await this.beforeHandOut();
     const method = await this.copyTo(right, epoch, live);
+    copied(method);
     const meta = this.meta!;
     let lastError: unknown = null;
     for (let wait = 10; live(); wait = Math.min(wait * 2, 500)) {
@@ -1022,7 +1114,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       rows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows WHERE hash >= ? AND hash <= ?", lo, hi).one().n;
     }
     const state = !meta ? "new" : this.hold ? "splitting" : meta.state === "copy" || this.isUnclaimedCopy() ? "copy" : "shard";
-    return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null };
+    return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null, splits: meta?.splits ?? [], counters: { ...this.counters } };
   }
 }
 
