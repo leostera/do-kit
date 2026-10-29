@@ -1,7 +1,7 @@
 // The client side of splittable objects: routes keys to leaves through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { hashBit, keyHash, leafObjectName, nodeName, type CallAnswer, type SplittableObject } from "./index.ts";
+import { hashBit, keyHash, leafObjectName, nodeName, type CallAnswer, type SplittableObject } from "./index.js";
 
 /** One leaf's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface LeafResult<R> {

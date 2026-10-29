@@ -174,7 +174,10 @@ The default threshold is about half of what one object handles on the edge, whic
 
 - `nodes()` returns the namespace that every leaf of the class lives in.
 - Routed methods take `(keys, payloads, ...args)` and use `read` and `update` for keyed state. The `decide` callback of `update` runs synchronously inside a transaction, so it cannot do I/O.
-- A split copies **every table**, yours too. The original keeps its tables and any work queued in them, such as an outbox it is still delivering. The new object drops its share in `afterClone(owns)`.
+- A split copies **every table**, yours too. Two hooks decide what happens to your rows for keys a leaf no longer owns:
+  - `afterClone(owns)` runs in the new object as it claims the copy, inside that transaction. Drop work it must not repeat here, such as its share of an outbox the original keeps delivering.
+  - `cleanupForeign(owns, limit)` runs in paced batches from the alarm, on both leaves after a split, until it returns 0. Delete up to `limit` rows for keys you no longer own and return how many you deleted. The default deletes nothing, so an original that delivers an outbox keeps its rows.
+- `owns(key)` says whether a key is this leaf's now. Until cleanup finishes, filter bulk queries over your own tables (listings, counts, uniqueness checks) with it.
 - `beforeHandOut()` runs before the copy, while writes to the moving half wait. Use it to finish work tied to rows that are about to move.
 - If you override `alarm`, call `await super.alarm()`, which activates new leaves and runs the background cleanup.
 - `splittableDescribe()` reports a leaf's bits, rows, call rate, last split and, if it gave one up, why.
@@ -184,6 +187,7 @@ The default threshold is about half of what one object handles on the edge, whic
 ```sh
 bun install
 bun run check        # types
+bun run build        # dist/: JavaScript and type declarations, what the package exports
 bun test             # integration tests under cf dev: concurrent writes and CAS across splits, load splits, presplit, large rows, subclass tables
 bun run specs:check  # model-check the split protocol
 ```

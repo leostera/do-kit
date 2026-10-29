@@ -15,6 +15,26 @@ class CounterBase extends SplittableObject<Env, number> {
     super(ctx, env);
     // A subclass table: which keys were added to here (a stand-in for an outbox).
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY)");
+    // A subclass table that both leaves clean after a split (a stand-in for a listing).
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS listing (key TEXT PRIMARY KEY)");
+  }
+
+  protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
+    const foreign = this.ctx.storage.sql
+      .exec<{ key: string }>("SELECT key FROM listing")
+      .toArray()
+      .filter(({ key }) => !owns(key))
+      .slice(0, limit);
+    for (const { key } of foreign) this.ctx.storage.sql.exec("DELETE FROM listing WHERE key = ?", key);
+    return foreign.length;
+  }
+
+  /** The keys in this object's listing table, and whether this leaf owns each. */
+  async listing(): Promise<{ key: string; owned: boolean }[]> {
+    return this.ctx.storage.sql
+      .exec<{ key: string }>("SELECT key FROM listing")
+      .toArray()
+      .map(({ key }) => ({ key, owned: this.owns(key) }));
   }
 
   protected override afterClone(owns: (key: string) => boolean): void {
@@ -43,6 +63,7 @@ class CounterBase extends SplittableObject<Env, number> {
   async add(keys: readonly string[], payloads: readonly number[]): Promise<number[]> {
     return this.update(keys, (current): UpdateResult<number, number[]> => {
       for (const k of keys) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO history (key) VALUES (?)", k);
+      for (const k of keys) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO listing (key) VALUES (?)", k);
       const writes = new Map<string, number>();
       const result = keys.map((k, i) => {
         const next = (writes.get(k) ?? current.get(k) ?? 0) + payloads[i]!;
