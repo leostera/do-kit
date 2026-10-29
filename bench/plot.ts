@@ -62,7 +62,8 @@ function fmt(v: number): string {
   return v >= 10 || v === 0 ? String(Math.round(v)) : v.toFixed(1);
 }
 
-function chart(c: Chart): string {
+function chart(input: Chart): string {
+  const c = { ...input, series: input.series.filter((s) => s.points.length > 0) };
   const all = c.series.flatMap((s) => s.points);
   const xs = all.map(([x]) => x);
   const ys = all.map(([, y]) => y);
@@ -105,7 +106,7 @@ const payload = uniform[0]?.payloadBytes ?? 1024;
 const levels = [...new Set(uniform.map((p) => p.concurrency))].sort((a, b) => a - b);
 const targets = (["single", "split", "presplit", "legacy"] as const).filter((t) => uniform.some((p) => p.target === t));
 const sel = (target: Target, operation: "read" | "write", value: (p: Point) => number): [number, number][] => uniform.filter((p) => p.target === target && p.operation === operation).map((p) => [p.concurrency, value(p)]);
-const runNote = `${payload}-byte values, uniform keys, 10 s per point · run ${results.suite}, ${results.generatedAt.slice(0, 10)}`;
+const runNote = `1 KiB values, uniform keys, 10 s per point, ${results.generatedAt.slice(0, 10)}`;
 
 const graphs: Record<string, string> = {};
 
@@ -135,6 +136,19 @@ for (const pct of ["p50", "p95", "p99", "max"] as const) {
   });
 }
 
+graphs.errors = chart({
+  title: "Failed calls vs concurrency",
+  subtitle: `Calls that failed in 10 s (an overloaded object refuses them). ${runNote}`,
+  xLabel: "Concurrent in-flight operations",
+  yLabel: "failed calls",
+  xLog: true,
+  xTicks: levels,
+  series: targets.flatMap((t) => [
+    { label: `${NAMES[t]} · write`, color: COLORS[t], points: sel(t, "write", (p) => p.errors) },
+    { label: `${NAMES[t]} · read`, color: COLORS[t], dash: "8 6", points: sel(t, "read", (p) => p.errors) },
+  ]),
+});
+
 graphs.bandwidth = chart({
   title: "Data throughput vs concurrency",
   subtitle: `Value bytes moved per second. ${runNote}`,
@@ -149,7 +163,7 @@ graphs.bandwidth = chart({
 });
 
 // Leaves the load produced, and the storage ceiling that gives (10 GB per SQLite-backed object).
-const leafPoints = uniform.filter((p) => p.target === "split" && p.operation === "write" && p.topology).map((p): [number, number] => [p.concurrency, p.topology!.leaves * 10]);
+const leafPoints = (t: Target) => uniform.filter((p) => p.target === t && p.operation === "write" && p.topology).map((p): [number, number] => [p.concurrency, p.topology!.leaves * 10]);
 graphs.capacity = chart({
   title: "Storage ceiling vs load",
   subtitle: "Leaves the measured write load split into, × the 10 GB limit of one SQLite-backed Durable Object",
@@ -159,7 +173,8 @@ graphs.capacity = chart({
   xTicks: levels,
   series: [
     { label: "one Durable Object", color: COLORS.single, points: levels.map((c) => [c, 10]) },
-    { label: "splittable: leaves × 10 GB", color: COLORS.split, points: leafPoints },
+    { label: `${NAMES.split}: leaves × 10 GB`, color: COLORS.split, points: leafPoints("split") },
+    ...(targets.includes("presplit") ? [{ label: `${NAMES.presplit}: leaves × 10 GB`, color: COLORS.presplit, points: leafPoints("presplit") }] : []),
   ],
 });
 

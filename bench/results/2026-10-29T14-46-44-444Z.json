@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-45b2cd62c725",
+  "generatedAt": "2026-10-29T14:48:14.128Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      256,
+      1024,
+      2048,
+      4096
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-45b2cd62c725-single-write-uniform",
+      "driverCount": 16,
+      "successes": 13458,
+      "errors": 0,
+      "elapsedMs": 11132,
+      "operationsPerSecond": 1208.9471793029106,
+      "mebibytesPerSecond": 1.1806124797879987,
+      "latencyMs": {
+        "p50": 87,
+        "p95": 805,
+        "p99": 1160,
+        "max": 2119
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-45b2cd62c725-single-write-uniform",
+      "driverCount": 64,
+      "successes": 16426,
+      "errors": 0,
+      "elapsedMs": 10954,
+      "operationsPerSecond": 1499.543545736717,
+      "mebibytesPerSecond": 1.4643979938835128,
+      "latencyMs": {
+        "p50": 613,
+        "p95": 1201,
+        "p99": 1334,
+        "max": 1629
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-45b2cd62c725-single-write-uniform",
+      "driverCount": 128,
+      "successes": 16163,
+      "errors": 26816,
+      "elapsedMs": 11261,
+      "operationsPerSecond": 1435.3076991386201,
+      "mebibytesPerSecond": 1.4016676749400587,
+      "latencyMs": {
+        "p50": 17,
+        "p95": 1708,
+        "p99": 1822,
+        "max": 2100
+      },
+      "topology": null
+    }
+  ],
+  "splits": []
+}

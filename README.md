@@ -6,11 +6,36 @@ A Durable Object is a great home for state, but it is one object: one thread, 10
 
 A split moves that half with a single storage snapshot, so it takes seconds, not minutes, and the object keeps serving while it happens.
 
+## What it buys you over one Durable Object
+
+![Throughput vs concurrency](docs/bench/throughput.svg)
+
+At 2,048 writes in flight, a single Durable Object is past its limit. It completes 1,435 writes/s and refuses 26,816 calls in 10 seconds. The same object split into 16 leaves completes **9,960 writes/s and refuses none**.
+
+| 1 KiB writes, uniform keys | One Durable Object | splittable-object, 16 leaves |
+|---|---|---|
+| **Throughput**, 1,024 in flight | 1,499 writes/s | **5,207 writes/s** |
+| **Throughput**, 2,048 in flight | 1,435 writes/s, 26,816 calls refused in 10 s | **9,960 writes/s, none refused** |
+| **Data written**, 2,048 in flight | 1.4 MiB/s | **9.7 MiB/s** |
+| **Median latency**, 1,024 in flight | 613 ms | **103 ms** |
+| **p99 latency**, 2,048 in flight | 1,822 ms | **765 ms** |
+| **Storage ceiling** | 10 GB | **160 GB** (10 GB per leaf) |
+
+![Write latency p99 vs concurrency](docs/bench/latency-p99.svg)
+
+![Failed calls vs concurrency](docs/bench/errors.svg)
+
+![Data throughput vs concurrency](docs/bench/bandwidth.svg)
+
+These were measured on Cloudflare's network, with up to 128 load-driver Durable Objects in several regions. Each point is 10 s of one-key writes. The 16-leaf object was presplit, so these numbers show the capacity that splitting gives, not the cost of the splits along the way. That cost is next. More latency graphs ([p50](docs/bench/latency-p50.svg), [p95](docs/bench/latency-p95.svg), [max](docs/bench/latency-max.svg)) and the method are in [docs/performance.md](docs/performance.md).
+
+## Splits take seconds
+
 ![Time to split vs data size](docs/bench/split-time.svg)
 
 ![Slowest write during a split](docs/bench/split-latency.svg)
 
-Measured on Cloudflare's network: an object seeded with 1 to 128 MiB of 1 KiB rows, split once while 8 writers kept writing to random keys. No write failed in any run.
+When load splits an object, it pays for it once. Here an object seeded with 1 to 128 MiB of 1 KiB rows, split once while 8 writers kept writing to random keys. No write failed in any run.
 
 | Data in the object | splittable-object | Freeze, snapshot into two new objects | v0.1: copy rows to two new objects |
 |---|---|---|---|
@@ -42,8 +67,6 @@ The times are until the new object serves with all of its data. See [what was me
 - **One hot key.** A key always lives on one leaf.
 - **Cross-key transactions.** `update` is transactional within one leaf, and `callOneLeaf` refuses (before applying anything) when keys span leaves. Nothing spans leaves.
 - **Small loads.** Below what one object can take, a plain Durable Object is simpler and as fast.
-
-The throughput benchmarks (operations per second against concurrency, against a plain Durable Object) are still being measured; see [docs/performance.md](docs/performance.md).
 
 ## Install
 
