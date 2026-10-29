@@ -232,7 +232,11 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     alarm(): Promise<void>;
     /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */
     shardedRestore(snapshot: DurableObjectSnapshot): Promise<void>;
-    /** The logical copy's tables and indexes: creates the ones this object does not have. */
+    /**
+     * The logical copy's tables and indexes: replaces this object's with them. What is here is
+     * not a serving shard's (an unused object, or the copy of an abandoned attempt, maybe made
+     * under an older schema), so it all goes: the copy must have the source's schema exactly.
+     */
     shardedReceiveSchema(_name: string, _bits: string, objects: readonly {
         readonly name: string;
         readonly sql: string;

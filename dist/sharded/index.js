@@ -654,15 +654,20 @@ export class ShardedObject extends DurableObject {
             }
         }, 50)));
     }
-    /** The logical copy's tables and indexes: creates the ones this object does not have. */
+    /**
+     * The logical copy's tables and indexes: replaces this object's with them. What is here is
+     * not a serving shard's (an unused object, or the copy of an abandoned attempt, maybe made
+     * under an older schema), so it all goes: the copy must have the source's schema exactly.
+     */
     async shardedReceiveSchema(_name, _bits, objects) {
         if (this.serving())
             throw new Error("refusing to change a serving shard");
-        const have = new Set(this.sql.exec("SELECT name FROM sqlite_master").toArray().map((o) => o.name));
         this.ctx.storage.transactionSync(() => {
+            for (const t of this.tables())
+                this.sql.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(t)}`);
+            this.meta = null;
             for (const o of objects)
-                if (!have.has(o.name))
-                    this.sql.exec(o.sql);
+                this.sql.exec(o.sql);
         });
     }
     /** One batch of the logical copy: rows of one table. The first batch wipes every table. */
