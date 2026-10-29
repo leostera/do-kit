@@ -71,7 +71,7 @@ export default defineSpec(
       transitions: {
         nextPage: {
           description: "Asks every shard it knows for a page after the cursor.",
-          sources: ["src/table/client.ts#TableClient.list", "src/sharded/client.ts:143-165"],
+          sources: ["src/table/client.ts#TableClient.list", "src/sharded/client.ts#ShardedClient.scan"],
           when: (s) => s.started && !s.done && s.waiting.size === 0,
           sends: [Page],
           run(s, ctx) {
@@ -84,7 +84,7 @@ export default defineSpec(
         },
         [Rows]: {
           description: "Keeps a shard's page; with every shard's, returns the rows up to the smallest frontier and moves the cursor.",
-          sources: ["src/sharded/client.ts:143-165", "src/table/client.ts#mergePages"],
+          sources: ["src/sharded/client.ts#ShardedClient.scan", "src/table/client.ts#mergePages"],
           run(s, msg) {
             if (!s.waiting.delete(msg.shard)) return;
             s.answers[msg.shard] = { rows: msg.rows, frontier: msg.frontier };
@@ -100,7 +100,7 @@ export default defineSpec(
         },
         [Moved]: {
           description: "The shard it asked split: asks both halves for the same page.",
-          sources: ["src/sharded/client.ts:143-165", "src/sharded/client.ts#ShardedClient.learn"],
+          sources: ["src/sharded/client.ts#ShardedClient.scan", "src/sharded/client.ts#ShardedClient.learn"],
           sends: [Page],
           run(s, _msg, ctx) {
             if (!s.waiting.delete("root")) return;
@@ -113,13 +113,13 @@ export default defineSpec(
         },
         [NotReady]: {
           description: "The new shard is not serving yet: asks it again shortly.",
-          sources: ["src/sharded/client.ts:143-165", "src/sharded/client.ts#Backoff.next"],
+          sources: ["src/sharded/client.ts#ShardedClient.scan", "src/sharded/client.ts#Backoff.next"],
           starts: ["retryRight"],
           run: (_s, _msg, ctx) => ctx.start("retryRight"),
         },
         retryRight: {
           description: "Asks the new shard for the page again.",
-          sources: ["src/sharded/client.ts:143-165"],
+          sources: ["src/sharded/client.ts#ShardedClient.scan"],
           after: "a few milliseconds",
           sends: [Page],
           run(s, ctx) {
@@ -128,7 +128,7 @@ export default defineSpec(
         },
         [spec.failed(Page)]: {
           description: "A page call failed: asks that shard again.",
-          sources: ["src/sharded/client.ts:143-165"],
+          sources: ["src/sharded/client.ts#ShardedClient.scan"],
           sends: [Page],
           run(s, failure, ctx) {
             if (s.waiting.has(failure.payload.as)) ctx.send(failure.to, Page, failure.payload);

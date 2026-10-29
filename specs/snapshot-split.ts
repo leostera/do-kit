@@ -58,7 +58,7 @@ export default defineSpec(
         write: {
           label: "Write a key",
           description: "Increments a key on the object it believes owns it.",
-          sources: ["src/sharded/client.ts:87-89", "src/sharded/client.ts:100-140"],
+          sources: ["src/sharded/client.ts#ShardedClient.call", "src/sharded/client.ts#ShardedClient.route"],
           inputs: { key: spec.defineInput(String, { examples: KEYS }) },
           when: (s) => s.pending === null,
           sends: [Write],
@@ -72,7 +72,7 @@ export default defineSpec(
         read: {
           label: "Read a key",
           description: "Reads a key from the object it believes owns it.",
-          sources: ["src/sharded/client.ts:87-89", "src/sharded/client.ts:100-140"],
+          sources: ["src/sharded/client.ts#ShardedClient.call", "src/sharded/client.ts#ShardedClient.route"],
           inputs: { key: spec.defineInput(String, { examples: KEYS }) },
           when: (s) => s.pending === null,
           sends: [Read],
@@ -86,7 +86,7 @@ export default defineSpec(
       transitions: {
         [Done]: {
           description: "Gets the answer.",
-          sources: ["src/sharded/client.ts:100-140"],
+          sources: ["src/sharded/client.ts#ShardedClient.route"],
           run(s, msg) {
             if (msg.op === "read" && msg.value < s.acked[msg.key]) s.staleRead = true;
             if (msg.op === "write") s.acked[msg.key] = Math.max(s.acked[msg.key], msg.value);
@@ -95,7 +95,7 @@ export default defineSpec(
         },
         [Moved]: {
           description: "Learns the split and sends the call to the new owner.",
-          sources: ["src/sharded/client.ts:100-140", "src/sharded/client.ts#ShardedClient.learn"],
+          sources: ["src/sharded/client.ts#ShardedClient.route", "src/sharded/client.ts#ShardedClient.learn"],
           sends: [Write, Read],
           run(s, msg, ctx) {
             s.knowsSplit = true;
@@ -107,13 +107,13 @@ export default defineSpec(
         },
         [NotReady]: {
           description: "The new owner is not serving yet; tries again shortly.",
-          sources: ["src/sharded/client.ts:100-140", "src/sharded/client.ts#Backoff.next"],
+          sources: ["src/sharded/client.ts#ShardedClient.route", "src/sharded/client.ts#Backoff.next"],
           starts: ["retry"],
           run: (_s, _msg, ctx) => ctx.start("retry"),
         },
         retry: {
           description: "Sends the waiting call again.",
-          sources: ["src/sharded/client.ts:100-140"],
+          sources: ["src/sharded/client.ts#ShardedClient.route"],
           after: "a few milliseconds",
           sends: [Write, Read],
           run(s, ctx) {
