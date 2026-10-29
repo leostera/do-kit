@@ -21,6 +21,7 @@ interface IndexDef {
 }
 /** Rows per hash prefix are counted with this many hex digits (16 bits: exact to depth 16). */
 const BUCKET_DIGITS = 4;
+const MAX_TABLE_DEPTH = BUCKET_DIGITS * 4;
 const CLEANUP_BATCH = 250;
 
 const AFFINITY: Record<ColumnType, string> = { text: "TEXT", integer: "INTEGER", real: "REAL", boolean: "INTEGER", json: "TEXT" };
@@ -237,6 +238,8 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   /** Brings this shard's storage up to the schema: once per instance, on its first use. */
   private migrate(): void {
     if (this.migrated) return;
+    // Rows are counted per 16-bit hash prefix: a deeper shard would count its sibling's rows too.
+    if (this.splitPolicy.maxDepth > MAX_TABLE_DEPTH) throw new Error(`a sharded table splits at most ${MAX_TABLE_DEPTH} deep: lower splitPolicy.maxDepth`);
     const schema = this.table;
     const pk = this.q(schema.primaryKey);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${TABLE} (${pk} TEXT PRIMARY KEY NOT NULL, _hash TEXT NOT NULL, _version INTEGER NOT NULL)`);
