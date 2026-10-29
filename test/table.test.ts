@@ -2,6 +2,7 @@
 // reference sort while the table splits and cleans up, sparse filters with a small budget, counts,
 // and schema changes on a live object.
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { post, shards, useWorker } from "./harness.ts";
 
 useWorker();
@@ -264,3 +265,24 @@ test("a new index on a table with many rows lists every row", async () => {
   expect(listed.length).toBe(rows.length);
   expect(new Set(listed.map((r) => r.row.name)).size).toBe(rows.length);
 }, 120_000);
+
+test("a shard whose alarm was lost while a new shard waits to be activated sets it again", async () => {
+  const name = `lost-alarm-${Date.now()}`;
+  for (let i = 0; i < 20; i++) await table("flaky", name, "put", { name: `r${i}`, id: `id${i}`, createdAt: i, lastPushAt: null, deleted: false, meta: null });
+  await table("flaky", name, "failActivations", true, "");
+  expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(true);
+  // The original's alarm, which would retry the activation, is lost; then activation would work.
+  await table("flaky", name, "dropAlarm", null, "");
+  await table("flaky", name, "failActivations", false, "1");
+  await Bun.sleep(1500);
+  expect((await post<{ state: string }>("/describe", { cls: "flaky", name, bits: "1" })).state).toBe("copy");
+  // Calls keep reaching the original: it notices nothing will activate the new shard.
+  const stays = Array.from({ length: 20 }, (_, i) => `r${i}`).find((k) => (Number.parseInt(createHash("sha256").update(k).digest("hex")[0]!, 16) >> 3) === 0)!;
+  for (let i = 0; i < 80; i++) {
+    await table("flaky", name, "get", stays);
+    if ((await post<{ state: string }>("/describe", { cls: "flaky", name, bits: "1" })).state === "shard") break;
+    await Bun.sleep(100);
+  }
+  expect((await post<{ state: string }>("/describe", { cls: "flaky", name, bits: "1" })).state).toBe("shard");
+  expect((await table<unknown[]>("flaky", name, "all", {})).length).toBe(20);
+}, 60_000);

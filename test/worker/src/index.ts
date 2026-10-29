@@ -103,6 +103,10 @@ export class FlakyRepos extends EvolvingRepos {
   async wakeIn(ms: number): Promise<void> {
     await this.scheduleAlarm(Date.now() + ms);
   }
+  /** Loses this object's alarm (as a crash between a write and its alarm would). */
+  async dropAlarm(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+  }
   /** Fires this object's alarm now, as a snapshot's copied alarm would. */
   async alarmNow(): Promise<void> {
     await this.ctx.storage.setAlarm(Date.now());
@@ -318,7 +322,7 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     await ns.get(ns.idFromName(shardObjectName(body.name, body.args[1] as string))).failActivations(body.args[0] as boolean);
     return null;
   }
-  if (body.op === "wakeIn" || body.op === "alarmNow" || body.op === "alarmRan") {
+  if (body.op === "wakeIn" || body.op === "alarmNow" || body.op === "alarmRan" || body.op === "dropAlarm") {
     const ns = env.FLAKY;
     const stub = ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
     return stub[body.op]!(body.args[0]);

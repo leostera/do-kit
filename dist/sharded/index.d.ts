@@ -264,8 +264,20 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      * nor loses the time asked for. A split's new shard keeps the time too.
      */
     protected scheduleAlarm(at: number | Date): Promise<void>;
-    /** Sets the alarm for `time` unless it is set for earlier already. */
+    /**
+     * Sets the alarm for `time` unless it is set for earlier already. For a time that has come it
+     * sets it at once, without reading the alarm first: no alarm can be earlier, and setting it
+     * before any await keeps it in the same commit as the writes just before (a split's meta, a
+     * claim), so a crash cannot keep one without the other.
+     */
     private armAlarm;
+    /**
+     * While a split's work is pending here (a sibling to activate, rows to clear), makes sure an
+     * alarm will do it, at most every ALARM_CHECK_MS: an alarm can be lost, and nothing else would
+     * activate the sibling. Called on routed calls, which keep reaching a shard that has split.
+     */
+    private checkAlarm;
+    private alarmCheckedAt;
     /** When the subclass asked for `onAlarm`, if it did. */
     private loadWake;
     private saveWake;

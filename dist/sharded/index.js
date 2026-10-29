@@ -111,6 +111,8 @@ const DELETE_BATCH_ROWS = 250;
 const DELETE_PAUSE_MS = 25;
 /** How soon the alarm tries again after activating a sibling or cleaning up failed. */
 const ALARM_RETRY_MS = 1000;
+/** How often a shard with a split's work pending checks that its alarm is set. */
+const ALARM_CHECK_MS = 5_000;
 /**
  * Extend like DurableObject. Methods called through the client take the keys they act on first
  * (all owned by this shard), may take payloads aligned with the keys second, and read and write
@@ -408,6 +410,7 @@ export class ShardedObject extends DurableObject {
             if (meta.activate || meta.cleanup.length > 0 || meta.foreign)
                 void this.armAlarm(Date.now());
         }
+        this.checkAlarm();
         if (meta.bits === bits)
             return null;
         if (meta.bits.startsWith(bits))
@@ -682,12 +685,32 @@ export class ShardedObject extends DurableObject {
         if (this.meta?.state === "shard" || !this.meta)
             await this.armAlarm(time);
     }
-    /** Sets the alarm for `time` unless it is set for earlier already. */
+    /**
+     * Sets the alarm for `time` unless it is set for earlier already. For a time that has come it
+     * sets it at once, without reading the alarm first: no alarm can be earlier, and setting it
+     * before any await keeps it in the same commit as the writes just before (a split's meta, a
+     * claim), so a crash cannot keep one without the other.
+     */
     async armAlarm(time) {
+        if (time <= Date.now())
+            return this.ctx.storage.setAlarm(time);
         const current = await this.ctx.storage.getAlarm();
         if (current === null || time < current)
             await this.ctx.storage.setAlarm(time);
     }
+    /**
+     * While a split's work is pending here (a sibling to activate, rows to clear), makes sure an
+     * alarm will do it, at most every ALARM_CHECK_MS: an alarm can be lost, and nothing else would
+     * activate the sibling. Called on routed calls, which keep reaching a shard that has split.
+     */
+    checkAlarm() {
+        const meta = this.meta;
+        if (!meta || !(meta.activate || meta.cleanup.length > 0 || meta.foreign) || Date.now() - this.alarmCheckedAt < ALARM_CHECK_MS)
+            return;
+        this.alarmCheckedAt = Date.now();
+        void this.ctx.storage.getAlarm().then((at) => (at === null ? this.ctx.storage.setAlarm(Date.now()) : undefined));
+    }
+    alarmCheckedAt = 0;
     /** When the subclass asked for `onAlarm`, if it did. */
     loadWake() {
         const row = this.sql.exec("SELECT value FROM sharded_meta WHERE key = 'wake'").toArray()[0];
@@ -902,6 +925,7 @@ export class ShardedObject extends DurableObject {
             const wake = this.loadWake();
             if (wake !== null)
                 await this.armAlarm(wake);
+            this.checkAlarm(); // its cleanup's alarm, in case it was lost while it waited
         }
         return true;
     }
