@@ -46,21 +46,30 @@ Measured from 1 s before the split until 1 s after it settles:
 
 No write failed in any split run.
 
-## Throughput
+## Throughput against one Durable Object
 
-The throughput benchmark sends one-key reads and writes of 1 KiB values from driver Durable Objects in several regions, at increasing concurrency. Each level runs once unmeasured first, so the splits its load causes can settle, then once measured for 10 s.
+The throughput benchmark sends one-key writes of 1 KiB values to uniform keys from driver Durable Objects in several regions, at increasing concurrency. Each driver keeps at most 16 calls in flight, so 2,048 in flight means 128 drivers. Each level runs once unmeasured, then once measured for 10 s. The object under test is either one plain Durable Object, or a splittable object presplit into 16 leaves, so no split happens while it is measured.
 
 ![Throughput vs concurrency](bench/throughput.svg)
 
+| In flight | One Durable Object | splittable-object, 16 leaves |
+|---|---|---|
+| 256 | 1,208 writes/s, p50 87 ms, p99 1,160 ms | 1,438 writes/s, p50 104 ms, p99 817 ms |
+| 1,024 | 1,499 writes/s, p50 613 ms, p99 1,334 ms | 5,207 writes/s, p50 103 ms, p99 709 ms |
+| 2,048 | 1,435 writes/s, p99 1,822 ms, **26,816 calls refused** | 9,960 writes/s, p50 126 ms, p99 765 ms, none refused |
+
 ![Write latency p99 vs concurrency](bench/latency-p99.svg)
 
-So far, in this harness:
-- **One object tops out** around 1,180 writes/s at 256 in-flight calls. At 1,024 it falls back to about 1,020/s, with a p99 of 4.2 s.
-- **A splitting object reaches 1,240 writes/s** with 4 leaves, and about 1,230/s with 8 leaves at 1,024 in-flight calls.
+![Failed calls vs concurrency](bench/errors.svg)
 
-That is far below what 8 independent objects should take. Splits happening inside the measured window, and the load generator itself, are both suspects. A run against an object that starts as 16 leaves (so nothing splits while it is measured), with more drivers, is next, and the graphs will be updated with it. Until then, read these as the harness's numbers, not as the package's ceiling.
+![Data throughput vs concurrency](bench/bandwidth.svg)
 
-More graphs from the same run: [latency p50](bench/latency-p50.svg), [p95](bench/latency-p95.svg), [max](bench/latency-max.svg), [data throughput](bench/bandwidth.svg), and [storage ceiling](bench/capacity.svg) (leaves the load produced, times the 10 GB limit of one object).
+- **One object saturates at about 1,500 writes/s.** Past that, it queues, so its median latency at 1,024 in flight is 613 ms. Then it refuses calls: 26,816 in 10 s at 2,048 in flight. (Its 17 ms median at that level is misleading, because most of those calls failed fast.)
+- **16 leaves keep their median latency near 100 ms** while writes grow from 1,438/s to 9,960/s, and they had not saturated at the highest load we offered.
+- **The load generator matters.** A driver Durable Object completes about 90 calls/s, however many it keeps in flight. An earlier run with 64 calls per driver capped every target near 1,500 writes/s, and made splitting look useless. The graphs above use the fixed harness.
+- **Not yet measured with this harness:** reads, an object that splits by load while measured (the run stopped with an error from the controlling Worker at 256 in flight), and a single hot key. A hot key cannot be split: it always lives on one leaf. In an earlier run, a hot key also kept triggering splits that could not help, which is a known gap in the split policy.
+
+More graphs from the same run: [latency p50](bench/latency-p50.svg), [p95](bench/latency-p95.svg), [max](bench/latency-max.svg), and [storage ceiling](bench/capacity.svg) (leaves × the 10 GB limit of one object).
 
 ## Reference: what one Durable Object takes
 

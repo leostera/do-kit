@@ -14,13 +14,13 @@ The numbers and graphs in the [README](../README.md) and [docs/performance.md](.
 | `legacy` | `splittable-object` v0.1, which split by streaming rows to two children (`worker/src/legacy/`, for comparison only). |
 | `two-copy` | A design that freezes, snapshots into two children and stays as a router (`worker/src/two-copy/`, for comparison only). |
 
-Driver Durable Objects generate the load from several regions, using `locationHint` (placement is advisory).
+Driver Durable Objects generate the load from several regions, using `locationHint` (placement is advisory). Each driver keeps at most 16 calls in flight, because one driver completes only about 90 calls/s. With fewer drivers, you measure the drivers, not the target.
 
 ## What a run measures
 
 `bun run bench:run` runs two suites. Pick them with `BENCH_SUITES=load,split`.
 
-- **load:** one-key writes and reads of 1 KiB values, on uniform keys and on one hot key, at 1, 16, 64, 256 and 1,024 in-flight calls (`BENCH_CONCURRENCY`). Each level runs once unmeasured, so splits settle, then for 10 s measured. It records operations/s, MiB/s, p50/p95/p99/max latency, errors, and how many leaves the object had.
+- **load:** one-key writes and reads of 1 KiB values, on uniform keys and on one hot key, at 1, 16, 64, 256 and 1,024 in-flight calls by default, and up to 2,048 (`BENCH_CONCURRENCY`; also `BENCH_TARGETS`, `BENCH_OPERATIONS`, `BENCH_DISTRIBUTIONS`). Each level runs once unmeasured, so splits settle, then for 10 s measured. It records operations/s, MiB/s, p50/p95/p99/max latency, errors, and how many leaves the object had.
 - **split:** for each size in `BENCH_SPLIT_MIB` (default 1, 16, 128 and 1,024 MiB), it seeds a fresh object, starts 8 writers on random keys, and splits it once. It records:
   - when the new owner served;
   - when every row lived only at its owner;

@@ -14,7 +14,7 @@
   "scripts": {
     "check": "tsc -p tsconfig.json",
     "test": "bun test",
-    "specs:check": "feynman check splitting-and-routing",
+    "specs:check": "feynman check",
     "bench:run": "bun bench/run.ts",
     "bench:plot": "bun bench/plot.ts"
   },

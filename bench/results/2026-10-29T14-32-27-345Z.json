@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-fe821fe574e0",
+  "generatedAt": "2026-10-29T14:35:42.390Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      256,
+      1024,
+      2048
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-fe821fe574e0-single-write-uniform",
+      "driverCount": 16,
+      "successes": 6661,
+      "errors": 0,
+      "elapsedMs": 10882,
+      "operationsPerSecond": 612.1117441646757,
+      "mebibytesPerSecond": 0.5977653751608161,
+      "latencyMs": {
+        "p50": 278,
+        "p95": 956,
+        "p99": 1087,
+        "max": 1427
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-fe821fe574e0-single-write-uniform",
+      "driverCount": 16,
+      "successes": 7758,
+      "errors": 0,
+      "elapsedMs": 13253,
+      "operationsPerSecond": 585.376895797178,
+      "mebibytesPerSecond": 0.5716571248019316,
+      "latencyMs": {
+        "p50": 986,
+        "p95": 3584,
+        "p99": 4076,
+        "max": 4554
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-fe821fe574e0-single-write-uniform",
+      "driverCount": 32,
+      "successes": 9375,
+      "errors": 8261,
+      "elapsedMs": 12632,
+      "operationsPerSecond": 742.162761241292,
+      "mebibytesPerSecond": 0.7247683215246992,
+      "latencyMs": {
+        "p50": 1535,
+        "p95": 3474,
+        "p99": 3827,
+        "max": 5688
+      },
+      "topology": null
+    },
+    {
+      "target": "presplit",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-fe821fe574e0-presplit-write-uniform",
+      "driverCount": 16,
+      "successes": 14819,
+      "errors": 0,
+      "elapsedMs": 11220,
+      "operationsPerSecond": 1320.7664884135472,
+      "mebibytesPerSecond": 1.2898110238413547,
+      "latencyMs": {
+        "p50": 86,
+        "p95": 721,
+        "p99": 884,
+        "max": 1569
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 4989,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-fe821fe574e0-presplit-write-uniform",
+      "driverCount": 16,
+      "successes": 20066,
+      "errors": 0,
+      "elapsedMs": 14183,
+      "operationsPerSecond": 1414.7923570471692,
+      "mebibytesPerSecond": 1.3816331611788761,
+      "latencyMs": {
+        "p50": 331,
+        "p95": 1683,
+        "p99": 3195,
+        "max": 4551
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 7345,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-fe821fe574e0-presplit-write-uniform",
+      "driverCount": 32,
+      "successes": 45438,
+      "errors": 0,
+      "elapsedMs": 14602,
+      "operationsPerSecond": 3111.765511573757,
+      "mebibytesPerSecond": 3.038833507396247,
+      "latencyMs": {
+        "p50": 295,
+        "p95": 2028,
+        "p99": 2997,
+        "max": 5046
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 9093,
+        "depth": 4
+      }
+    }
+  ],
+  "splits": []
+}

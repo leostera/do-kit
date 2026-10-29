@@ -42,7 +42,8 @@ interface DriverResult {
   readonly bytes: number;
   readonly elapsedMs: number;
   /** One-millisecond buckets, with the last bucket holding 120 seconds and above. */
-  readonly latencyMs: readonly number[];
+  /** Non-empty buckets only, as [bucket, count]: a dense histogram per driver is too big to gather from many. */
+  readonly latencyMs: readonly (readonly [number, number])[];
   readonly maxLatencyMs: number;
 }
 
@@ -247,7 +248,9 @@ export class BenchDriver extends DurableObject<Env> {
     };
 
     await Promise.all(Array.from({ length: config.concurrency }, worker));
-    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs, maxLatencyMs };
+    const sparse: [number, number][] = [];
+    latencyMs.forEach((count, bucket) => count && sparse.push([bucket, count]));
+    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs };
   }
 
   private async write(target: Target, name: string, keys: readonly string[], values: readonly string[]): Promise<void> {
@@ -498,8 +501,9 @@ export default {
       return Response.json({ error: error instanceof Error ? error.message : "invalid request" }, { status: 400 });
     }
 
-    // About 64 in-flight calls per driver at most, up to 64 drivers.
-    const driverCount = Math.min(64, Math.max(Math.min(16, input.concurrency), Math.ceil(input.concurrency / 64)));
+    // One driver tops out at about 90 calls/s, whatever its concurrency: 16 in-flight calls each,
+    // up to 256 drivers, so the drivers are not what is measured.
+    const driverCount = Math.min(256, Math.max(Math.min(16, input.concurrency), Math.ceil(input.concurrency / 16)));
     const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount }));
     const drivers = configs.map((config, i) => {
       const id = env.BENCH_DRIVERS.idFromName(`${input.objectName}-driver-${i}`);
@@ -521,7 +525,7 @@ export default {
       bytes += result.bytes;
       elapsedMs = Math.max(elapsedMs, result.elapsedMs);
       maxLatencyMs = Math.max(maxLatencyMs, result.maxLatencyMs);
-      result.latencyMs.forEach((count, i) => histogram[i] += count);
+      for (const [bucket, count] of result.latencyMs) histogram[bucket] = histogram[bucket]! + count;
     }
     let topology: Awaited<ReturnType<typeof describeTree>> | null = null;
     if (input.target === "split") topology = await describeTree(env, input.objectName);
