@@ -7,7 +7,7 @@
       "devDependencies": {
         "@cloudflare/vite-plugin": "beta",
         "@cloudflare/workers-types": "5.20261027.1",
-        "@leostera/feynman": "0.10.0",
+        "@leostera/feynman": "0.12.0",
         "@types/bun": "^1.4.4",
         "@types/node": "26.6.5",
         "cf": "^1.0.0-beta.23",
@@ -124,7 +124,7 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.9", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.0.3", "@jridgewell/sourcemap-codec": "^1.4.10" } }, "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ=="],
 
-    "@leostera/feynman": ["@leostera/feynman@0.10.0", "", { "dependencies": { "@cloudflare/kumo": "^2.15.0", "@phosphor-icons/react": "^2.1.10", "@types/react": "^19.3.0", "calldiff": "0.5.0", "react": "^19.3.1", "shiki": "^4.5.0", "typescript": "^7.0.2", "vite": "^8.3.5" }, "bin": { "feynman": "bin/feynman.ts" } }, "sha512-K/RKLUs4D21JbZiQDx4Dwtm3PefCTLM6p+JSvOlvRRCjVo88czqeLqlhpJWIx0Gyq7MbngnC+SqfXrGyrKHYQA=="],
+    "@leostera/feynman": ["@leostera/feynman@0.12.0", "", { "dependencies": { "@cloudflare/kumo": "^2.15.0", "@phosphor-icons/react": "^2.1.10", "@types/react": "^19.3.0", "calldiff": "0.5.0", "react": "^19.3.1", "shiki": "^4.5.0", "typescript": "^7.0.2", "vite": "^8.3.5" }, "bin": { "feynman": "bin/feynman.ts" } }, "sha512-6wvXsW1yrlIjxVlP1ftmOmwge5bB+TFXg3YQxLFnJUDaTqQkR7uziNJViXtXlkjkvTjYtj8a8dAWHPxlXSK8Rw=="],
 
     "@modelcontextprotocol/server": ["@modelcontextprotocol/server@2.0.0-alpha.4", "", { "dependencies": { "zod": "^4.2.0" } }, "sha512-/KEo3ZJ50HlagHp0lz2vPgfBZFtXHu6zTBXT9XqPc+4O9i4+IbBVWKq/a9yAfv/ifp0u3+mRo8SUk5kMKzhN8A=="],
 

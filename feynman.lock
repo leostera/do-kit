@@ -6,6 +6,7 @@
     "src/sharded/client.ts:100-140": "791308c45326",
     "src/sharded/client.ts:124-126": "13152c1a4fda",
     "src/sharded/client.ts:142-160": "67e373d7ec44",
+    "src/sharded/client.ts:143-165": "c6f3e1757e61",
     "src/sharded/client.ts:87-89": "7864ce99f71f",
     "src/sharded/client.ts:91-116": "ad00fc92bd60",
     "src/sharded/client.ts:95-116": "727c1b76c615",
@@ -13,6 +14,7 @@
     "src/sharded/index.ts#ShardedObject.alarm": "8c4d648ff277",
     "src/sharded/index.ts#ShardedObject.allRows": "a122f62eaae6",
     "src/sharded/index.ts#ShardedObject.arrive": "5e6ba5a37439",
+    "src/sharded/index.ts#ShardedObject.arriveSettled": "8d8b5f94695f",
     "src/sharded/index.ts#ShardedObject.cleanupForeign": "bdc9b4c99e0c",
     "src/sharded/index.ts#ShardedObject.copyAndClaim": "f6f48c383ffe",
     "src/sharded/index.ts#ShardedObject.copyTo": "972e87230831",
@@ -22,11 +24,17 @@
     "src/sharded/index.ts#ShardedObject.shardedActivate": "118c0d3990f3",
     "src/sharded/index.ts#ShardedObject.shardedCall": "e8facc66696f",
     "src/sharded/index.ts#ShardedObject.shardedClaim": "2d426aa30317",
-    "src/sharded/index.ts#ShardedObject.shardedReceive": "fa38bfd3e232",
+    "src/sharded/index.ts#ShardedObject.shardedReceive": "db3682a43ce2",
     "src/sharded/index.ts#ShardedObject.shardedRestore": "9af6ac56dff1",
     "src/sharded/index.ts#ShardedObject.shardedScan": "50932c1866c5",
     "src/sharded/index.ts#ShardedObject.split": "bd3129ffa1bb",
     "src/sharded/index.ts#ShardedObject.update": "e757c263164b",
-    "src/sharded/index.ts#ShardedObject.waitForHold": "e9f287f59aad"
+    "src/sharded/index.ts#ShardedObject.waitForHold": "e9f287f59aad",
+    "src/table/client.ts#TableClient.list": "b29b8da0041e",
+    "src/table/client.ts#mergePages": "6e0d69fa0539",
+    "src/table/index.ts#ShardedTable.cleanupForeign": "46ce9716e350",
+    "src/table/index.ts#ShardedTable.page": "d2b5b93d3df5",
+    "src/table/index.ts#ShardedTable.tablePage": "1ebd0ecefa89",
+    "src/table/schema.ts#pageRequest": "c129ce2d7ccb"
   }
 }

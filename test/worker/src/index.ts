@@ -3,11 +3,77 @@
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
 import { DEFAULT_SPLIT_POLICY, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
+import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 
 interface Env {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
   readonly AUTO_COUNTERS: DurableObjectNamespace<AutoCounters>;
   readonly PRESPLIT_COUNTERS: DurableObjectNamespace<PresplitCounters>;
+  readonly REPOS: DurableObjectNamespace<Repos>;
+  readonly EVOLVING: DurableObjectNamespace<EvolvingRepos>;
+}
+
+// ---- A sharded table: repositories, split by hand ----
+
+export type Repo = { name: string; id: string; createdAt: number; lastPushAt: number | null; deleted: boolean; meta: unknown };
+export const repos = defineTable<Repo>({
+  primaryKey: "name",
+  columns: { name: "text", id: "text", createdAt: "integer", lastPushAt: "integer", deleted: "boolean", meta: "json" },
+  indexes: { byCreated: ["createdAt"], byPush: ["lastPushAt"], byDeletedCreated: ["deleted", "createdAt"] },
+});
+
+export class Repos extends ShardedTable<Env, Repo> {
+  protected table = repos;
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6, holdWaitMs: 0 };
+  /** Tests hold cleanup back, to list while shards still store rows they gave away. */
+  protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_flags (paused INTEGER NOT NULL)");
+    if (this.ctx.storage.sql.exec("SELECT paused FROM test_flags WHERE paused = 1").toArray().length) return 1; // not done: try again
+    return super.cleanupForeign(owns, limit);
+  }
+  async pauseCleanup(paused: boolean): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_flags (paused INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_flags");
+    this.ctx.storage.sql.exec("INSERT INTO test_flags (paused) VALUES (?)", paused ? 1 : 0);
+  }
+  /** Rows stored here, owned or not. */
+  async storedRows(): Promise<number> {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_table").one().n;
+  }
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.REPOS as never;
+  }
+}
+
+/** The repos table, then (after `upgrade`) with a `stars` column and a `byStars` index instead of `byPush`. */
+type RepoV2 = Repo & { stars: number | null };
+const reposV2 = defineTable<RepoV2>({
+  primaryKey: "name",
+  columns: { ...repos.columns, stars: "integer" },
+  indexes: { byCreated: ["createdAt"], byStars: ["stars"], byDeletedCreated: ["deleted", "createdAt"] },
+});
+
+export class EvolvingRepos extends ShardedTable<Env, RepoV2> {
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
+  protected get table(): TableSchema<RepoV2> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
+    const version = this.ctx.storage.sql.exec<{ version: number }>("SELECT version FROM test_schema").toArray()[0]?.version ?? 1;
+    return (version === 2 ? reposV2 : repos) as TableSchema<RepoV2>;
+  }
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.EVOLVING as never;
+  }
+  /** A deploy of the new schema: records it and restarts, so the next call migrates. */
+  async upgrade(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_schema");
+    this.ctx.storage.sql.exec("INSERT INTO test_schema (version) VALUES (2)");
+    await this.ctx.storage.sync();
+    this.ctx.abort("upgrade");
+  }
+  async indexNames(): Promise<string[]> {
+    return this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sharded_table' AND name LIKE 'sharded_table_ix_%' ORDER BY name").toArray().map((r) => r.name);
+  }
 }
 
 class CounterBase extends ShardedObject<Env, number> {
@@ -127,7 +193,28 @@ export class PresplitCounters extends CounterBase {
 }
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : env.COUNTERS) as never;
+  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.REPOS : cls === "evolving" ? env.EVOLVING : env.COUNTERS) as never;
+}
+
+/** POST /table {cls, name, op, args}: one call of the table client. */
+async function tableOp(env: Env, body: { cls: string; name: string; op: string; args: unknown[] }): Promise<unknown> {
+  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" ? reposV2 : repos) as never) as unknown as Record<string, (...a: unknown[]) => unknown>;
+  if (body.op === "all") {
+    const rows: unknown[] = [];
+    for await (const row of (t.all as (q: ListQuery) => AsyncGenerator<unknown>).call(t, body.args[0] as ListQuery)) rows.push(row);
+    return rows;
+  }
+  if (body.op === "upgrade") {
+    const ns = env.EVOLVING;
+    await ns.get(ns.idFromName(shardObjectName(body.name, ""))).upgrade().catch(() => {});
+    return null;
+  }
+  if (body.op === "indexNames") {
+    const ns = env.EVOLVING;
+    return ns.get(ns.idFromName(shardObjectName(body.name, ""))).indexNames();
+  }
+  if (body.op === "scan") return (sharded(namespace(env, body.cls) as never, body.name).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(...(body.args as [string, ...unknown[]]));
+  return t[body.op]!.call(t, ...body.args);
 }
 
 export default {
@@ -150,6 +237,8 @@ export default {
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedSplit(body.name, body.bits));
         case "/describe":
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedDescribe());
+        case "/table":
+          return Response.json((await tableOp(env, body as never)) ?? null);
         case "/splits":
           return Response.json(sharded(ns, body.name).knownSplits());
       }
