@@ -8,9 +8,12 @@ export default defineConfig(() => ({
     name: NAME,
     compatibilityDate: "2026-10-29",
     compatibilityFlags: ["nodejs_compat", "durable_object_snapshots"],
+    // A split benchmark runs writers for minutes in one request.
+    limits: { cpuMs: 300_000 },
     entrypoint,
     env: {
       BENCH_DRIVERS: bindings.durableObject({ worker: NAME, exportName: "BenchDriver" }),
+      SPLIT_JOBS: bindings.durableObject({ worker: NAME, exportName: "SplitBenchJob" }),
       SINGLE: bindings.durableObject({ worker: NAME, exportName: "SingleObject" }),
       SPLIT: bindings.durableObject({ worker: NAME, exportName: "SplitObject" }),
       LEGACY: bindings.durableObject({ worker: NAME, exportName: "LegacySplitObject" }),
@@ -20,12 +23,15 @@ export default defineConfig(() => ({
     },
     exports: {
       BenchDriver: exports.durableObject({ storage: "sqlite" }),
+      SplitBenchJob: exports.durableObject({ storage: "sqlite" }),
       SingleObject: exports.durableObject({ storage: "sqlite" }),
       SplitObject: exports.durableObject({ storage: "sqlite" }),
       LegacySplitObject: exports.durableObject({ storage: "sqlite" }),
       ManualSplitObject: exports.durableObject({ storage: "sqlite" }),
       ManualLegacySplitObject: exports.durableObject({ storage: "sqlite" }),
       ManualTwoCopySplitObject: exports.durableObject({ storage: "sqlite" }),
+      // Its earlier name, retired.
+      ManualRfd18SplitObject: exports.durableObject({ state: "deleted" }),
     },
   },
 }));

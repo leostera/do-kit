@@ -16,7 +16,7 @@ interface Point {
   topology: { leaves: number; rows: number; depth: number } | null;
 }
 interface SplitRun {
-  target: "split" | "legacy";
+  target: "split" | "two-copy" | "legacy";
   bytes: number;
   servingMs: number;
   doneMs: number;
@@ -42,7 +42,8 @@ const results = JSON.parse(await readFile(join(import.meta.dir, "results", "late
 const outDir = join(import.meta.dir, "..", "docs", "bench");
 await mkdir(outDir, { recursive: true });
 
-const COLORS: Record<Target, string> = { single: "#667085", split: "#e4572e", legacy: "#2e86ab" };
+const COLORS: Record<Target | "two-copy", string> = { single: "#667085", split: "#e4572e", legacy: "#2e86ab", "two-copy": "#7a5af8" };
+const SPLIT_NAMES = { split: "this package: move one half, one snapshot", "two-copy": "freeze, snapshot into two children", legacy: "v0.1: copy rows to both children" };
 const NAMES: Record<Target, string> = { single: "one Durable Object", split: "splittable (snapshot splits)", legacy: "splittable (row-copy splits, v0.1)" };
 const W = 1200;
 const H = 560;
@@ -165,11 +166,14 @@ const splits = results.splits ?? [];
 if (splits.length) {
   const sizes = [...new Set(splits.map((s) => s.bytes / 1048576))].sort((a, b) => a - b);
   const mib = (s: SplitRun) => s.bytes / 1048576;
-  const of = (t: "split" | "legacy", v: (s: SplitRun) => number): [number, number][] => splits.filter((s) => s.target === t).map((s) => [mib(s), v(s)]);
+  const of = (t: SplitRun["target"], v: (s: SplitRun) => number): [number, number][] => splits.filter((s) => s.target === t).map((s) => [mib(s), v(s)]);
   const sizeFmt = (v: number) => (v >= 1024 ? `${v / 1024} GiB` : `${v} MiB`);
+  // When the new owner serves with all its data: ours once the copy is claimed (deleting the
+  // half it gave away continues in the background); two-copy at the end of its freeze; the row
+  // copy once the last row has moved (its children serve sooner, by asking the parent per key).
   graphs["split-time"] = chart({
     title: "Time to split vs data size",
-    subtitle: "One split of a seeded object under 8 concurrent writers: until every row lives only at its new owner (log scale)",
+    subtitle: "Until the new owner serves with all of its data, under 8 concurrent writers (log scale)",
     xLabel: "Data in the object when it splits",
     yLabel: "seconds",
     xLog: true,
@@ -177,24 +181,39 @@ if (splits.length) {
     xTicks: sizes,
     xFormat: sizeFmt,
     series: [
-      { label: "snapshot split", color: COLORS.split, points: of("split", (s) => Math.max(0.01, s.doneMs / 1000)) },
-      { label: "row-copy split (v0.1)", color: COLORS.legacy, points: of("legacy", (s) => Math.max(0.01, s.doneMs / 1000)) },
+      { label: SPLIT_NAMES.split, color: COLORS.split, points: of("split", (s) => s.servingMs / 1000) },
+      { label: SPLIT_NAMES["two-copy"], color: COLORS["two-copy"], points: of("two-copy", (s) => s.doneMs / 1000) },
+      { label: SPLIT_NAMES.legacy, color: COLORS.legacy, points: of("legacy", (s) => s.doneMs / 1000) },
     ],
   });
   graphs["split-latency"] = chart({
-    title: "Write latency during a split",
-    subtitle: "Writes to random keys, from 1 s before the split to 1 s after it settles (log scale)",
+    title: "Slowest write during a split",
+    subtitle: "Maximum write latency from 1 s before the split until 1 s after it settles (log scale)",
     xLabel: "Data in the object when it splits",
-    yLabel: "latency (ms)",
+    yLabel: "milliseconds",
     xLog: true,
     yLog: true,
     xTicks: sizes,
     xFormat: sizeFmt,
     series: [
-      { label: "snapshot · p99", color: COLORS.split, points: of("split", (s) => Math.max(1, s.writeLatencyMs.p99)) },
-      { label: "snapshot · max", color: COLORS.split, dash: "8 6", points: of("split", (s) => Math.max(1, s.writeLatencyMs.max)) },
-      { label: "row copy · p99", color: COLORS.legacy, points: of("legacy", (s) => Math.max(1, s.writeLatencyMs.p99)) },
-      { label: "row copy · max", color: COLORS.legacy, dash: "8 6", points: of("legacy", (s) => Math.max(1, s.writeLatencyMs.max)) },
+      { label: SPLIT_NAMES.split, color: COLORS.split, points: of("split", (s) => Math.max(1, s.writeLatencyMs.max)) },
+      { label: SPLIT_NAMES["two-copy"], color: COLORS["two-copy"], points: of("two-copy", (s) => Math.max(1, s.writeLatencyMs.max)) },
+      { label: SPLIT_NAMES.legacy, color: COLORS.legacy, points: of("legacy", (s) => Math.max(1, s.writeLatencyMs.max)) },
+    ],
+  });
+  graphs["split-p95"] = chart({
+    title: "Write latency p95 during a split",
+    subtitle: "From 1 s before the split until 1 s after it settles, including background cleanup (log scale)",
+    xLabel: "Data in the object when it splits",
+    yLabel: "milliseconds",
+    xLog: true,
+    yLog: true,
+    xTicks: sizes,
+    xFormat: sizeFmt,
+    series: [
+      { label: SPLIT_NAMES.split, color: COLORS.split, points: of("split", (s) => Math.max(1, s.writeLatencyMs.p95)) },
+      { label: SPLIT_NAMES["two-copy"], color: COLORS["two-copy"], points: of("two-copy", (s) => Math.max(1, s.writeLatencyMs.p95)) },
+      { label: SPLIT_NAMES.legacy, color: COLORS.legacy, points: of("legacy", (s) => Math.max(1, s.writeLatencyMs.p95)) },
     ],
   });
 }
