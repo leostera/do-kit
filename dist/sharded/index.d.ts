@@ -107,7 +107,29 @@ export interface SplitRecord {
     readonly notReady: number;
     /** The longest a held write waited, released or not. */
     readonly heldMsMax: number;
+    /** Where the time went, in ms: steps not reached are 0. */
+    readonly steps: SplitSteps;
     readonly error: string | null;
+}
+/** The steps of one split attempt, in ms. */
+export interface SplitSteps {
+    /** `beforeHandOut`. */
+    readonly handOut: number;
+    /**
+     * Before the split holds anything: one call that starts the new object, so starting it is not
+     * paid while writes wait.
+     */
+    readonly warm: number;
+    /** Native: taking the snapshot, then the call that hands it over, and of that the sibling's own scheduling of the restore. Logical: copying the rows. */
+    readonly snapshot: number;
+    readonly restore: number;
+    readonly restoreInside: number;
+    readonly copyRows: number;
+    /** Claiming the copy: the sibling restarting on it, then accepting; and how many claim calls it took. */
+    readonly claim: number;
+    readonly claimAttempts: number;
+    /** Why the last claim call that failed failed (a restart in progress, usually). */
+    readonly claimError: string | null;
 }
 /**
  * Calls this object answered, by answer. Calls the runtime sheds as overloaded never reach the
@@ -172,6 +194,8 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private quietUntil;
     /** The split in progress here: writes to `right` wait for `released`. */
     private hold;
+    /** A split is starting its new object, before it holds anything. */
+    private warming;
     private counters;
     /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
     private receiving;
@@ -345,7 +369,11 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     /** Deletes one batch of rows this object gave away: the base table's first, then the subclass's. */
     private cleanupBatch;
     /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */
-    shardedRestore(snapshot: DurableObjectSnapshot): Promise<void>;
+    /** Nothing: a split calls it first to start this object, before it holds writes. */
+    shardedWarm(): Promise<void>;
+    shardedRestore(snapshot: DurableObjectSnapshot): Promise<{
+        scheduleMs: number;
+    }>;
     /**
      * The logical copy's tables and indexes: replaces this object's with them. What is here is
      * not a serving shard's (an unused object, or the copy of an abandoned attempt, maybe made

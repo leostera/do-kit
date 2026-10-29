@@ -185,3 +185,18 @@ With `initialDepth`, the first calls to a new object wait while it creates its s
 
 Before, the root created one shard per level in turn, and each new shard did the same on its first call: up to 10 object creations one after another for 16 shards. Now an object creates every shard up to 6 levels below it at once, at its final bits (at most 63 calls per round), so 16 shards take one round and 4,096 take two.
 
+## Where a native split's time goes
+
+Each split records its steps (\`splits[].steps\` in \`shardedDescribe()\`). Measured with \`POST /split-steps\` on the bench Worker: 8,000 rows of 200 bytes, then forced native splits a whole level at a time (1, 2, 4, then 8 at once) to 15 shards, with no load and with 64 writes in flight, 4 runs each (120 splits):
+
+| Step | Median | Slowest |
+|---|---|---|
+| Starting the new object (before writes are held) | 325 ms | 667 ms |
+| Snapshot | 1 ms | 192 ms |
+| Handing the snapshot over (of which the sibling scheduling the restore: 178 ms median) | 192 ms | 1,048 ms |
+| Claim: the sibling restarting on the snapshot, then accepting | 632 ms | 4,145 ms |
+| **Writes held** (the split's \`ms\`) | **847 ms** | **4,284 ms** |
+
+- Before the new object was started ahead of the split, starting it was paid while writes were held: held time had a median around 1.1–1.2 s, and once 12.8 s, all of it in the first call to the new object.
+- What remains is the platform restarting the new object on the snapshot. One restart took 4.1 s. The library cannot shorten it: the copy is a point in time, so writes to the moving half wait until the copy serves.
+

@@ -148,6 +148,8 @@ export class ShardedObject extends DurableObject {
     quietUntil = Date.now();
     /** The split in progress here: writes to `right` wait for `released`. */
     hold = null;
+    /** A split is starting its new object, before it holds anything. */
+    warming = false;
     counters = { since: Date.now(), calls: 0, ok: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
     /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
     receiving = null;
@@ -529,12 +531,29 @@ export class ShardedObject extends DurableObject {
      * claimed in time is abandoned, and the held writes go ahead here.
      */
     async split() {
-        const meta = this.meta;
+        const before = this.meta;
         // A presplit is splitting this shard already, by other means.
-        if (!meta || this.hold || this.presplitting || meta.state !== "shard" || meta.bits.length >= this.policy.maxDepth)
+        if (!before || this.hold || this.warming || this.presplitting || before.state !== "shard" || before.bits.length >= this.policy.maxDepth)
+            return false;
+        const right = `${before.bits}1`;
+        // Start the new object before holding writes: a first call to an object can take seconds.
+        this.warming = true;
+        const warmStarted = Date.now();
+        try {
+            await this.node(right).shardedWarm();
+        }
+        catch {
+            // The split's own calls retry, or give up.
+        }
+        finally {
+            this.warming = false;
+        }
+        const warm = Date.now() - warmStarted;
+        // Meanwhile the meta may have been saved (cleanup progress): split from the current one.
+        const meta = this.meta;
+        if (!meta || meta.bits !== before.bits || meta.state !== "shard" || meta.epoch !== before.epoch || this.hold || this.presplitting)
             return false;
         const epoch = meta.epoch + 1;
-        const right = `${meta.bits}1`;
         let release;
         const started = Date.now();
         const timeout = this.policy.splitTimeoutMs ?? 60_000;
@@ -544,15 +563,16 @@ export class ShardedObject extends DurableObject {
         const [rightLo] = hashRange(right);
         const counted = this.sql.exec("SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM sharded_rows WHERE hash >= ? AND hash <= ?", rightLo, lo, hi).one();
         let copy = null;
+        const steps = { warm, handOut: 0, snapshot: 0, restore: 0, restoreInside: 0, copyRows: 0, claim: 0, claimAttempts: 0, claimError: null };
         const record = (outcome, error) => [
             ...(this.meta?.splits ?? []),
-            { at: started, ms: Date.now() - started, outcome, copy, rows: counted.rows, rightRows: counted.rightRows, held: hold.held, notReady: hold.notReady, heldMsMax: hold.heldMsMax, error },
+            { at: started, ms: Date.now() - started, outcome, copy, rows: counted.rows, rightRows: counted.rightRows, held: hold.held, notReady: hold.notReady, heldMsMax: hold.heldMsMax, steps: { ...steps }, error },
         ].slice(-SPLIT_HISTORY);
         let timer;
         try {
             this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });
             const live = () => this.hold === hold && Date.now() - started < timeout;
-            const copied = this.copyAndClaim(right, epoch, live, (method) => (copy = method));
+            const copied = this.copyAndClaim(right, epoch, live, steps, (method) => (copy = method));
             copied.catch(() => { }); // after a timeout nobody waits for it
             const expired = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`split did not finish in ${timeout} ms`)), timeout)));
             const method = await Promise.race([copied, expired]);
@@ -585,30 +605,39 @@ export class ShardedObject extends DurableObject {
         }
     }
     /** Copies this object's storage to the right sibling, then claims the copy there. */
-    async copyAndClaim(right, epoch, live, copied) {
+    async copyAndClaim(right, epoch, live, steps, copied) {
+        let t = Date.now();
         await this.beforeHandOut();
-        const method = await this.copyTo(right, epoch, live);
+        steps.handOut = Date.now() - t;
+        const method = await this.copyTo(right, epoch, live, steps);
         copied(method);
         const meta = this.meta;
         let lastError = null;
+        t = Date.now();
         for (let wait = 10; live(); wait = Math.min(wait * 2, 500)) {
+            steps.claimAttempts++;
             try {
                 // A fresh stub each time: the sibling restarts to apply the restore, which breaks the old one.
-                if (await this.node(right).shardedClaim(meta.name, right, meta.bits, epoch))
+                const claimed = await this.node(right).shardedClaim(meta.name, right, meta.bits, epoch);
+                steps.claim = Date.now() - t;
+                if (claimed)
                     return method;
             }
             catch (error) {
                 // The sibling restarting (or still starting on the copy). Claiming is idempotent.
                 lastError = error;
+                steps.claim = Date.now() - t;
+                steps.claimError = String(error).slice(0, 200);
             }
             await new Promise((resolve) => setTimeout(resolve, wait));
         }
         throw new Error(`split timed out claiming its copy${lastError ? `: ${String(lastError)}` : ""}`);
     }
-    async copyTo(right, epoch, live) {
+    async copyTo(right, epoch, live, steps) {
         const mode = this.policy.copy ?? "auto";
         if (mode !== "logical" && typeof this.ctx.storage.snapshot === "function") {
             let snapshot = null;
+            let t = Date.now();
             try {
                 snapshot = await this.ctx.storage.snapshot();
             }
@@ -616,9 +645,11 @@ export class ShardedObject extends DurableObject {
                 if (mode === "native")
                     throw error; // auto: no snapshots here (local development)
             }
+            steps.snapshot = Date.now() - t;
             if (snapshot) {
+                t = Date.now();
                 try {
-                    await this.node(right).shardedRestore(snapshot);
+                    steps.restoreInside = (await this.node(right).shardedRestore(snapshot)).scheduleMs;
                 }
                 catch (error) {
                     // The sibling restarts right after replying; under load the restart can overtake the
@@ -626,13 +657,22 @@ export class ShardedObject extends DurableObject {
                     if (!String(error).includes(RESTORE_ABORT))
                         throw error;
                 }
+                finally {
+                    steps.restore = Date.now() - t;
+                }
                 return "native";
             }
         }
         else if (mode === "native") {
             throw new Error("storage snapshots need the durable_object_snapshots compatibility flag");
         }
-        await this.copyRows(right, epoch, live);
+        const t = Date.now();
+        try {
+            await this.copyRows(right, epoch, live);
+        }
+        finally {
+            steps.copyRows = Date.now() - t;
+        }
         return "logical";
     }
     /**
@@ -857,9 +897,12 @@ export class ShardedObject extends DurableObject {
     }
     // ---- The sibling's side of a split ----
     /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */
+    /** Nothing: a split calls it first to start this object, before it holds writes. */
+    async shardedWarm() { }
     async shardedRestore(snapshot) {
         if (this.serving())
             throw new Error("refusing to overwrite a serving shard");
+        const started = Date.now();
         try {
             await this.ctx.storage.onNextSessionRestore(snapshot);
         }
@@ -878,6 +921,7 @@ export class ShardedObject extends DurableObject {
                 // aborting throws in the caller too
             }
         }, 50)));
+        return { scheduleMs: Date.now() - started };
     }
     /**
      * The logical copy's tables and indexes: replaces this object's with them. What is here is

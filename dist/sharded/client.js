@@ -56,8 +56,10 @@ class Backoff {
     async next() {
         if (this.waited > this.limitMs && Date.now() > this.until + ACTIVATION_SLACK_MS)
             throw new Error(`${this.what}: a new shard did not start serving`);
-        await sleep(this.wait);
-        this.waited += this.wait;
+        // Jittered: callers held by one split are released together, and must not retry in step.
+        const wait = this.wait / 2 + Math.random() * this.wait;
+        await sleep(wait);
+        this.waited += wait;
         this.wait = Math.min(this.wait * 2, 250);
     }
 }

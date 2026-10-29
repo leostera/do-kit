@@ -129,7 +129,30 @@ export interface SplitRecord {
   readonly notReady: number;
   /** The longest a held write waited, released or not. */
   readonly heldMsMax: number;
+  /** Where the time went, in ms: steps not reached are 0. */
+  readonly steps: SplitSteps;
   readonly error: string | null;
+}
+
+/** The steps of one split attempt, in ms. */
+export interface SplitSteps {
+  /** `beforeHandOut`. */
+  readonly handOut: number;
+  /**
+   * Before the split holds anything: one call that starts the new object, so starting it is not
+   * paid while writes wait.
+   */
+  readonly warm: number;
+  /** Native: taking the snapshot, then the call that hands it over, and of that the sibling's own scheduling of the restore. Logical: copying the rows. */
+  readonly snapshot: number;
+  readonly restore: number;
+  readonly restoreInside: number;
+  readonly copyRows: number;
+  /** Claiming the copy: the sibling restarting on it, then accepting; and how many claim calls it took. */
+  readonly claim: number;
+  readonly claimAttempts: number;
+  /** Why the last claim call that failed failed (a restart in progress, usually). */
+  readonly claimError: string | null;
 }
 
 /**
@@ -157,6 +180,9 @@ export interface CallCounters {
   readonly held: number;
   readonly heldMsMax: number;
 }
+
+/** The step timings of a split attempt, filled in as it goes. */
+type Steps = { -readonly [K in keyof SplitSteps]: SplitSteps[K] };
 
 /** A split in progress: writes to `right` wait for `released`, and are counted for its record. */
 type Hold = { epoch: number; right: string; released: Promise<void>; deadline: number; held: number; notReady: number; heldMsMax: number };
@@ -316,6 +342,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private quietUntil = Date.now();
   /** The split in progress here: writes to `right` wait for `released`. */
   private hold: Hold | null = null;
+  /** A split is starting its new object, before it holds anything. */
+  private warming = false;
   private counters = { since: Date.now(), calls: 0, ok: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
   /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
   private receiving: number | null = null;
@@ -685,11 +713,25 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * claimed in time is abandoned, and the held writes go ahead here.
    */
   private async split(): Promise<boolean> {
-    const meta = this.meta;
+    const before = this.meta;
     // A presplit is splitting this shard already, by other means.
-    if (!meta || this.hold || this.presplitting || meta.state !== "shard" || meta.bits.length >= this.policy.maxDepth) return false;
+    if (!before || this.hold || this.warming || this.presplitting || before.state !== "shard" || before.bits.length >= this.policy.maxDepth) return false;
+    const right = `${before.bits}1`;
+    // Start the new object before holding writes: a first call to an object can take seconds.
+    this.warming = true;
+    const warmStarted = Date.now();
+    try {
+      await this.node(right).shardedWarm();
+    } catch {
+      // The split's own calls retry, or give up.
+    } finally {
+      this.warming = false;
+    }
+    const warm = Date.now() - warmStarted;
+    // Meanwhile the meta may have been saved (cleanup progress): split from the current one.
+    const meta = this.meta;
+    if (!meta || meta.bits !== before.bits || meta.state !== "shard" || meta.epoch !== before.epoch || this.hold || this.presplitting) return false;
     const epoch = meta.epoch + 1;
-    const right = `${meta.bits}1`;
     let release!: () => void;
     const started = Date.now();
     const timeout = this.policy.splitTimeoutMs ?? 60_000;
@@ -699,15 +741,16 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const [rightLo] = hashRange(right);
     const counted = this.sql.exec<{ rows: number; rightRows: number }>("SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM sharded_rows WHERE hash >= ? AND hash <= ?", rightLo, lo, hi).one();
     let copy: "native" | "logical" | null = null;
+    const steps = { warm, handOut: 0, snapshot: 0, restore: 0, restoreInside: 0, copyRows: 0, claim: 0, claimAttempts: 0, claimError: null as string | null };
     const record = (outcome: SplitRecord["outcome"], error: string | null): SplitRecord[] => [
       ...(this.meta?.splits ?? []),
-      { at: started, ms: Date.now() - started, outcome, copy, rows: counted.rows, rightRows: counted.rightRows, held: hold.held, notReady: hold.notReady, heldMsMax: hold.heldMsMax, error },
+      { at: started, ms: Date.now() - started, outcome, copy, rows: counted.rows, rightRows: counted.rightRows, held: hold.held, notReady: hold.notReady, heldMsMax: hold.heldMsMax, steps: { ...steps }, error },
     ].slice(-SPLIT_HISTORY);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });
       const live = () => this.hold === hold && Date.now() - started < timeout;
-      const copied = this.copyAndClaim(right, epoch, live, (method) => (copy = method));
+      const copied = this.copyAndClaim(right, epoch, live, steps, (method) => (copy = method));
       copied.catch(() => {}); // after a timeout nobody waits for it
       const expired = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`split did not finish in ${timeout} ms`)), timeout)));
       const method = await Promise.race([copied, expired]);
@@ -738,48 +781,66 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   /** Copies this object's storage to the right sibling, then claims the copy there. */
-  private async copyAndClaim(right: string, epoch: number, live: () => boolean, copied: (method: "native" | "logical") => void): Promise<"native" | "logical"> {
+  private async copyAndClaim(right: string, epoch: number, live: () => boolean, steps: Steps, copied: (method: "native" | "logical") => void): Promise<"native" | "logical"> {
+    let t = Date.now();
     await this.beforeHandOut();
-    const method = await this.copyTo(right, epoch, live);
+    steps.handOut = Date.now() - t;
+    const method = await this.copyTo(right, epoch, live, steps);
     copied(method);
     const meta = this.meta!;
     let lastError: unknown = null;
+    t = Date.now();
     for (let wait = 10; live(); wait = Math.min(wait * 2, 500)) {
+      steps.claimAttempts++;
       try {
         // A fresh stub each time: the sibling restarts to apply the restore, which breaks the old one.
-        if (await this.node(right).shardedClaim(meta.name, right, meta.bits, epoch)) return method;
+        const claimed = await this.node(right).shardedClaim(meta.name, right, meta.bits, epoch);
+        steps.claim = Date.now() - t;
+        if (claimed) return method;
       } catch (error) {
         // The sibling restarting (or still starting on the copy). Claiming is idempotent.
         lastError = error;
+        steps.claim = Date.now() - t;
+        steps.claimError = String(error).slice(0, 200);
       }
       await new Promise((resolve) => setTimeout(resolve, wait));
     }
     throw new Error(`split timed out claiming its copy${lastError ? `: ${String(lastError)}` : ""}`);
   }
 
-  private async copyTo(right: string, epoch: number, live: () => boolean): Promise<"native" | "logical"> {
+  private async copyTo(right: string, epoch: number, live: () => boolean, steps: Steps): Promise<"native" | "logical"> {
     const mode = this.policy.copy ?? "auto";
     if (mode !== "logical" && typeof this.ctx.storage.snapshot === "function") {
       let snapshot: DurableObjectSnapshot | null = null;
+      let t = Date.now();
       try {
         snapshot = await this.ctx.storage.snapshot();
       } catch (error) {
         if (mode === "native") throw error; // auto: no snapshots here (local development)
       }
+      steps.snapshot = Date.now() - t;
       if (snapshot) {
+        t = Date.now();
         try {
-          await this.node(right).shardedRestore(snapshot);
+          steps.restoreInside = (await this.node(right).shardedRestore(snapshot)).scheduleMs;
         } catch (error) {
           // The sibling restarts right after replying; under load the restart can overtake the
           // reply. Claiming tells whether the restore took.
           if (!String(error).includes(RESTORE_ABORT)) throw error;
+        } finally {
+          steps.restore = Date.now() - t;
         }
         return "native";
       }
     } else if (mode === "native") {
       throw new Error("storage snapshots need the durable_object_snapshots compatibility flag");
     }
-    await this.copyRows(right, epoch, live);
+    const t = Date.now();
+    try {
+      await this.copyRows(right, epoch, live);
+    } finally {
+      steps.copyRows = Date.now() - t;
+    }
     return "logical";
   }
 
@@ -992,8 +1053,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   // ---- The sibling's side of a split ----
 
   /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */
-  async shardedRestore(snapshot: DurableObjectSnapshot): Promise<void> {
+  /** Nothing: a split calls it first to start this object, before it holds writes. */
+  async shardedWarm(): Promise<void> {}
+
+  async shardedRestore(snapshot: DurableObjectSnapshot): Promise<{ scheduleMs: number }> {
     if (this.serving()) throw new Error("refusing to overwrite a serving shard");
+    const started = Date.now();
     try {
       await this.ctx.storage.onNextSessionRestore!(snapshot);
     } catch (error) {
@@ -1013,6 +1078,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
         }, 50),
       ),
     );
+    return { scheduleMs: Date.now() - started };
   }
 
   /**

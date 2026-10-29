@@ -747,6 +747,52 @@ export default {
       if (!/^[a-zA-Z0-9_-]{1,80}$/.test(name)) return Response.json({ error: "objectName" }, { status: 400 });
       return Response.json(await env.SPLIT_JOBS.get(env.SPLIT_JOBS.idFromName(name)).poll());
     }
+    // Forced native splits, a whole level at once, optionally under write load: where each split's time goes.
+    if (request.method === "POST" && path === "/split-steps") {
+      const body = (await request.json()) as { rows?: number; levels?: number; load?: number };
+      const rows = Math.min(Math.max(Math.floor(body.rows ?? 2000), 100), 20_000);
+      const levels = Math.min(Math.max(Math.floor(body.levels ?? 3), 1), 4);
+      const load = Math.min(Math.max(Math.floor(body.load ?? 0), 0), 256);
+      const name = `steps-${crypto.randomUUID()}`;
+      const ns = env.SPLIT as DurableObjectNamespace<SplitObject>;
+      const client = sharded(ns, name);
+      const value = "x".repeat(200);
+      for (let i = 0; i < rows; i += 100) {
+        const keys = Array.from({ length: Math.min(100, rows - i) }, (_, j) => `r-${i + j}`);
+        await client.call(keys, "put", keys.map(() => value));
+      }
+      let stop = false;
+      let writes = 0;
+      let failures = 0;
+      const loaders = Array.from({ length: load }, async (_, w) => {
+        for (let i = 0; !stop; i++) {
+          try {
+            await client.call([`r-${(w * 7919 + i * 104729) % rows}`], "put", [value]);
+            writes++;
+          } catch {
+            failures++;
+          }
+        }
+      });
+      const records: unknown[] = [];
+      let level = [""];
+      for (let depth = 0; depth < levels; depth++) {
+        const started = Date.now();
+        const results = await Promise.all(
+          level.map(async (bits) => {
+            const stub = ns.get(ns.idFromName(shardObjectName(name, bits)));
+            const ok = await stub.shardedSplit(name, bits);
+            const split = (await stub.shardedDescribe()).splits.at(-1) ?? null;
+            return { bits, ok, split };
+          }),
+        );
+        records.push({ depth, wallMs: Date.now() - started, results });
+        level = level.flatMap((bits) => [`${bits}0`, `${bits}1`]);
+      }
+      stop = true;
+      await Promise.all(loaders);
+      return Response.json({ rows, load, writes, failures, records });
+    }
     // The first calls to a new presplit object: each waits for the presplit, so this times it.
     if (request.method === "POST" && path === "/first-calls") {
       const body = (await request.json()) as { target?: string; calls?: number };
