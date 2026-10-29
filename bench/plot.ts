@@ -6,7 +6,7 @@ type Target = "single" | "split" | "presplit" | "legacy";
 interface Point {
   target: Target;
   operation: "read" | "write";
-  distribution: "uniform" | "hot";
+  distribution: "uniform" | "hot" | "control-plane";
   concurrency: number;
   payloadBytes: number;
   operationsPerSecond: number;
@@ -42,7 +42,7 @@ await mkdir(outDir, { recursive: true });
 
 const COLORS: Record<Target | "two-copy", string> = { single: "#667085", split: "#e4572e", presplit: "#f79009", legacy: "#2e86ab", "two-copy": "#7a5af8" };
 const SPLIT_NAMES = { split: "splittable-object: move one half (snapshot)", "two-copy": "freeze, snapshot into two new objects", legacy: "v0.1: copy rows to two new objects" };
-const NAMES: Record<Target, string> = { single: "one Durable Object", split: "splittable-object", presplit: "splittable-object, 16 leaves from the start", legacy: "splittable-object v0.1 (row copy)" };
+const NAMES: Record<Target, string> = { single: "one Durable Object", split: "splittable-object, splitting by load", presplit: "splittable-object, 16 leaves from the start", legacy: "splittable-object v0.1 (row copy)" };
 const W = 1200;
 const PLOT_H = 380;
 const L = 96;
@@ -232,6 +232,40 @@ if (splits.length) {
   graphs["split-time"] = panels("Time to split", "Until the new owner serves with all of its data, under 8 concurrent writers. Each panel has its own scale.", groups((s) => (s.target === "split" ? s.servingMs : s.doneMs), seconds), legend, "Measured on Cloudflare's network, 1 KiB rows. splittable-object deletes the half each side gave away afterwards, in the background.");
   graphs["split-latency"] = panels("Slowest write during a split", "Maximum write latency from 1 s before the split until 1 s after it settles. Each panel has its own scale.", groups((s) => s.writeLatencyMs.max, millis), legend, "With a snapshot, the slowest write is one that waited for the copy: with splittable-object only writes to the moving half wait.");
   graphs["split-p95"] = panels("Write latency p95 during a split", "From 1 s before the split until 1 s after it settles, background cleanup included. Each panel has its own scale.", groups((s) => s.writeLatencyMs.p95, millis), legend, "The row copy keeps the busy object answering per-key fetches for minutes; the snapshot designs do not.");
+}
+
+// ---- Control plane: a handful of popular objects, mostly read ----
+const control = results.points.filter((p) => p.distribution === "control-plane");
+const controlTargets = (["single", "split", "presplit"] as const).filter((t) => control.some((p) => p.target === t));
+if (controlTargets.length > 1) {
+  const cLevels = [...new Set(control.map((p) => p.concurrency))].sort((a, b) => a - b);
+  const cSel = (t: Target, v: (p: Point) => number): [number, number][] => control.filter((p) => p.target === t).map((p) => [p.concurrency, v(p)]);
+  const keys = (results as { controlPlaneKeys?: number }).controlPlaneKeys;
+  const sub = `${keys ?? "A handful of"} objects, Zipf popularity, 95% reads and 5% writes of 1 KiB values, 10 s per point`;
+  graphs["control-plane-throughput"] = chart({
+    title: "Control plane: throughput vs concurrency",
+    subtitle: sub,
+    xLabel: "Concurrent in-flight operations",
+    yLabel: "operations / s",
+    xTicks: cLevels,
+    series: controlTargets.map((t) => ({ label: NAMES[t], color: COLORS[t], points: cSel(t, (p) => p.operationsPerSecond) })),
+  });
+  graphs["control-plane-p99"] = chart({
+    title: "Control plane: p99 latency vs concurrency",
+    subtitle: sub,
+    xLabel: "Concurrent in-flight operations",
+    yLabel: "p99 latency (ms)",
+    xTicks: cLevels,
+    series: controlTargets.map((t) => ({ label: NAMES[t], color: COLORS[t], points: cSel(t, (p) => p.latencyMs.p99) })),
+  });
+  graphs["control-plane-errors"] = chart({
+    title: "Control plane: failed calls vs concurrency",
+    subtitle: sub,
+    xLabel: "Concurrent in-flight operations",
+    yLabel: "failed calls in 10 s",
+    xTicks: cLevels,
+    series: controlTargets.map((t) => ({ label: NAMES[t], color: COLORS[t], points: cSel(t, (p) => p.errors) })),
+  });
 }
 
 for (const [name, svg] of Object.entries(graphs)) await writeFile(join(outDir, `${name}.svg`), svg);

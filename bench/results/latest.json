@@ -301,6 +301,775 @@
         "rows": 1097,
         "depth": 4
       }
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 1,
+      "successes": 660,
+      "errors": 0,
+      "elapsedMs": 10004,
+      "operationsPerSecond": 65.9736105557777,
+      "mebibytesPerSecond": 0.06442735405837666,
+      "latencyMs": {
+        "p50": 15,
+        "p95": 23,
+        "p99": 30,
+        "max": 117
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 16,
+      "successes": 3688,
+      "errors": 0,
+      "elapsedMs": 10122,
+      "operationsPerSecond": 364.354870578937,
+      "mebibytesPerSecond": 0.35581530329974315,
+      "latencyMs": {
+        "p50": 21,
+        "p95": 151,
+        "p99": 216,
+        "max": 395
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 16,
+      "successes": 10531,
+      "errors": 0,
+      "elapsedMs": 10496,
+      "operationsPerSecond": 1003.3346036585366,
+      "mebibytesPerSecond": 0.9798189488852896,
+      "latencyMs": {
+        "p50": 34,
+        "p95": 265,
+        "p99": 390,
+        "max": 593
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 16,
+      "successes": 13497,
+      "errors": 0,
+      "elapsedMs": 10976,
+      "operationsPerSecond": 1229.682944606414,
+      "mebibytesPerSecond": 1.200862250592201,
+      "latencyMs": {
+        "p50": 111,
+        "p95": 753,
+        "p99": 1116,
+        "max": 1565
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-1940e2e8601a-single-read-uniform",
+      "driverCount": 64,
+      "successes": 17976,
+      "errors": 0,
+      "elapsedMs": 10876,
+      "operationsPerSecond": 1652.8135343876427,
+      "mebibytesPerSecond": 1.6140757171754323,
+      "latencyMs": {
+        "p50": 479,
+        "p95": 1056,
+        "p99": 1300,
+        "max": 1990
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-fed05e4a97eb-single-read-uniform",
+      "driverCount": 128,
+      "failedDrivers": 0,
+      "successes": 15212,
+      "errors": 16901,
+      "elapsedMs": 10673,
+      "operationsPerSecond": 1425.278740747681,
+      "mebibytesPerSecond": 1.3918737702614072,
+      "latencyMs": {
+        "p50": 25,
+        "p95": 1769,
+        "p99": 1837,
+        "max": 2791
+      },
+      "topology": null
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-314fefa309c6-presplit-read-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "successes": 1035,
+      "errors": 0,
+      "elapsedMs": 10006,
+      "operationsPerSecond": 103.43793723765741,
+      "mebibytesPerSecond": 0.10101361058364981,
+      "latencyMs": {
+        "p50": 10,
+        "p95": 16,
+        "p99": 21,
+        "max": 43
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-314fefa309c6-presplit-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 3263,
+      "errors": 0,
+      "elapsedMs": 10137,
+      "operationsPerSecond": 321.8901055539114,
+      "mebibytesPerSecond": 0.3143458062049916,
+      "latencyMs": {
+        "p50": 35,
+        "p95": 149,
+        "p99": 216,
+        "max": 740
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-314fefa309c6-presplit-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 12283,
+      "errors": 0,
+      "elapsedMs": 10402,
+      "operationsPerSecond": 1180.8306094981735,
+      "mebibytesPerSecond": 1.15315489208806,
+      "latencyMs": {
+        "p50": 34,
+        "p95": 242,
+        "p99": 366,
+        "max": 610
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-314fefa309c6-presplit-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 20352,
+      "errors": 0,
+      "elapsedMs": 11068,
+      "operationsPerSecond": 1838.8146006505242,
+      "mebibytesPerSecond": 1.7957173834477775,
+      "latencyMs": {
+        "p50": 85,
+        "p95": 612,
+        "p99": 877,
+        "max": 1735
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-314fefa309c6-presplit-read-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "successes": 51335,
+      "errors": 0,
+      "elapsedMs": 11191,
+      "operationsPerSecond": 4587.168260209096,
+      "mebibytesPerSecond": 4.479656504110445,
+      "latencyMs": {
+        "p50": 106,
+        "p95": 732,
+        "p99": 1088,
+        "max": 1555
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-314fefa309c6-presplit-read-uniform",
+      "driverCount": 128,
+      "failedDrivers": 0,
+      "successes": 96460,
+      "errors": 0,
+      "elapsedMs": 11790,
+      "operationsPerSecond": 8181.509754028839,
+      "mebibytesPerSecond": 7.989755619168788,
+      "latencyMs": {
+        "p50": 118,
+        "p95": 771,
+        "p99": 1129,
+        "max": 2100
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-98ba4895a1c4-single-read-control-plane",
+      "driverCount": 1,
+      "successes": 374,
+      "errors": 0,
+      "elapsedMs": 10000,
+      "operationsPerSecond": 37.4,
+      "mebibytesPerSecond": 0.0365234375,
+      "latencyMs": {
+        "p50": 26,
+        "p95": 37,
+        "p99": 51,
+        "max": 121
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-98ba4895a1c4-single-read-control-plane",
+      "driverCount": 16,
+      "successes": 2092,
+      "errors": 0,
+      "elapsedMs": 10133,
+      "operationsPerSecond": 206.45415967630515,
+      "mebibytesPerSecond": 0.20161539030889175,
+      "latencyMs": {
+        "p50": 56,
+        "p95": 181,
+        "p99": 242,
+        "max": 1001
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-98ba4895a1c4-single-read-control-plane",
+      "driverCount": 16,
+      "successes": 5753,
+      "errors": 0,
+      "elapsedMs": 10314,
+      "operationsPerSecond": 557.7855342253248,
+      "mebibytesPerSecond": 0.5447124357669187,
+      "latencyMs": {
+        "p50": 68,
+        "p95": 341,
+        "p99": 462,
+        "max": 2658
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-98ba4895a1c4-single-read-control-plane",
+      "driverCount": 16,
+      "successes": 7470,
+      "errors": 0,
+      "elapsedMs": 11800,
+      "operationsPerSecond": 633.0508474576271,
+      "mebibytesPerSecond": 0.618213718220339,
+      "latencyMs": {
+        "p50": 239,
+        "p95": 917,
+        "p99": 1165,
+        "max": 2675
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-98ba4895a1c4-single-read-control-plane",
+      "driverCount": 64,
+      "successes": 10365,
+      "errors": 0,
+      "elapsedMs": 11957,
+      "operationsPerSecond": 866.8562348415154,
+      "mebibytesPerSecond": 0.8465392918374174,
+      "latencyMs": {
+        "p50": 1023,
+        "p95": 1561,
+        "p99": 1999,
+        "max": 2822
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-98ba4895a1c4-single-read-control-plane",
+      "driverCount": 128,
+      "successes": 7332,
+      "errors": 43951,
+      "elapsedMs": 11033,
+      "operationsPerSecond": 664.5517991480106,
+      "mebibytesPerSecond": 0.6489763663554791,
+      "latencyMs": {
+        "p50": 15,
+        "p95": 2133,
+        "p99": 3084,
+        "max": 4612
+      },
+      "topology": null
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-split-read-control-plane",
+      "driverCount": 1,
+      "successes": 50,
+      "errors": 0,
+      "elapsedMs": 10338,
+      "operationsPerSecond": 4.836525440123816,
+      "mebibytesPerSecond": 0.004723169375120914,
+      "latencyMs": {
+        "p50": 29,
+        "p95": 94,
+        "p99": 8718,
+        "max": 8717
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10,
+        "depth": 0
+      }
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-split-read-control-plane",
+      "driverCount": 16,
+      "successes": 1662,
+      "errors": 0,
+      "elapsedMs": 10164,
+      "operationsPerSecond": 163.51829988193626,
+      "mebibytesPerSecond": 0.15968583972845338,
+      "latencyMs": {
+        "p50": 79,
+        "p95": 205,
+        "p99": 271,
+        "max": 779
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10,
+        "depth": 0
+      }
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-split-read-control-plane",
+      "driverCount": 16,
+      "successes": 3855,
+      "errors": 0,
+      "elapsedMs": 10231,
+      "operationsPerSecond": 376.7960121200274,
+      "mebibytesPerSecond": 0.36796485558596426,
+      "latencyMs": {
+        "p50": 104,
+        "p95": 372,
+        "p99": 1391,
+        "max": 4818
+      },
+      "topology": {
+        "leaves": 2,
+        "rows": 10,
+        "depth": 1
+      }
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-split-read-control-plane",
+      "driverCount": 16,
+      "successes": 10755,
+      "errors": 0,
+      "elapsedMs": 14431,
+      "operationsPerSecond": 745.2705980181554,
+      "mebibytesPerSecond": 0.7278033183771049,
+      "latencyMs": {
+        "p50": 122,
+        "p95": 656,
+        "p99": 6303,
+        "max": 10400
+      },
+      "topology": {
+        "leaves": 6,
+        "rows": 10,
+        "depth": 4
+      }
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-split-read-control-plane",
+      "driverCount": 64,
+      "successes": 35228,
+      "errors": 0,
+      "elapsedMs": 12173,
+      "operationsPerSecond": 2893.9456173498725,
+      "mebibytesPerSecond": 2.826118766943235,
+      "latencyMs": {
+        "p50": 224,
+        "p95": 751,
+        "p99": 1135,
+        "max": 4116
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 7
+      }
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-split-read-control-plane",
+      "driverCount": 128,
+      "successes": 39397,
+      "errors": 11175,
+      "elapsedMs": 12787,
+      "operationsPerSecond": 3081.0197857198714,
+      "mebibytesPerSecond": 3.008808384492062,
+      "latencyMs": {
+        "p50": 196,
+        "p95": 2449,
+        "p99": 3260,
+        "max": 7142
+      },
+      "topology": {
+        "leaves": 25,
+        "rows": 10,
+        "depth": 10
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-presplit-read-control-plane",
+      "driverCount": 1,
+      "successes": 1324,
+      "errors": 0,
+      "elapsedMs": 10001,
+      "operationsPerSecond": 132.38676132386763,
+      "mebibytesPerSecond": 0.12928394660533948,
+      "latencyMs": {
+        "p50": 8,
+        "p95": 12,
+        "p99": 19,
+        "max": 190
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-presplit-read-control-plane",
+      "driverCount": 16,
+      "successes": 3270,
+      "errors": 0,
+      "elapsedMs": 10184,
+      "operationsPerSecond": 321.0919088766693,
+      "mebibytesPerSecond": 0.3135663172623724,
+      "latencyMs": {
+        "p50": 37,
+        "p95": 155,
+        "p99": 216,
+        "max": 894
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-presplit-read-control-plane",
+      "driverCount": 16,
+      "successes": 11385,
+      "errors": 0,
+      "elapsedMs": 10349,
+      "operationsPerSecond": 1100.1062904628466,
+      "mebibytesPerSecond": 1.0743225492801236,
+      "latencyMs": {
+        "p50": 36,
+        "p95": 252,
+        "p99": 392,
+        "max": 576
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-3bec2d263686-presplit-read-control-plane",
+      "driverCount": 16,
+      "successes": 20407,
+      "errors": 0,
+      "elapsedMs": 11034,
+      "operationsPerSecond": 1849.4652891063984,
+      "mebibytesPerSecond": 1.8061184463929671,
+      "latencyMs": {
+        "p50": 78,
+        "p95": 652,
+        "p99": 977,
+        "max": 1876
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-2b84a8b65f9e-presplit-read-control-plane",
+      "driverCount": 64,
+      "successes": 37013,
+      "errors": 0,
+      "elapsedMs": 10924,
+      "operationsPerSecond": 3388.227755400952,
+      "mebibytesPerSecond": 3.308816167383742,
+      "latencyMs": {
+        "p50": 191,
+        "p95": 746,
+        "p99": 963,
+        "max": 1637
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 4
+      }
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-2b84a8b65f9e-presplit-read-control-plane",
+      "driverCount": 128,
+      "successes": 41786,
+      "errors": 0,
+      "elapsedMs": 10987,
+      "operationsPerSecond": 3803.2219896241013,
+      "mebibytesPerSecond": 3.7140839742422864,
+      "latencyMs": {
+        "p50": 400,
+        "p95": 1368,
+        "p99": 1692,
+        "max": 2679
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 4
+      }
     }
   ],
   "splits": [
@@ -451,5 +1220,6 @@
         "max": 26152
       }
     }
-  ]
+  ],
+  "controlPlaneKeys": 10
 }

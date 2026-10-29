@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 type Target = "single" | "split" | "legacy" | "presplit";
 type Operation = "read" | "write";
-type Distribution = "uniform" | "hot";
+type Distribution = "uniform" | "hot" | "control-plane";
 
 interface Point {
   readonly target: Target;
@@ -63,14 +63,21 @@ async function measure(config: {
   concurrency: number;
   objectName: string;
 }): Promise<Point> {
-  const response = await fetch(`${baseUrl}/measure`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ ...config, durationMs, keyCount, payloadBytes }),
-  });
-  const body = await response.json();
-  if (!response.ok) throw new Error(`Benchmark request failed (${response.status}): ${JSON.stringify(body)}`);
-  return body as Point;
+  // A failed point is retried once; what failed is logged, as the platform answered it.
+  for (let attempt = 1; ; attempt++) {
+    const response = await fetch(`${baseUrl}/measure`, { method: "POST", headers, body: JSON.stringify({ ...config, durationMs, keyCount, payloadBytes }), timeout: false } as RequestInit);
+    const text = await response.text();
+    if (response.ok) {
+      try {
+        return JSON.parse(text) as Point;
+      } catch {
+        // not JSON: fall through
+      }
+    }
+    const title = /<title>([^<]*)<\/title>/.exec(text)?.[1] ?? text.slice(0, 200);
+    console.error(JSON.stringify({ failed: config, status: response.status, cfRay: response.headers.get("cf-ray"), answer: title.trim() }));
+    if (attempt >= 2) throw new Error(`Benchmark request failed (${response.status}): ${title}`);
+  }
 }
 
 function save(): void {

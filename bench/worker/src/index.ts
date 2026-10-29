@@ -7,7 +7,35 @@ const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
 type Target = "single" | "split" | "legacy" | "presplit";
 type Operation = "read" | "write";
-type Distribution = "uniform" | "hot";
+/**
+ * How keys are chosen: "uniform" over `keyCount` keys, one "hot" key, or "control-plane": a handful
+ * (`keyCount`) of popular objects, mostly read. Key shape does not matter beyond that: keys are
+ * routed by their SHA-256.
+ */
+type Distribution = "uniform" | "hot" | "control-plane";
+const DISTRIBUTIONS: readonly Distribution[] = ["uniform", "hot", "control-plane"];
+
+/** Control plane: `keyCount` objects (a handful), popularity Zipf(s), and this share of calls are writes. */
+const CONTROL_PLANE = { s: 1.1, writeShare: 0.05 };
+const zipfCdfs = new Map<number, number[]>();
+function zipfObject(objects: number): string {
+  let cdf = zipfCdfs.get(objects);
+  if (!cdf) {
+    const weights = Array.from({ length: objects }, (_, i) => 1 / (i + 1) ** CONTROL_PLANE.s);
+    const total = weights.reduce((a, b) => a + b, 0);
+    let sum = 0;
+    zipfCdfs.set(objects, (cdf = weights.map((w) => (sum += w / total))));
+  }
+  const r = Math.random();
+  let lo = 0;
+  let hi = cdf.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cdf[mid]! < r) lo = mid + 1;
+    else hi = mid;
+  }
+  return `config-${lo}`;
+}
 
 interface Env {
   readonly BENCH_DRIVERS: DurableObjectNamespace<BenchDriver>;
@@ -43,7 +71,7 @@ interface DriverResult {
   readonly elapsedMs: number;
   /** One-millisecond buckets, with the last bucket holding 120 seconds and above. */
   /** Non-empty buckets only, as [bucket, count]: a dense histogram per driver is too big to gather from many. */
-  readonly latencyMs: readonly (readonly [number, number])[];
+  readonly latencyMs: readonly (readonly number[])[];
   readonly maxLatencyMs: number;
 }
 
@@ -188,27 +216,57 @@ export class SplitBenchJob extends DurableObject<Env> {
   }
 }
 
+/** The key of call `seq` of this driver. */
+function keyFor(config: MeasureConfig, seq: number): string {
+  switch (config.distribution) {
+    case "hot":
+      return "hot-key";
+    case "uniform":
+      return `key-${seq % config.keyCount}`;
+    case "control-plane":
+      return zipfObject(config.keyCount);
+  }
+}
+
 /** Distributed load generator. locationHint is set only when each fresh driver is first created. */
 export class BenchDriver extends DurableObject<Env> {
   async prepare(config: Omit<MeasureConfig, "startAt">): Promise<void> {
-    if (config.operation !== "read") return;
     const value = "x".repeat(config.payloadBytes);
+    if (config.distribution === "control-plane") {
+      if (config.driverIndex !== 0) return;
+      const keys = Array.from({ length: config.keyCount }, (_, i) => `config-${i}`);
+      await this.write(config.target, config.objectName, keys, keys.map(() => value));
+      return;
+    }
+    if (config.operation !== "read" || config.distribution !== "uniform" && config.distribution !== "hot") return;
     const keys: string[] = [];
     const values: string[] = [];
     if (config.distribution === "hot") {
       if (config.driverIndex === 0) await this.write(config.target, config.objectName, ["hot-key"], [value]);
       return;
     }
-    for (let i = config.driverIndex; i < config.keyCount; i += config.driverCount) {
+    // One driver seeds every key, in batches, retrying: a hundred drivers seeding at once would
+    // overload the very object about to be measured.
+    if (config.driverIndex !== 0) return;
+    const flush = async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await this.write(config.target, config.objectName, keys, values);
+          break;
+        } catch (error) {
+          if (attempt >= 5) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 200 * 2 ** attempt));
+        }
+      }
+      keys.length = 0;
+      values.length = 0;
+    };
+    for (let i = 0; i < config.keyCount; i++) {
       keys.push(`key-${i}`);
       values.push(value);
-      if (keys.length === 100) {
-        await this.write(config.target, config.objectName, keys, values);
-        keys.length = 0;
-        values.length = 0;
-      }
+      if (keys.length === 100) await flush();
     }
-    if (keys.length) await this.write(config.target, config.objectName, keys, values);
+    if (keys.length) await flush();
   }
 
   async measure(config: MeasureConfig): Promise<DriverResult> {
@@ -225,10 +283,12 @@ export class BenchDriver extends DurableObject<Env> {
 
     const worker = async (): Promise<void> => {
       while (Date.now() < stopAt) {
-        const key = config.distribution === "hot" ? "hot-key" : `key-${sequence++ % config.keyCount}`;
+        const seq = sequence++;
+        const key = keyFor(config, seq);
+        const write = config.distribution === "control-plane" ? Math.random() < CONTROL_PLANE.writeShare : config.operation === "write";
         const before = performance.now();
         try {
-          if (config.operation === "write") {
+          if (write) {
             await this.write(config.target, config.objectName, [key], ["x".repeat(config.payloadBytes)]);
             bytes += config.payloadBytes;
           } else {
@@ -285,14 +345,14 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   const payloadBytes = body.payloadBytes ?? 1024;
   if (target !== "single" && target !== "split" && target !== "legacy" && target !== "presplit") throw new Error("target must be single, split, presplit or legacy");
   if (operation !== "read" && operation !== "write") throw new Error("operation must be read or write");
-  if (distribution !== "uniform" && distribution !== "hot") throw new Error("distribution must be uniform or hot");
+  if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
   if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > 4096) throw new Error("concurrency must be an integer from 1 to 4096");
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");
   if (!Number.isSafeInteger(keyCount) || (keyCount as number) < 1 || (keyCount as number) > 100_000) throw new Error("keyCount must be from 1 to 100000");
   if (!Number.isSafeInteger(payloadBytes) || (payloadBytes as number) < 16 || (payloadBytes as number) > 64 * 1024) throw new Error("payloadBytes must be from 16 to 65536");
   const objectName = body.objectName;
   if (typeof objectName !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(objectName)) throw new Error("objectName must be 1-80 safe characters");
-  return { target, operation, distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
+  return { target, operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
 }
 
 function percentile(histogram: readonly number[], p: number): number {
@@ -511,7 +571,10 @@ export default {
     });
     await Promise.all(drivers.map((driver, i) => driver.prepare(configs[i]!)));
     const startAt = Date.now() + 750;
-    const results = await Promise.all(drivers.map((driver, i) => driver.measure({ ...configs[i]!, startAt, concurrency: Math.ceil(input.concurrency / driverCount) })));
+    // A driver that fails outright (rather than counting its failed calls) is reported, not fatal.
+    const settled = await Promise.allSettled(drivers.map((driver, i) => driver.measure({ ...configs[i]!, startAt, concurrency: Math.ceil(input.concurrency / driverCount) })));
+    const results: DriverResult[] = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    const failedDrivers = settled.length - results.length;
 
     const histogram = new Array<number>(120_001).fill(0);
     let successes = 0;
@@ -525,7 +588,7 @@ export default {
       bytes += result.bytes;
       elapsedMs = Math.max(elapsedMs, result.elapsedMs);
       maxLatencyMs = Math.max(maxLatencyMs, result.maxLatencyMs);
-      for (const [bucket, count] of result.latencyMs) histogram[bucket] = histogram[bucket]! + count;
+      for (const [bucket, count] of result.latencyMs) histogram[bucket!] = histogram[bucket!]! + count!;
     }
     let topology: Awaited<ReturnType<typeof describeTree>> | null = null;
     if (input.target === "split") topology = await describeTree(env, input.objectName);
@@ -535,6 +598,7 @@ export default {
       ...input,
       concurrency: Math.ceil(input.concurrency / driverCount) * driverCount,
       driverCount,
+      failedDrivers,
       successes,
       errors,
       elapsedMs,

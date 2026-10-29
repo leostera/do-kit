@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-f15093c838c3",
+  "generatedAt": "2026-10-29T16:09:13.277Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1,
+      16,
+      64,
+      256,
+      1024,
+      2048
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uuid",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-f15093c838c3-single-write-uuid",
+      "driverCount": 1,
+      "successes": 153,
+      "errors": 0,
+      "elapsedMs": 10016,
+      "operationsPerSecond": 15.27555910543131,
+      "mebibytesPerSecond": 0.014917538188897763,
+      "latencyMs": {
+        "p50": 65,
+        "p95": 80,
+        "p99": 112,
+        "max": 154
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uuid",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-f15093c838c3-single-write-uuid",
+      "driverCount": 16,
+      "successes": 1131,
+      "errors": 0,
+      "elapsedMs": 10205,
+      "operationsPerSecond": 110.828025477707,
+      "mebibytesPerSecond": 0.10823049363057324,
+      "latencyMs": {
+        "p50": 115,
+        "p95": 241,
+        "p99": 675,
+        "max": 800
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uuid",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-f15093c838c3-single-write-uuid",
+      "driverCount": 16,
+      "successes": 3110,
+      "errors": 0,
+      "elapsedMs": 10409,
+      "operationsPerSecond": 298.77990200787775,
+      "mebibytesPerSecond": 0.2917772480545681,
+      "latencyMs": {
+        "p50": 164,
+        "p95": 464,
+        "p99": 924,
+        "max": 1255
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uuid",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-f15093c838c3-single-write-uuid",
+      "driverCount": 16,
+      "successes": 4081,
+      "errors": 0,
+      "elapsedMs": 10344,
+      "operationsPerSecond": 394.5282289249807,
+      "mebibytesPerSecond": 0.38528147355955145,
+      "latencyMs": {
+        "p50": 582,
+        "p95": 1168,
+        "p99": 1290,
+        "max": 1760
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uuid",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-f15093c838c3-single-write-uuid",
+      "driverCount": 64,
+      "successes": 5513,
+      "errors": 14828,
+      "elapsedMs": 11869,
+      "operationsPerSecond": 464.48731990900666,
+      "mebibytesPerSecond": 0.4536008983486393,
+      "latencyMs": {
+        "p50": 15,
+        "p95": 2294,
+        "p99": 3395,
+        "max": 3769
+      },
+      "topology": null
+    },
+    {
+      "target": "single",
+      "operation": "write",
+      "distribution": "uuid",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-f15093c838c3-single-write-uuid",
+      "driverCount": 128,
+      "successes": 6342,
+      "errors": 40117,
+      "elapsedMs": 12819,
+      "operationsPerSecond": 494.73437865668143,
+      "mebibytesPerSecond": 0.48313904165691546,
+      "latencyMs": {
+        "p50": 14,
+        "p95": 4009,
+        "p99": 5626,
+        "max": 5655
+      },
+      "topology": null
+    }
+  ],
+  "splits": []
+}
