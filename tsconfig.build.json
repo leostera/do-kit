@@ -11,7 +11,8 @@
       "@cloudflare/workers-types",
       "node"
     ],
-    "allowImportingTsExtensions": false
+    "allowImportingTsExtensions": false,
+    "exactOptionalPropertyTypes": true
   },
   "include": [
     "src"

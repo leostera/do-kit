@@ -45,6 +45,8 @@ export function checkSplitPolicy(policy) {
         fail("holdWaitMs must be zero or more");
     return policy;
 }
+/** Levels one presplit round adopts at once: at most 63 new shards, so subrequests stay bounded. */
+const PRESPLIT_LEVELS = 6;
 /** How many split attempts a shard remembers. */
 const SPLIT_HISTORY = 8;
 /** The first 64 bits of the key's SHA-256, as 16 hex digits: what ownership is decided on. */
@@ -473,13 +475,15 @@ export class ShardedObject extends DurableObject {
             this.presplitDeclined = true; // not empty: splits by load only
             return;
         }
-        // Empty: the right halves of every level start empty and serving; they split further on
-        // their own first call.
+        // Empty: the shards up to PRESPLIT_LEVELS deeper (all of them, for an initial depth up to 6)
+        // start empty and serving, adopted in one round at their bits (an object is named by its bits
+        // without trailing zeros); this object keeps the all-zeros one. Each goes deeper on its own
+        // first call. Adopting is idempotent, so a round that fails is retried by the next call.
         const depth = this.policy.initialDepth ?? 0;
-        let bits = meta.bits;
-        for (; bits.length < depth; bits += "0")
-            await this.node(`${bits}1`).shardedAdoptEmpty(meta.name, `${bits}1`, bits);
-        this.saveMeta({ ...this.meta, bits, parent: meta.bits, splitAt: Date.now() });
+        const extra = Math.min(depth - meta.bits.length, PRESPLIT_LEVELS);
+        const shards = Array.from({ length: 2 ** extra - 1 }, (_, i) => meta.bits + (i + 1).toString(2).padStart(extra, "0"));
+        await Promise.all(shards.map((bits) => this.node(bits).shardedAdoptEmpty(meta.name, bits, bits.slice(0, -1))));
+        this.saveMeta({ ...this.meta, bits: meta.bits + "0".repeat(extra), parent: meta.bits, splitAt: Date.now() });
     }
     loadMeta() {
         const row = this.sql.exec("SELECT value FROM sharded_meta WHERE key = 'meta'").toArray()[0];
