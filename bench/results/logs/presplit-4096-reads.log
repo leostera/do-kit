@@ -1,0 +1,20 @@
+{"warmup":1,"operation":"read","samples":["internal error; reference = hg4s7obemhk3as7c1pe1evnk","internal error; reference = pggmv4lurv2rq0vu7boctj0e"],"c":4096,"drivers":256,"failedDrivers":0,"ops":15002,"errors":69,"p50":89,"p99":1577}
+{"warmup":2,"operation":"read","samples":["internal error; reference = mf10jhkno8nemiltbou1d23s","internal error; reference = pprfo1tn30fjg06a4cs5qk58"],"c":4096,"drivers":256,"failedDrivers":0,"ops":22264,"errors":48,"p50":86,"p99":1115}
+{"warmup":3,"operation":"read","samples":["internal error; reference = fqjsq1ateigftselsh76k0r6","internal error; reference = nknd9o35q4o810sitkpha7vt"],"c":4096,"drivers":256,"failedDrivers":0,"ops":22831,"errors":78,"p50":90,"p99":764}
+{"MEASURED":true,"operation":"read","samples":["internal error; reference = f7ql7d2lsoc390ghsls95u3l"],"c":4096,"drivers":256,"failedDrivers":0,"ops":21033,"errors":1,"p50":90,"p99":630}
+{"failed":{"operation":"read","concurrency":16384},"status":500,"ray":"a524a573fe80e900-LHR","body":"{\"error\":\"Error: internal error; reference = 14mti2a2v7mii4qpb65895us\"}"}
+{"warmup":1,"operation":"read","samples":[],"c":16384,"drivers":1024,"failedDrivers":0,"ops":47354,"errors":0,"p50":127,"p99":1951}
+{"warmup":2,"operation":"read","samples":["Durable Object is overloaded. Requests queued for too long."],"c":16384,"drivers":1024,"failedDrivers":0,"ops":62699,"errors":1960,"p50":106,"p99":1454}
+{"warmup":3,"operation":"read","samples":[],"c":16384,"drivers":1024,"failedDrivers":0,"ops":73880,"errors":0,"p50":105,"p99":1022}
+{"warmup":4,"operation":"read","samples":[],"c":16384,"drivers":1024,"failedDrivers":0,"ops":79401,"errors":0,"p50":104,"p99":1009}
+{"MEASURED":true,"operation":"read","samples":[],"c":16384,"drivers":1024,"failedDrivers":0,"ops":81195,"errors":0,"p50":107,"p99":691}
+{"failed":{"operation":"read","concurrency":65536},"status":500,"ray":"a524a9660fe9e900-LHR","body":"{\"error\":\"Error: Internal error while starting up Durable Object storage caused object to be reset; reference = lm406csh"}
+{"warmup":1,"operation":"read","samples":["Durable Object is overloaded. Requests queued for too long."],"c":65536,"drivers":4096,"failedDrivers":0,"ops":68824,"errors":117095,"p50":383,"p99":3626}
+{"warmup":2,"operation":"read","samples":["Durable Object is overloaded. Requests queued for too long.","Durable Object is overloaded. Too many requests queued."],"c":65536,"drivers":4096,"failedDrivers":0,"ops":101962,"errors":136735,"p50":274,"p99":3361}
+{"warmup":3,"operation":"read","samples":["Durable Object is overloaded. Requests queued for too long.","Durable Object is overloaded. Too many requests queued."],"c":65536,"drivers":4096,"failedDrivers":0,"ops":121685,"errors":144819,"p50":258,"p99":3096}
+{"warmup":4,"operation":"read","samples":["Durable Object is overloaded. Requests queued for too long.","Durable Object is overloaded. Too many requests queued."],"c":65536,"drivers":4096,"failedDrivers":0,"ops":126247,"errors":129746,"p50":238,"p99":3202}
+{"MEASURED":true,"operation":"read","samples":["Durable Object is overloaded. Requests queued for too long.","Durable Object is overloaded. Too many requests queued."],"c":65536,"drivers":4096,"failedDrivers":0,"ops":132135,"errors":123700,"p50":250,"p99":2895}
+{"warmup":1,"operation":"read","samples":["Durable Object is overloaded. Requests queued for too long.","internal error; reference = e4g8oqj5u30eh75garlav8hh"],"c":131072,"drivers":8192,"failedDrivers":2,"ops":107190,"errors":250974,"p50":428,"p99":5149}
+{"failed":{"operation":"read","concurrency":131072},"status":500,"ray":"a524af2e5ff9e900-LHR","body":"{\"error\":\"Error: internal error; reference = 1r6hmrgmk224knhs70vf2fuc\"}"}
+{"failed":{"operation":"read","concurrency":131072},"status":500,"ray":"a524af5a1915e900-LHR","body":"{\"error\":\"Error: internal error; reference = n4uv5d64q0mhh3l9egq7c1lf\"}"}
+{"MEASURED":true,"operation":"read","samples":["Durable Object is overloaded. Requests queued for too long.","Durable Object is overloaded. Too many requests queued."],"c":131072,"drivers":8192,"failedDrivers":0,"ops":131076,"errors":344236,"p50":339,"p99":4907}

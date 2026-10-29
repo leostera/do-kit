@@ -136,8 +136,8 @@ interface DriverResult {
   /** Non-empty buckets only, as [bucket, count]: a dense histogram per driver is too big to gather from many. */
   readonly latencyMs: readonly (readonly number[])[];
   readonly maxLatencyMs: number;
-  /** The first failed call's error, to tell what failed. */
-  readonly errorSample?: string;
+  /** Up to five distinct messages of the calls that failed. */
+  readonly errorSamples?: readonly string[];
 }
 
 abstract class KeyValueBase<EnvT> extends DurableObject<EnvT> {
@@ -310,7 +310,6 @@ function keyFor(config: MeasureConfig, seq: number): string {
 
 /** Driver results merged: a fleet's drivers, or every fleet's. */
 interface MergedResult {
-  readonly errorSample?: string;
   readonly successes: number;
   readonly errors: number;
   readonly bytes: number;
@@ -318,16 +317,17 @@ interface MergedResult {
   readonly latencyMs: readonly (readonly number[])[];
   readonly maxLatencyMs: number;
   readonly failedDrivers: number;
+  readonly errorSamples: readonly string[];
 }
 
-function merge(results: readonly (DriverResult & { readonly failedDrivers?: number })[], failedDrivers: number): MergedResult {
+function merge(results: readonly (DriverResult & { readonly failedDrivers?: number })[], failedDrivers: number, extraSamples: readonly string[] = []): MergedResult {
   const buckets = new Map<number, number>();
+  const samples = new Set<string>(extraSamples);
   let successes = 0;
   let errors = 0;
   let bytes = 0;
   let elapsedMs = 0;
   let maxLatencyMs = 0;
-  let errorSample: string | undefined;
   for (const result of results) {
     successes += result.successes;
     errors += result.errors;
@@ -335,10 +335,10 @@ function merge(results: readonly (DriverResult & { readonly failedDrivers?: numb
     elapsedMs = Math.max(elapsedMs, result.elapsedMs);
     maxLatencyMs = Math.max(maxLatencyMs, result.maxLatencyMs);
     failedDrivers += result.failedDrivers ?? 0;
-    errorSample ??= result.errorSample;
+    for (const sample of result.errorSamples ?? []) if (samples.size < 10) samples.add(sample);
     for (const [bucket, count] of result.latencyMs) buckets.set(bucket!, (buckets.get(bucket!) ?? 0) + count!);
   }
-  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSample };
+  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSamples: [...samples] };
 }
 
 function driverStub(env: Env, config: { readonly objectName: string; readonly driverIndex: number }): DurableObjectStub<BenchDriver> {
@@ -359,7 +359,8 @@ export class BenchFleet extends DurableObject<Env> {
     // A driver that fails outright (rather than counting its failed calls) is reported, not fatal.
     const settled = await Promise.allSettled(configs.map((config) => driverStub(this.env, config).measure(config)));
     const results = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
-    return merge(results, settled.length - results.length);
+    const reasons = settled.flatMap((r) => (r.status === "rejected" ? [`driver: ${String(r.reason).slice(0, 200)}`] : [])).slice(0, 3);
+    return merge(results, settled.length - results.length, reasons);
   }
 }
 
@@ -403,7 +404,18 @@ export class BenchDriver extends DurableObject<Env> {
         keys.push(`key-${i}`);
         values.push(value);
       }
-      for (let i = 0; i < keys.length; i += 100) await this.write(config.target, config.objectName, keys.slice(i, i + 100), values.slice(i, i + 100));
+      for (let i = 0; i < keys.length; i += 100) {
+        // Retried: under heavy load a call can fail with a transient internal error.
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await this.write(config.target, config.objectName, keys.slice(i, i + 100), values.slice(i, i + 100));
+            break;
+          } catch (error) {
+            if (attempt >= 5) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 200 * 2 ** attempt));
+          }
+        }
+      }
       return;
     }
     // One driver seeds every key, in batches, retrying: a hundred drivers seeding at once would
@@ -441,7 +453,7 @@ export class BenchDriver extends DurableObject<Env> {
     let bytes = 0;
     let maxLatencyMs = 0;
     let sequence = config.driverIndex;
-    let errorSample: string | undefined;
+    const errorSamples = new Set<string>();
 
     const tableWorker = async (): Promise<void> => {
       const t = tableClient(this.env, config.target as TableTarget, config.objectName);
@@ -464,7 +476,7 @@ export class BenchDriver extends DurableObject<Env> {
           successes++;
         } catch (error) {
           errors++;
-          errorSample ??= String(error).slice(0, 500);
+          if (errorSamples.size < 5) errorSamples.add(String(error instanceof Error ? error.message : error).slice(0, 200));
         } finally {
           const elapsed = performance.now() - before;
           maxLatencyMs = Math.max(maxLatencyMs, elapsed);
@@ -489,8 +501,9 @@ export class BenchDriver extends DurableObject<Env> {
             bytes += value?.length ?? 0;
           }
           successes++;
-        } catch {
+        } catch (error) {
           errors++;
+          if (errorSamples.size < 5) errorSamples.add(String(error instanceof Error ? error.message : error).slice(0, 200));
         } finally {
           const elapsed = performance.now() - before;
           maxLatencyMs = Math.max(maxLatencyMs, elapsed);
@@ -503,7 +516,7 @@ export class BenchDriver extends DurableObject<Env> {
     await Promise.all(Array.from({ length: config.concurrency }, worker));
     const sparse: [number, number][] = [];
     latencyMs.forEach((count, bucket) => count && sparse.push([bucket, count]));
-    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSample };
+    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSamples: [...errorSamples] };
   }
 
   private async write(target: Target, name: string, keys: readonly string[], values: readonly string[]): Promise<void> {
@@ -720,6 +733,16 @@ function streamJob(job: (progress: (line: unknown) => Promise<void>) => Promise<
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      return await handle(request, env);
+    } catch (error) {
+      return Response.json({ error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) }, { status: 500 });
+    }
+  },
+};
+
+async function handle(request: Request, env: Env): Promise<Response> {
+  {
     if (request.headers.get("authorization") !== `Bearer ${env.BENCH_TOKEN}`) return new Response("Unauthorized", { status: 401 });
     const path = new URL(request.url).pathname;
     if (request.method === "POST" && path === "/split-bench") {
@@ -835,7 +858,8 @@ export default {
     const settled = await Promise.allSettled(fleets.map((fleet) => fleet.stub.measure(fleet.configs.map((config) => ({ ...config, startAt })))));
     const fleetResults = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
     const lostDrivers = settled.reduce((n, r, i) => n + (r.status === "rejected" ? fleets[i]!.configs.length : 0), 0);
-    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSample } = merge(fleetResults, lostDrivers);
+    const fleetReasons = settled.flatMap((r) => (r.status === "rejected" ? [`fleet: ${String(r.reason).slice(0, 200)}`] : [])).slice(0, 3);
+    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSamples } = merge(fleetResults, lostDrivers, fleetReasons);
     const histogram = new Array<number>(120_001).fill(0);
     for (const [bucket, count] of latencyMs) histogram[bucket!] = count!;
 
@@ -862,6 +886,7 @@ export default {
       concurrency: Math.ceil(input.concurrency / driverCount) * driverCount,
       driverCount,
       failedDrivers,
+      errorSamples,
       successes,
       errors,
       elapsedMs,
@@ -869,7 +894,8 @@ export default {
       mebibytesPerSecond: bytes / (1024 * 1024) / (elapsedMs / 1000),
       latencyMs: { p50: percentile(histogram, 0.5), p95: percentile(histogram, 0.95), p99: percentile(histogram, 0.99), max: Math.round(maxLatencyMs * 100) / 100 },
       topology,
-      errorSample: errorSample ?? null,
+      // The first sample, under the name earlier results use.
+      errorSample: errorSamples[0] ?? null,
     });
-  },
-};
+  }
+}

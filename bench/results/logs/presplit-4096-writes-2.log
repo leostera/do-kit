@@ -1,0 +1,40 @@
+{"warmup":1,"operation":"write","c":4096,"drivers":256,"failedDrivers":0,"ops":192,"errors":0,"p50":13467,"p99":21943}
+{"warmup":2,"operation":"write","c":4096,"drivers":256,"failedDrivers":0,"ops":3327,"errors":0,"p50":553,"p99":4056}
+{"warmup":3,"operation":"write","c":4096,"drivers":256,"failedDrivers":0,"ops":6869,"errors":0,"p50":262,"p99":2876}
+{"warmup":4,"operation":"write","c":4096,"drivers":256,"failedDrivers":0,"ops":10260,"errors":0,"p50":152,"p99":2026}
+{"warmup":5,"operation":"write","c":4096,"drivers":256,"failedDrivers":0,"ops":9872,"errors":0,"p50":136,"p99":1520}
+{"MEASURED":true,"operation":"write","c":4096,"drivers":256,"failedDrivers":0,"ops":7812,"errors":0,"p50":90,"p99":2347}
+{"warmup":1,"operation":"write","c":16384,"drivers":1024,"failedDrivers":0,"ops":14231,"errors":405247,"p50":24,"p99":7938}
+{"warmup":2,"operation":"write","c":16384,"drivers":1024,"failedDrivers":0,"ops":39079,"errors":1111,"p50":132,"p99":2761}
+{"warmup":3,"operation":"write","c":16384,"drivers":1024,"failedDrivers":0,"ops":54193,"errors":6909,"p50":113,"p99":1939}
+{"warmup":4,"operation":"write","c":16384,"drivers":1024,"failedDrivers":0,"ops":61377,"errors":5549,"p50":106,"p99":1550}
+{"warmup":5,"operation":"write","c":16384,"drivers":1024,"failedDrivers":0,"ops":61202,"errors":5796,"p50":110,"p99":1544}
+{"MEASURED":true,"operation":"write","c":16384,"drivers":1024,"failedDrivers":0,"ops":68880,"errors":3968,"p50":108,"p99":1110}
+{"warmup":1,"operation":"write","c":65536,"drivers":4096,"failedDrivers":0,"ops":25344,"errors":1722950,"p50":35,"p99":5694}
+{"warmup":2,"operation":"write","c":65536,"drivers":4096,"failedDrivers":0,"ops":47917,"errors":254293,"p50":257,"p99":6099}
+{"warmup":3,"operation":"write","c":65536,"drivers":4096,"failedDrivers":3,"ops":81032,"errors":193255,"p50":288,"p99":3746}
+{"warmup":4,"operation":"write","c":65536,"drivers":4096,"failedDrivers":1,"ops":94610,"errors":200661,"p50":239,"p99":3974}
+{"warmup":5,"operation":"write","c":65536,"drivers":4096,"failedDrivers":0,"ops":104138,"errors":228498,"p50":239,"p99":3360}
+{"warmup":6,"operation":"write","c":65536,"drivers":4096,"failedDrivers":0,"ops":120269,"errors":231625,"p50":231,"p99":3058}
+{"MEASURED":true,"operation":"write","c":65536,"drivers":4096,"failedDrivers":0,"ops":115728,"errors":211693,"p50":226,"p99":3265}
+{"warmup":1,"operation":"write","c":131072,"drivers":8192,"failedDrivers":0,"ops":86842,"errors":903091,"p50":212,"p99":7577}
+{"warmup":2,"operation":"write","c":131072,"drivers":8192,"failedDrivers":0,"ops":107277,"errors":594227,"p50":309,"p99":4837}
+{"warmup":3,"operation":"write","c":131072,"drivers":8192,"failedDrivers":0,"ops":121447,"errors":547817,"p50":306,"p99":5082}
+{"warmup":4,"operation":"write","c":131072,"drivers":8192,"failedDrivers":0,"ops":129596,"errors":552556,"p50":299,"p99":4948}
+{"MEASURED":true,"operation":"write","c":131072,"drivers":8192,"failedDrivers":0,"ops":132673,"errors":530496,"p50":278,"p99":4580}
+{"failed":{"operation":"read","concurrency":4096},"status":500,"ray":"a5249750ebbee900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":4096},"status":500,"ray":"a52497526e72e900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":4096},"status":500,"ray":"a5249753e915e900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":4096},"status":500,"ray":"a52497557b90e900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":16384},"status":500,"ray":"a5249758e9cbe900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":16384},"status":500,"ray":"a524975c0f61e900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":16384},"status":500,"ray":"a524975e4b6de900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":16384},"status":500,"ray":"a52497601e9ee900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":65536},"status":500,"ray":"a52497629acce900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":65536},"status":500,"ray":"a524976fd995e900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":65536},"status":500,"ray":"a52497711c4de900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":65536},"status":500,"ray":"a5249773282be900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":131072},"status":500,"ray":"a52497747abbe900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":131072},"status":500,"ray":"a52497764dbae900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":131072},"status":500,"ray":"a52497777f9de900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}
+{"failed":{"operation":"read","concurrency":131072},"status":500,"ray":"a5249778b9fee900-LHR","body":"<title>Worker threw exception | <bench-worker>.workers.dev | Cloudflare</title>"}

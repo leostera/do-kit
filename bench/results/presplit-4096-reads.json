@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-29T19:42:08.248Z",
+  "generatedAt": "2026-10-29T19:46:55.184Z",
   "suite": "wide-1793302582128",
   "target": "presplit-4096",
   "note": "each level warmed until throughput improved by under 10% (at most 6 warmups), then measured once for 10 s",
@@ -57,6 +57,78 @@
         "p95": 466,
         "p99": 691,
         "max": 3083
+      },
+      "topology": {
+        "leaves": 4096,
+        "rows": 46,
+        "depth": 12
+      }
+    },
+    {
+      "target": "presplit-4096",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 65536,
+      "durationMs": 10000,
+      "keyCount": 100000,
+      "payloadBytes": 1024,
+      "objectName": "wide-1793301468053-uniform",
+      "driverCount": 4096,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "Durable Object is overloaded. Requests queued for too long.",
+        "Durable Object is overloaded. Too many requests queued."
+      ],
+      "successes": 1671899,
+      "errors": 123700,
+      "elapsedMs": 12653,
+      "operationsPerSecond": 132134.59258673832,
+      "mebibytesPerSecond": 129.03768807298664,
+      "latencyMs": {
+        "p50": 250,
+        "p95": 1215,
+        "p99": 2895,
+        "max": 10228
+      },
+      "topology": {
+        "leaves": 4096,
+        "rows": 46,
+        "depth": 12
+      }
+    },
+    {
+      "target": "presplit-4096",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 131072,
+      "durationMs": 10000,
+      "keyCount": 100000,
+      "payloadBytes": 1024,
+      "objectName": "wide-1793301468053-uniform",
+      "driverCount": 8192,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "Durable Object is overloaded. Requests queued for too long.",
+        "Durable Object is overloaded. Too many requests queued.",
+        "internal error; reference = e4cffjgcpd0hnunaddfub04v",
+        "internal error; reference = ogqh3d88dfc1m3mak3gki0cj",
+        "internal error; reference = rntnd9ba41akdru9u6db0pf5",
+        "internal error; reference = 3jif11h75hbd96akjduue4lq",
+        "internal error; reference = 313i9rs0v7tshauiq5u1b7rc",
+        "internal error; reference = c5jpcg7s1gnfc2e6ovgrfq72",
+        "internal error; reference = 62rlvl0drhiakgegibegkah1",
+        "internal error; reference = 7asp0kn56be9rj2f8sftvgg1"
+      ],
+      "successes": 1806755,
+      "errors": 344236,
+      "elapsedMs": 13784,
+      "operationsPerSecond": 131076.24782356355,
+      "mebibytesPerSecond": 128.00414826519878,
+      "latencyMs": {
+        "p50": 339,
+        "p95": 2401,
+        "p99": 4907,
+        "max": 13186
       },
       "topology": {
         "leaves": 4096,
