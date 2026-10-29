@@ -46,6 +46,8 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     knownShardCount(): Promise<number>;
     /** The known splits (for tests and operators). */
     knownSplits(): string[];
+    /** Drops what this client knows of the object's splits, here and in the colo: it was stale. */
+    private forget;
     private learn;
     private loadCache;
     private saveCache;

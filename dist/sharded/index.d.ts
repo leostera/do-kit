@@ -53,12 +53,19 @@ export declare const MAX_SPLIT_DEPTH = 64;
 /** Checks a split policy, so a bad one fails loudly on the first call instead of quietly never splitting. */
 export declare function checkSplitPolicy(policy: SplitPolicy): SplitPolicy;
 /** What a node answers a routed call: `moved` names a split shard (its ancestors split too). */
+/**
+ * What a node answers a routed call: `moved` names a split shard (its ancestors split too);
+ * `stale` says the caller's map of splits is deeper than this object, so it outlived the storage
+ * it was learned from (deleted, then the name used again): the caller forgets it.
+ */
 export type CallAnswer<R> = {
     readonly ok: R;
 } | {
     readonly moved: string;
 } | {
     readonly notReady: string;
+} | {
+    readonly stale: string;
 };
 /** An object's state, for tests and operators. */
 export interface NodeDescription {

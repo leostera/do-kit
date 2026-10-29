@@ -16,6 +16,12 @@ const loadedFromCache = new Set();
 const MAX_HOPS = 64;
 /** How long a call waits for a new shard to start serving (it is activated just after a split). */
 const NOT_READY_WAIT_MS = 30_000;
+/**
+ * After waiting this long on shards that are not ready, a call forgets the splits it knows of this
+ * object, once, and routes from the root again: an object whose storage was deleted is not ready
+ * forever, and only the root can tell. A shard that is only slow to start costs a few hops.
+ */
+const FORGET_AFTER_MS = 1_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Waits a little longer each time a shard is not ready; throws once that has gone on too long. */
 class Backoff {
@@ -85,10 +91,12 @@ export class ShardedClient {
         const out = [];
         let pending = keys.map((_, i) => i);
         const backoff = new Backoff(`sharded ${this.name}`);
+        let forgot = false;
         for (let hop = 0; pending.length > 0; hop++) {
             if (hop > MAX_HOPS)
                 throw new Error(`sharded ${this.name}: routing did not settle`);
             let waiting = false;
+            let stale = false;
             const groups = new Map();
             for (const i of pending) {
                 const bits = this.shardFor(hashes[i]);
@@ -110,12 +118,20 @@ export class ShardedClient {
                     this.learn(answer.moved);
                     retry.push(...positions);
                 }
+                else if ("stale" in answer) {
+                    stale = true;
+                    retry.push(...positions);
+                }
                 else {
                     waiting = true; // not serving yet: the same shard, a little later
                     retry.push(...positions);
                 }
             }));
-            if (waiting) {
+            if (stale || (waiting && !forgot && backoff.waited >= FORGET_AFTER_MS)) {
+                forgot = true;
+                this.forget();
+            }
+            else if (waiting) {
                 await backoff.next();
                 hop--;
             }
@@ -126,29 +142,43 @@ export class ShardedClient {
     /** Calls `method(...args)` on every shard. */
     async scan(method, ...args) {
         await this.loadCache();
-        const out = [];
-        const backoff = new Backoff(`sharded ${this.name}`);
-        const visit = async (bits, depth) => {
-            if (depth > MAX_HOPS)
+        for (let attempt = 0;; attempt++) {
+            const out = [];
+            const backoff = new Backoff(`sharded ${this.name}`);
+            let stale = false;
+            const visit = async (bits, depth) => {
+                if (depth > MAX_HOPS)
+                    throw new Error(`sharded ${this.name}: scan did not settle`);
+                if (stale)
+                    return;
+                if (this.splits.has(bits)) {
+                    await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
+                    return;
+                }
+                const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args));
+                if ("ok" in answer)
+                    out.push(answer.ok);
+                else if ("moved" in answer) {
+                    this.learn(answer.moved);
+                    await visit(bits, depth + 1);
+                }
+                else if ("stale" in answer) {
+                    // A scan always reaches the root (its leftmost shard), which says so when the map is
+                    // stale: start over from it, once the other visits stop.
+                    stale = true;
+                }
+                else {
+                    await backoff.next();
+                    await visit(bits, depth);
+                }
+            };
+            await visit("", 0);
+            if (!stale)
+                return out;
+            if (attempt >= 3)
                 throw new Error(`sharded ${this.name}: scan did not settle`);
-            if (this.splits.has(bits)) {
-                await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
-                return;
-            }
-            const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args));
-            if ("ok" in answer)
-                out.push(answer.ok);
-            else if ("moved" in answer) {
-                this.learn(answer.moved);
-                await visit(bits, depth + 1);
-            }
-            else {
-                await backoff.next();
-                await visit(bits, depth);
-            }
-        };
-        await visit("", 0);
-        return out;
+            this.forget();
+        }
     }
     /** How many shards this client knows of: one more than its known splits. There may be more. */
     async knownShardCount() {
@@ -158,6 +188,11 @@ export class ShardedClient {
     /** The known splits (for tests and operators). */
     knownSplits() {
         return [...this.splits].sort();
+    }
+    /** Drops what this client knows of the object's splits, here and in the colo: it was stale. */
+    forget() {
+        this.splits.clear();
+        void this.saveCache();
     }
     learn(bits) {
         if (this.splits.has(bits))
