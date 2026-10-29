@@ -18,6 +18,7 @@ interface Env {
   readonly LEGACY_MANUAL: DurableObjectNamespace<ManualLegacySplitObject>;
   readonly TWO_COPY_MANUAL: DurableObjectNamespace<ManualTwoCopySplitObject>;
   readonly BENCH_TOKEN: string;
+  readonly SPLIT_JOBS: DurableObjectNamespace<SplitBenchJob>;
 }
 
 interface MeasureConfig {
@@ -151,6 +152,29 @@ export class ManualTwoCopySplitObject extends TwoCopySplittableObject<Env, strin
 
   async seed(_keys: readonly string[], _payloads: null, start: number, count: number, bytes: number): Promise<Seeded> {
     return seedRows((keys, values) => this.put(keys, values), start, count, bytes);
+  }
+}
+
+/**
+ * Runs one split benchmark in the background and answers polls about it: a split of a large
+ * object takes minutes, longer than one request should be kept open.
+ */
+export class SplitBenchJob extends DurableObject<Env> {
+  private progress: unknown = null;
+  private outcome: { result?: unknown; error?: string } | null = null;
+  private running = false;
+
+  async start(input: SplitBenchInput): Promise<void> {
+    if (this.running || this.outcome) return;
+    this.running = true;
+    void splitBench(this.env, input, async (line) => void (this.progress = line))
+      .then((result) => (this.outcome = { result }))
+      .catch((error: unknown) => (this.outcome = { error: error instanceof Error ? error.message : String(error) }))
+      .finally(() => (this.running = false));
+  }
+
+  async poll(): Promise<{ progress: unknown; result?: unknown; error?: string; running: boolean }> {
+    return { progress: this.progress, running: this.running, ...(this.outcome ?? {}) };
   }
 }
 
@@ -351,7 +375,7 @@ async function splitBench(env: Env, input: SplitBenchInput, progress: (line: unk
   let doneMs = 0;
   let copy: string | null = null;
   if (input.target === "split") {
-    if (!(await rootSplit.splittableSplit(name, ""))) throw new Error("split refused or abandoned");
+    if (!(await rootSplit.splittableSplit(name, ""))) throw new Error(`split abandoned: ${(await rootSplit.splittableDescribe()).lastSplitError}`);
     copyMs = Date.now() - splitStarted;
     const right = split.get(split.idFromName(leafObjectName(name, "1")));
     for (;;) {
@@ -440,6 +464,22 @@ export default {
         return Response.json({ error: error instanceof Error ? error.message : "invalid request" }, { status: 400 });
       }
       return streamJob((progress) => splitBench(env, input, progress));
+    }
+    // The same, as a background job: POST starts it (idempotent per objectName), GET polls it.
+    if (path === "/split-job") {
+      if (request.method === "POST") {
+        let input: SplitBenchInput;
+        try {
+          input = validateSplitBench(await request.json());
+        } catch (error) {
+          return Response.json({ error: error instanceof Error ? error.message : "invalid request" }, { status: 400 });
+        }
+        await env.SPLIT_JOBS.get(env.SPLIT_JOBS.idFromName(input.objectName)).start(input);
+        return Response.json({ started: input.objectName });
+      }
+      const name = new URL(request.url).searchParams.get("objectName") ?? "";
+      if (!/^[a-zA-Z0-9_-]{1,80}$/.test(name)) return Response.json({ error: "objectName" }, { status: 400 });
+      return Response.json(await env.SPLIT_JOBS.get(env.SPLIT_JOBS.idFromName(name)).poll());
     }
     if (request.method !== "POST" || path !== "/measure") return new Response("Not found", { status: 404 });
     let input: ReturnType<typeof validate>;
