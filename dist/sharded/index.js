@@ -459,7 +459,8 @@ export class ShardedObject extends DurableObject {
      */
     async split() {
         const meta = this.meta;
-        if (!meta || this.hold || meta.state !== "shard" || meta.bits.length >= this.policy.maxDepth)
+        // A presplit is splitting this shard already, by other means.
+        if (!meta || this.hold || this.presplitting || meta.state !== "shard" || meta.bits.length >= this.policy.maxDepth)
             return false;
         const epoch = meta.epoch + 1;
         const right = `${meta.bits}1`;
