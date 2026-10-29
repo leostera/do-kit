@@ -50,6 +50,12 @@ export interface SplitPolicy {
   readonly copy?: "auto" | "native" | "logical";
   /** A split that has not finished copying after this long is abandoned. Default 60 s. */
   readonly splitTimeoutMs?: number;
+  /**
+   * How long a write to the half being copied waits inside the shard before it answers "not ready"
+   * and the client backs off and retries. Bounds the requests a slow copy queues in the object
+   * (which the runtime sheds as overloaded). Default 2 s.
+   */
+  readonly holdWaitMs?: number;
 }
 
 /**
@@ -123,6 +129,9 @@ export function shardObjectName(name: string, bits: string): string {
 
 /** Thrown inside a method when its keys left this shard; the dispatcher answers "moved". */
 class Moved extends Error {}
+/** A write waited on a split for `holdWaitMs`: nothing was applied, the client retries later. */
+class NotReady extends Error {}
+const HOLD_WAIT_MS = 2_000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS sharded_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -222,7 +231,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * it waits; once the copy serves, it answers "moved".
    */
   protected async update<R>(keys: readonly string[], decide: (current: Map<string, V>) => UpdateResult<V, R>): Promise<R> {
-    for (let hold = this.holding(keys); hold; hold = this.holding(keys)) await hold;
+    await this.waitForHold(keys);
     // No await from here on: the check and the transaction see the same split state.
     this.assertOwner(keys);
     return this.ctx.storage.transactionSync(() => {
@@ -238,6 +247,30 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       }
       return result;
     });
+  }
+
+  /**
+   * Runs `fn` in one transaction, fenced like `update`: it waits while any of `keys` is being
+   * copied by a split, and runs only if this shard still owns them all. Write the subclass's own
+   * tables here, never outside: a write that skips the fence can land after the copy and be lost.
+   * List every key whose rows `fn` touches. `fn` must be synchronous.
+   */
+  protected transact<R>(keys: readonly string[], fn: () => R): Promise<R> {
+    return this.update(keys, () => ({ writes: new Map(), result: fn() }));
+  }
+
+  /**
+   * Up to `limit` of this shard's rows (of `read`/`update`) with keys after `afterKey`, in key
+   * order: bounded paging over one shard. Rows of keys it no longer owns are skipped, so a page
+   * is right while cleanup is still running.
+   */
+  protected ownedRowsPage(afterKey: string | null, limit: number): [string, V][] {
+    this.assertOwner([]);
+    if (!Number.isInteger(limit) || limit < 1) throw new Error("ownedRowsPage limit must be a positive integer");
+    const [lo, hi] = hashRange(this.meta!.bits);
+    const out: [string, V][] = [];
+    for (const r of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM sharded_rows WHERE key > ? AND hash >= ? AND hash <= ? ORDER BY key LIMIT ?", afterKey ?? "", lo, hi, limit)) out.push([r.key, JSON.parse(r.value) as V]);
+    return out;
   }
 
   /**
@@ -298,6 +331,19 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     for (const key of keys) if (!ownsHash(meta.bits, keyHash(key))) throw new Moved();
   }
 
+  /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
+  private async waitForHold(keys: readonly string[]): Promise<void> {
+    const deadline = Date.now() + (this.splitPolicy.holdWaitMs ?? HOLD_WAIT_MS);
+    for (let hold = this.holding(keys); hold; hold = this.holding(keys)) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw new NotReady();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const released = await Promise.race([hold.then(() => true), new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
+      clearTimeout(timer);
+      if (!released) throw new NotReady();
+    }
+  }
+
   /** What an update of these keys waits for, if any. */
   private holding(keys: readonly string[]): Promise<void> | null {
     const hold = this.hold;
@@ -320,6 +366,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args) };
     } catch (error) {
       if (error instanceof Moved) return this.moved(bits);
+      if (error instanceof NotReady) return { notReady: bits };
       throw error;
     }
   }

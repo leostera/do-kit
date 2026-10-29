@@ -2,7 +2,7 @@
 //   POST /call {cls, name, method, keys, payloads}  POST /scan {cls, name, method}
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
-import { shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
+import { DEFAULT_SPLIT_POLICY, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 
 interface Env {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
@@ -27,6 +27,13 @@ class CounterBase extends ShardedObject<Env, number> {
       .slice(0, limit);
     for (const { key } of foreign) this.ctx.storage.sql.exec("DELETE FROM listing WHERE key = ?", key);
     return foreign.length;
+  }
+
+  /** Every key of this shard, read with ownedRowsPage `limit` at a time. */
+  async pagedKeys(limit: number): Promise<string[]> {
+    const keys: string[] = [];
+    for (let page = this.ownedRowsPage(null, limit); page.length > 0; page = this.ownedRowsPage(page.at(-1)![0], limit)) keys.push(...page.map(([k]) => k));
+    return keys;
   }
 
   /** The keys in this object's listing table, and whether this shard owns each. */
@@ -98,7 +105,11 @@ class CounterBase extends ShardedObject<Env, number> {
   }
 }
 
-export class Counters extends CounterBase {}
+export class Counters extends CounterBase {
+  // Writes to a half being copied answer "not ready" at once, so every split test also covers
+  // the client backing off and retrying.
+  protected override splitPolicy: SplitPolicy = { ...DEFAULT_SPLIT_POLICY, holdWaitMs: 0 };
+}
 
 export class AutoCounters extends CounterBase {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 20, windowSeconds: 2, maxDepth: 3 };
@@ -122,7 +133,7 @@ function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const body = (await request.json().catch(() => ({}))) as { cls: string; name: string; method: string; keys: string[]; payloads: unknown[] | null; bits: string };
+    const body = (await request.json().catch(() => ({}))) as { cls: string; name: string; method: string; keys: string[]; payloads: unknown[] | null; bits: string; args?: unknown[] };
     const ns = namespace(env, body.cls);
     try {
       switch (url.pathname) {
@@ -134,7 +145,7 @@ export default {
           return Response.json(out);
         }
         case "/scan":
-          return Response.json(await sharded(ns, body.name).scan(body.method as "entries"));
+          return Response.json(await (sharded(ns, body.name).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(body.method, ...((body.args as unknown[]) ?? [])));
         case "/split":
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedSplit(body.name, body.bits));
         case "/describe":

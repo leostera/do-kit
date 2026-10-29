@@ -36,6 +36,12 @@ export interface SplitPolicy {
     readonly copy?: "auto" | "native" | "logical";
     /** A split that has not finished copying after this long is abandoned. Default 60 s. */
     readonly splitTimeoutMs?: number;
+    /**
+     * How long a write to the half being copied waits inside the shard before it answers "not ready"
+     * and the client backs off and retries. Bounds the requests a slow copy queues in the object
+     * (which the runtime sheds as overloaded). Default 2 s.
+     */
+    readonly holdWaitMs?: number;
 }
 /**
  * Split at half of what one object takes: about 800 calls/s on the edge, so 400, sustained for
@@ -114,6 +120,19 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      */
     protected update<R>(keys: readonly string[], decide: (current: Map<string, V>) => UpdateResult<V, R>): Promise<R>;
     /**
+     * Runs `fn` in one transaction, fenced like `update`: it waits while any of `keys` is being
+     * copied by a split, and runs only if this shard still owns them all. Write the subclass's own
+     * tables here, never outside: a write that skips the fence can land after the copy and be lost.
+     * List every key whose rows `fn` touches. `fn` must be synchronous.
+     */
+    protected transact<R>(keys: readonly string[], fn: () => R): Promise<R>;
+    /**
+     * Up to `limit` of this shard's rows (of `read`/`update`) with keys after `afterKey`, in key
+     * order: bounded paging over one shard. Rows of keys it no longer owns are skipped, so a page
+     * is right while cleanup is still running.
+     */
+    protected ownedRowsPage(afterKey: string | null, limit: number): [string, V][];
+    /**
      * Runs before this shard copies its storage for a split, while writes to the half that moves
      * wait: a subclass with work queued under rows it is giving away (an outbox) finishes it here,
      * so the new shard continues after it. It may run more than once.
@@ -148,6 +167,8 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     /** The name all shards of this object share (what the client was created with). */
     protected objectName(): string;
     private assertOwner;
+    /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
+    private waitForHold;
     /** What an update of these keys waits for, if any. */
     private holding;
     /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */

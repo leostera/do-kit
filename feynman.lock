@@ -20,12 +20,13 @@
     "src/sharded/index.ts#ShardedObject.owns": "d1a6c9106512",
     "src/sharded/index.ts#ShardedObject.read": "9a5dcf8d68f9",
     "src/sharded/index.ts#ShardedObject.shardedActivate": "118c0d3990f3",
-    "src/sharded/index.ts#ShardedObject.shardedCall": "dd98cd57f884",
+    "src/sharded/index.ts#ShardedObject.shardedCall": "e8facc66696f",
     "src/sharded/index.ts#ShardedObject.shardedClaim": "2d426aa30317",
     "src/sharded/index.ts#ShardedObject.shardedReceive": "fa38bfd3e232",
     "src/sharded/index.ts#ShardedObject.shardedRestore": "9af6ac56dff1",
     "src/sharded/index.ts#ShardedObject.shardedScan": "50932c1866c5",
     "src/sharded/index.ts#ShardedObject.split": "bd3129ffa1bb",
-    "src/sharded/index.ts#ShardedObject.update": "62fa0321faf8"
+    "src/sharded/index.ts#ShardedObject.update": "e757c263164b",
+    "src/sharded/index.ts#ShardedObject.waitForHold": "e9f287f59aad"
   }
 }

@@ -165,11 +165,15 @@ export default defineSpec(
       transitions: {
         [Write]: {
           description: "Applies a write it owns; holds right-half writes while splitting; answers moved for keys it gave away.",
-          sources: ["src/sharded/index.ts#ShardedObject.shardedCall", "src/sharded/index.ts#ShardedObject.update", "src/sharded/index.ts#ShardedObject.holding"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedCall", "src/sharded/index.ts#ShardedObject.update", "src/sharded/index.ts#ShardedObject.holding", "src/sharded/index.ts#ShardedObject.waitForHold"],
           sends: [Done, Moved],
+          starts: ["holdWait"],
           run(s, msg, ctx) {
             if (msg.key === "R" && s.owns === "left") return ctx.reply(Moved, { key: msg.key });
-            if (msg.key === "R" && s.splitting !== null) return void s.held++;
+            if (msg.key === "R" && s.splitting !== null) {
+              s.held++;
+              return void ctx.start("holdWait");
+            }
             s.rows[msg.key]++;
             ctx.reply(Done, { key: msg.key, op: "write", value: s.rows[msg.key] });
           },
@@ -204,6 +208,16 @@ export default defineSpec(
           run(s, _msg, ctx) {
             s.activated = true;
             ctx.cancel("activateRetry");
+          },
+        },
+        holdWait: {
+          description: "Held writes waited holdWaitMs: they are turned away as not ready, unapplied, and the client retries later instead of queueing here.",
+          sources: ["src/sharded/index.ts#ShardedObject.waitForHold", "src/sharded/index.ts#ShardedObject.shardedCall"],
+          after: "2 seconds",
+          sends: [NotReady],
+          run(s, ctx) {
+            if (s.splitting === null) return;
+            for (; s.held > 0; s.held--) ctx.send(ctx.the(Client), NotReady, { key: "R" });
           },
         },
         splitTimeout: {

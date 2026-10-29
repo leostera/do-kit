@@ -212,3 +212,15 @@ test("after a split, cleanupForeign drops the rows each shard no longer owns, on
   }
   throw new Error("the old shard kept rows it no longer owns");
 }, 60_000);
+
+test("ownedRowsPage pages each shard in key order, skipping keys it gave away", async () => {
+  const name = `paged-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  // Straight after the split, before cleanup: each key once, on the shard that owns it.
+  const shards = await post<string[][]>("/scan", { cls: "m", name, method: "pagedKeys", args: [3] });
+  expect(shards.length).toBe(2);
+  for (const keys of shards) expect(keys).toEqual([...keys].sort());
+  expect(shards.flat().sort()).toEqual([...KEYS].sort());
+}, 60_000);
+
