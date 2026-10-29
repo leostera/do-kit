@@ -348,6 +348,27 @@
         "p99": 5332,
         "max": 11617
       }
+    },
+    {
+      "target": "split",
+      "objectName": "bench-e8b2e4cc1917-splitbench-split-1024",
+      "rows": 1048576,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 1073741824,
+      "seedMs": 483322,
+      "copy": "native",
+      "copyMs": 26273,
+      "servingMs": 26700,
+      "doneMs": 660526,
+      "writes": 32934,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 140,
+        "p95": 379,
+        "p99": 500,
+        "max": 26152
+      }
     }
   ]
 }

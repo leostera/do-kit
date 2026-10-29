@@ -17,14 +17,14 @@ The split benchmark builds one object with N MiB of 1 KiB rows. Then, with 8 wri
 | 1 MiB | 1.9 s | 1.5 s | 1.4 s |
 | 16 MiB | 2.0 s | 3.0 s | 7.4 s |
 | 128 MiB | 5.7 s | 24.3 s | 235 s |
-| 1 GiB | 16.6 s (earlier run) | — | did not finish in 2 h |
+| 1 GiB | 26.7 s | failed | did not finish in 2 h |
 
 "Time to split" is the time until the new owner serves with all of its data:
 - **splittable-object:** until the new object has claimed its copy. Deleting the half each side gave away continues in the background: 44 s at 128 MiB, during which those rows are invisible.
 - **Freeze:** the whole freeze.
 - **Row copy:** until the last row has moved.
 
-The 1 GiB point for splittable-object comes from an earlier run of the same protocol, before cleanup was paced. A rerun is pending.
+At 1 GiB, splittable-object served after 26.7 s. During the run, writes had a p50 of 140 ms, a p95 of 379 ms and a p99 of 500 ms, with no failures. The slowest write, 26.2 s, was one to the moving half that waited for the copy. Deleting the half each side gave away then took 11 minutes in the background. The freeze-into-two design gave up on the split (its single-transaction cleanup of half a million rows per child is the likely cause). The v0.1 row copy was still copying after two hours.
 
 ### What callers feel during a split
 
@@ -70,6 +70,28 @@ The throughput benchmark sends one-key writes of 1 KiB values to uniform keys fr
 - **Not yet measured with this harness:** reads, an object that splits by load while measured (the run stopped with an error from the controlling Worker at 256 in flight), and a single hot key. A hot key cannot be split: it always lives on one leaf. In an earlier run, a hot key also kept triggering splits that could not help, which is a known gap in the split policy.
 
 More graphs from the same run: [latency p50](bench/latency-p50.svg), [p95](bench/latency-p95.svg), [max](bench/latency-max.svg), and [storage ceiling](bench/capacity.svg) (leaves × the 10 GB limit of one object).
+
+## Cost
+
+These are estimates from the [published Durable Objects prices](https://developers.cloudflare.com/durable-objects/platform/pricing/) (Workers Paid, beyond included usage) and the row counts of the code.
+
+![Estimated cost per million writes](bench/cost-writes.svg)
+
+- **Requests:** one per write, in both cases ($0.15 per million).
+- **Rows written:** one per write. A new key costs one more in splittable-object, for the index on its hash ($1.00 per million rows).
+- **Rows read:** splittable-object reads each row before writing it ($0.001 per million rows).
+- **Duration:** billed per object while it is busy, at 128 MB. At the measured peaks, 1,499 writes/s for one object and 9,960 writes/s for 16 leaves, that is $0.0010 and $0.0025 per million writes.
+
+![Estimated cost of one split](bench/cost-split.svg)
+
+A split is billed as the rows it writes:
+- **splittable-object** deletes the half each side gave away, at two rows written per row (table and index). The snapshot restore is done by the storage layer and is not billed as rows written.
+- **The freeze into two** also deletes everything from the parent.
+- **The v0.1 row copy** inserts every row into a child, tracks each key, and deletes it from the parent.
+
+With 1 KiB rows, a splittable-object split costs about $0.002 at 1 MiB, $0.03 at 16 MiB, $0.26 at 128 MiB, $2.10 at 1 GiB and $21 at 10 GiB.
+
+The index is the one cost a plain object does not have. It makes deletes and range scans by hash cheap in rows read. Rows read cost a thousandth of rows written, so a version without it is worth measuring.
 
 ## Reference: what one Durable Object takes
 

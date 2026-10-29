@@ -35,15 +35,35 @@ These were measured on Cloudflare's network, with up to 128 load-driver Durable 
 
 ![Slowest write during a split](docs/bench/split-latency.svg)
 
-When load splits an object, it pays for it once. Here an object seeded with 1 to 128 MiB of 1 KiB rows, split once while 8 writers kept writing to random keys. No write failed in any run.
+When load splits an object, it pays for it once. Here an object seeded with 1 MiB to 1 GiB of 1 KiB rows, split once while 8 writers kept writing to random keys. No write failed in any run.
 
 | Data in the object | splittable-object | Freeze, snapshot into two new objects | v0.1: copy rows to two new objects |
 |---|---|---|---|
 | 1 MiB | 1.9 s | 1.5 s | 1.4 s |
 | 16 MiB | **2.0 s** | 3.0 s | 7.4 s |
 | 128 MiB | **5.7 s**, slowest write 5.4 s | 24.3 s, every write blocked for it | 235 s, write p95 2.4 s throughout |
+| 1 GiB | **26.7 s**, write p99 500 ms | the split failed | did not finish in 2 hours |
 
 The times are until the new object serves with all of its data. See [what was measured and how](docs/performance.md).
+
+## What it costs
+
+Splitting does not change what you pay per call: each write is one request to one leaf, as it would be to one object.
+
+![Estimated cost per million writes](docs/bench/cost-writes.svg)
+
+| Per million writes (Workers Paid list prices) | One Durable Object | splittable-object |
+|---|---|---|
+| Update an existing key | $1.15 | $1.15 |
+| Write a new key | $1.15 | $2.15 |
+
+The difference is the index on each key's hash, which makes a new key cost one more row written ($1.00 per million rows). Duration is billed per object while it is busy, so 16 busy leaves cost more than one object, but at $12.50 per million GB-s that comes to $0.0010 against $0.0025 per million writes.
+
+A split costs the rows it deletes: each side deletes the half it gave away, at two rows written per row (table and index). The snapshot is made by the storage layer and is not billed as rows written. For 1 KiB rows that is about $0.03 to split 16 MiB, $0.26 for 128 MiB and $2.10 for 1 GiB, and an object usually splits long before it holds that much.
+
+![Estimated cost of one split](docs/bench/cost-split.svg)
+
+These are estimates from the [published prices](https://developers.cloudflare.com/durable-objects/platform/pricing/) and the row counts of the code, not from an invoice. Included monthly usage is not subtracted.
 
 ## Why it is fast
 
