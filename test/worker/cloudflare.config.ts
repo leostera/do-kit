@@ -1,9 +1,9 @@
-// A Worker for testing splittable objects under cf dev: two classes, one split by hand and one
+// A Worker for testing sharded objects under cf dev: two classes, one split by hand and one
 // by load (a low threshold), driven over HTTP by the tests.
 import { bindings, defineConfig, exports } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
-const NAME = "splittable-object-test";
+const NAME = "do-kit-test";
 
 export default defineConfig(() => ({
   worker: {

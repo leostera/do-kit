@@ -1,6 +1,6 @@
-// Splittable objects under cf dev (workerd with local Durable Objects), driven through the test
+// Sharded objects under cf dev (workerd with local Durable Objects), driven through the test
 // Worker: concurrent writes and compare-and-swap across splits lose nothing and stay linearisable
-// per key; load splits a node by itself; the client finds leaves its map does not know yet.
+// per key; load splits a node by itself; the client finds shards its map does not know yet.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import fc from "fast-check";
 import { join } from "node:path";
@@ -41,12 +41,12 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 const call = <T>(cls: string, name: string, method: string, keys: string[], payloads: unknown[] | null = null) => post<T>("/call", { cls, name, method, keys, payloads });
 const describe = (cls: string, name: string, bits: string) => post<{ bits: string; state: string; rows: number; storedRows: number }>("/describe", { cls, name, bits });
 
-/** Leaves reachable from the root, by asking objects (not the client's map). */
-async function leaves(cls: string, name: string, bits = ""): Promise<string[]> {
+/** Shards reachable from the root, by asking objects (not the client's map). */
+async function shards(cls: string, name: string, bits = ""): Promise<string[]> {
   const node = await describe(cls, name, bits);
-  // The object hosting `bits` hosts a deeper leaf once `bits` has split.
+  // The object hosting `bits` hosts a deeper shard once `bits` has split.
   if (node.state === "new" || node.bits === bits) return [bits];
-  return [...(await leaves(cls, name, `${bits}0`)), ...(await leaves(cls, name, `${bits}1`))];
+  return [...(await shards(cls, name, `${bits}0`)), ...(await shards(cls, name, `${bits}1`))];
 }
 
 let run = 0;
@@ -62,8 +62,8 @@ test("concurrent adds across splits: every acknowledged add is counted once", as
         const expected = new Map<string, number>();
         const work = batches.map(async (batch, i) => {
           if (splitAt.includes(i)) {
-            // Split a random current leaf, behind the client's back.
-            const all = await leaves("m", name);
+            // Split a random current shard, behind the client's back.
+            const all = await shards("m", name);
             await post("/split", { cls: "m", name, bits: all[i % all.length] });
           }
           await call("m", name, "add", batch.map(([k]) => k), batch.map(([, n]) => n));
@@ -92,7 +92,7 @@ test("compare-and-swap across splits: one winner per value, final value counts t
           for (let round = 0; round < 6; round++) {
             const key = keys[(w + round) % keys.length]!;
             if (splitAt.includes(step++)) {
-              const all = await leaves("m", name);
+              const all = await shards("m", name);
               await post("/split", { cls: "m", name, bits: all[step % all.length] });
             }
             const [current] = await call<(number | null)[]>("m", name, "get", [key]);
@@ -126,7 +126,7 @@ test("load splits a node by itself, and nothing is lost", async () => {
       }
     }),
   );
-  const found = await leaves("auto", name);
+  const found = await shards("auto", name);
   expect(found.length).toBeGreaterThan(1);
   const got = await call<(number | null)[]>("auto", name, "get", KEYS);
   KEYS.forEach((k, i) => expect(got[i] ?? 0).toBe(expected.get(k) ?? 0));
@@ -135,7 +135,7 @@ test("load splits a node by itself, and nothing is lost", async () => {
 test("a new object splits to its initial depth before its first call, and concurrent first calls lose nothing", async () => {
   const name = `presplit-${Date.now()}`;
   const expected = new Map<string, number>();
-  // Many first calls at once: they must wait for the presplit, then land on the leaves.
+  // Many first calls at once: they must wait for the presplit, then land on the shards.
   await Promise.all(
     Array.from({ length: 16 }, async (_, w) => {
       for (let i = 0; i < 10; i++) {
@@ -145,9 +145,9 @@ test("a new object splits to its initial depth before its first call, and concur
       }
     }),
   );
-  const found = await leaves("presplit", name);
+  const found = await shards("presplit", name);
   expect(found.sort()).toEqual(["00", "01", "10", "11"]);
-  for (const bits of found) expect((await describe("presplit", name, bits)).state).toBe("leaf");
+  for (const bits of found) expect((await describe("presplit", name, bits)).state).toBe("shard");
   const got = await call<(number | null)[]>("presplit", name, "get", KEYS);
   KEYS.forEach((k, i) => expect(got[i] ?? 0).toBe(expected.get(k) ?? 0));
 }, 60_000);
@@ -159,7 +159,7 @@ test("a split copies the right half, and each object deletes the half it gave aw
   expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
   for (let i = 0; i < 100; i++) {
     const [left, right] = await Promise.all([describe("m", name, "0"), describe("m", name, "1")]);
-    if (left.bits === "0" && right.state === "leaf" && left.storedRows === left.rows && right.storedRows === right.rows) {
+    if (left.bits === "0" && right.state === "shard" && left.storedRows === left.rows && right.storedRows === right.rows) {
       expect(left.rows + right.rows).toBe(many.length);
       expect(left.rows).toBeGreaterThan(0);
       expect(right.rows).toBeGreaterThan(0);
@@ -181,14 +181,14 @@ test("a split copies rows larger than one copy batch", async () => {
   expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
   const got = await call<string[]>("m", name, "get", keys);
   got.forEach((v, i) => expect(v === blob(i)).toBe(true));
-  expect((await describe("m", name, "1")).state).toBe("leaf");
+  expect((await describe("m", name, "1")).state).toBe("shard");
 }, 60_000);
 
-test("a split copies subclass tables, and the new leaf drops what it does not own", async () => {
+test("a split copies subclass tables, and the new shard drops what it does not own", async () => {
   const name = `tables-${Date.now()}`;
   await call("m", name, "add", KEYS, KEYS.map(() => 1));
   expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
-  const [left, right] = await post<{ key: string; owned: boolean }[][]>("/scan", { cls: "m", name, method: "history" }).then((leaves) => [...leaves].sort((a, b) => b.length - a.length));
+  const [left, right] = await post<{ key: string; owned: boolean }[][]>("/scan", { cls: "m", name, method: "history" }).then((shards) => [...shards].sort((a, b) => b.length - a.length));
   // The original keeps its whole table (its queued work stays with it); the copy kept only its keys.
   expect(left!.length).toBe(KEYS.length);
   expect(right!.length).toBeGreaterThan(0);
@@ -196,19 +196,19 @@ test("a split copies subclass tables, and the new leaf drops what it does not ow
   expect(right!.length + left!.filter((h) => h.owned).length).toBe(KEYS.length);
 }, 60_000);
 
-test("after a split, cleanupForeign drops the rows each leaf no longer owns, on both leaves", async () => {
+test("after a split, cleanupForeign drops the rows each shard no longer owns, on both shards", async () => {
   const name = `foreign-${Date.now()}`;
   await call("m", name, "add", KEYS, KEYS.map(() => 1));
   expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
   for (let i = 0; i < 100; i++) {
-    const leaves = await post<{ key: string; owned: boolean }[][]>("/scan", { cls: "m", name, method: "listing" });
-    if (leaves.every((rows) => rows.every((r) => r.owned))) {
-      // Each key is listed exactly once, by the leaf that owns it.
-      expect(leaves.flat().map((r) => r.key).sort()).toEqual([...KEYS].sort());
-      expect(leaves.every((rows) => rows.length > 0)).toBe(true);
+    const shards = await post<{ key: string; owned: boolean }[][]>("/scan", { cls: "m", name, method: "listing" });
+    if (shards.every((rows) => rows.every((r) => r.owned))) {
+      // Each key is listed exactly once, by the shard that owns it.
+      expect(shards.flat().map((r) => r.key).sort()).toEqual([...KEYS].sort());
+      expect(shards.every((rows) => rows.length > 0)).toBe(true);
       return;
     }
     await Bun.sleep(100);
   }
-  throw new Error("the old leaf kept rows it no longer owns");
+  throw new Error("the old shard kept rows it no longer owns");
 }, 60_000);

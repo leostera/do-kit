@@ -1,7 +1,7 @@
-// How a leaf splits with one storage copy.
+// How a shard splits with one storage copy.
 //
-// The Durable Object that hosts a leaf keeps the left half of its range (it is also the host of
-// the left child: hosts are named by the leaf's bits without trailing zeros) and copies its
+// The Durable Object that hosts a shard keeps the left half of its range (it is also the host of
+// the left child: hosts are named by the shard's bits without trailing zeros) and copies its
 // storage once into a new object for the right half. While the copy is made, writes to the right
 // half wait on the original; reads keep being served there. Once the copy reports it is ready
 // the original stops owning the right half (answers "moved"), and only then tells the copy to
@@ -18,7 +18,7 @@ const KEYS: Key[] = ["L", "R"];
 export default defineSpec(
   "Snapshot split",
   {
-    description: "How a leaf hands the right half of its keys to a new object with a single storage copy, without losing or double-serving a write.",
+    description: "How a shard hands the right half of its keys to a new object with a single storage copy, without losing or double-serving a write.",
     messages: {
       Write: message<{ key: Key }>({ name: "write" }),
       Read: message<{ key: Key }>({ name: "read" }),
@@ -34,7 +34,7 @@ export default defineSpec(
   (spec) => {
     const { Write, Read, Done, Moved, NotReady, Restore, Restored, Activate, Activated } = spec.messages;
     const callers = spec.defineZone({ name: "Workers", description: "route keys through the splits they know" });
-    const objects = spec.defineZone({ name: "Durable Objects", description: "one leaf per object" });
+    const objects = spec.defineZone({ name: "Durable Objects", description: "one shard per object" });
 
     spec.defineLimit({ name: "Split timeout", value: 5, unit: "minutes" });
 
@@ -58,7 +58,7 @@ export default defineSpec(
         write: {
           label: "Write a key",
           description: "Increments a key on the object it believes owns it.",
-          sources: ["src/client.ts:87-89", "src/client.ts:100-140"],
+          sources: ["src/sharded/client.ts:87-89", "src/sharded/client.ts:100-140"],
           inputs: { key: spec.defineInput(String, { examples: KEYS }) },
           when: (s) => s.pending === null,
           sends: [Write],
@@ -72,7 +72,7 @@ export default defineSpec(
         read: {
           label: "Read a key",
           description: "Reads a key from the object it believes owns it.",
-          sources: ["src/client.ts:87-89", "src/client.ts:100-140"],
+          sources: ["src/sharded/client.ts:87-89", "src/sharded/client.ts:100-140"],
           inputs: { key: spec.defineInput(String, { examples: KEYS }) },
           when: (s) => s.pending === null,
           sends: [Read],
@@ -86,7 +86,7 @@ export default defineSpec(
       transitions: {
         [Done]: {
           description: "Gets the answer.",
-          sources: ["src/client.ts:100-140"],
+          sources: ["src/sharded/client.ts:100-140"],
           run(s, msg) {
             if (msg.op === "read" && msg.value < s.acked[msg.key]) s.staleRead = true;
             if (msg.op === "write") s.acked[msg.key] = Math.max(s.acked[msg.key], msg.value);
@@ -95,7 +95,7 @@ export default defineSpec(
         },
         [Moved]: {
           description: "Learns the split and sends the call to the new owner.",
-          sources: ["src/client.ts:100-140", "src/client.ts#SplittableClient.learn"],
+          sources: ["src/sharded/client.ts:100-140", "src/sharded/client.ts#ShardedClient.learn"],
           sends: [Write, Read],
           run(s, msg, ctx) {
             s.knowsSplit = true;
@@ -107,13 +107,13 @@ export default defineSpec(
         },
         [NotReady]: {
           description: "The new owner is not serving yet; tries again shortly.",
-          sources: ["src/client.ts:100-140", "src/client.ts#Backoff.next"],
+          sources: ["src/sharded/client.ts:100-140", "src/sharded/client.ts#Backoff.next"],
           starts: ["retry"],
           run: (_s, _msg, ctx) => ctx.start("retry"),
         },
         retry: {
           description: "Sends the waiting call again.",
-          sources: ["src/client.ts:100-140"],
+          sources: ["src/sharded/client.ts:100-140"],
           after: "a few milliseconds",
           sends: [Write, Read],
           run(s, ctx) {
@@ -128,7 +128,7 @@ export default defineSpec(
 
     const Original = spec.defineActor({
       name: "Original",
-      description: "The object hosting the leaf; after the split it hosts the left half.",
+      description: "The object hosting the shard; after the split it hosts the left half.",
       zone: objects,
       singleton: true,
       initialState: () => ({
@@ -142,7 +142,7 @@ export default defineSpec(
       durable: ["owns", "rows", "epoch", "activated"],
       display: {
         icon: "database",
-        status: (s) => (s.splitting !== null ? `splitting (epoch ${s.splitting}), ${s.held} write(s) held` : s.owns === "both" ? "leaf: L and R" : s.activated ? "leaf: L" : "leaf: L, activating copy"),
+        status: (s) => (s.splitting !== null ? `splitting (epoch ${s.splitting}), ${s.held} write(s) held` : s.owns === "both" ? "shard: L and R" : s.activated ? "shard: L" : "shard: L, activating copy"),
         mood: (s) => (s.splitting !== null ? "busy" : "ok"),
         rows: (s) => KEYS.map((k) => ({ group: "rows", label: k, detail: String(s.rows[k]), mood: k === "R" && s.owns === "left" ? "off" : "info" })),
       },
@@ -150,7 +150,7 @@ export default defineSpec(
         split: {
           label: "Split",
           description: "Holds writes to the right half, snapshots its storage and asks the new object to restore from it.",
-          sources: ["src/index.ts#SplittableObject.split", "src/index.ts#SplittableObject.copyAndClaim", "src/index.ts#SplittableObject.copyTo"],
+          sources: ["src/sharded/index.ts#ShardedObject.split", "src/sharded/index.ts#ShardedObject.copyAndClaim", "src/sharded/index.ts#ShardedObject.copyTo"],
           when: (s) => s.owns === "both" && s.splitting === null && s.epoch < 2,
           sends: [Restore],
           starts: ["splitTimeout"],
@@ -165,7 +165,7 @@ export default defineSpec(
       transitions: {
         [Write]: {
           description: "Applies a write it owns; holds right-half writes while splitting; answers moved for keys it gave away.",
-          sources: ["src/index.ts#SplittableObject.splittableCall", "src/index.ts#SplittableObject.update", "src/index.ts#SplittableObject.holding"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedCall", "src/sharded/index.ts#ShardedObject.update", "src/sharded/index.ts#ShardedObject.holding"],
           sends: [Done, Moved],
           run(s, msg, ctx) {
             if (msg.key === "R" && s.owns === "left") return ctx.reply(Moved, { key: msg.key });
@@ -176,7 +176,7 @@ export default defineSpec(
         },
         [Read]: {
           description: "Serves reads of keys it owns, including the right half while splitting.",
-          sources: ["src/index.ts#SplittableObject.splittableCall", "src/index.ts#SplittableObject.read"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedCall", "src/sharded/index.ts#ShardedObject.read"],
           sends: [Done, Moved],
           run(s, msg, ctx) {
             if (msg.key === "R" && s.owns === "left") return ctx.reply(Moved, { key: msg.key });
@@ -185,7 +185,7 @@ export default defineSpec(
         },
         [Restored]: {
           description: "The copy is ready: stops owning the right half, turns held writes away, then activates the copy.",
-          sources: ["src/index.ts#SplittableObject.split", "src/index.ts#SplittableObject.activateSibling"],
+          sources: ["src/sharded/index.ts#ShardedObject.split", "src/sharded/index.ts#ShardedObject.activateSibling"],
           sends: [Moved, Activate],
           starts: ["activateRetry"],
           run(s, msg, ctx) {
@@ -200,7 +200,7 @@ export default defineSpec(
         },
         [Activated]: {
           description: "The copy serves the right half.",
-          sources: ["src/index.ts#SplittableObject.activateSibling"],
+          sources: ["src/sharded/index.ts#ShardedObject.activateSibling"],
           run(s, _msg, ctx) {
             s.activated = true;
             ctx.cancel("activateRetry");
@@ -208,7 +208,7 @@ export default defineSpec(
         },
         splitTimeout: {
           description: "The copy did not get ready in time: abandons the split and applies the held writes.",
-          sources: ["src/index.ts#SplittableObject.split"],
+          sources: ["src/sharded/index.ts#ShardedObject.split"],
           after: "5 minutes",
           sends: [Done],
           run(s, ctx) {
@@ -222,7 +222,7 @@ export default defineSpec(
         },
         activateRetry: {
           description: "Activates the copy again until it confirms (the alarm's job).",
-          sources: ["src/index.ts#SplittableObject.alarm", "src/index.ts#SplittableObject.activateSibling"],
+          sources: ["src/sharded/index.ts#ShardedObject.alarm", "src/sharded/index.ts#ShardedObject.activateSibling"],
           after: "1 second",
           sends: [Activate],
           run(s, ctx) {
@@ -241,17 +241,17 @@ export default defineSpec(
       durable: ["copyEpoch", "right", "active"],
       display: {
         icon: "database",
-        status: (s) => (s.active ? "leaf: R" : s.copyEpoch !== null ? `copy of epoch ${s.copyEpoch}, waiting` : "not created"),
+        status: (s) => (s.active ? "shard: R" : s.copyEpoch !== null ? `copy of epoch ${s.copyEpoch}, waiting` : "not created"),
         mood: (s) => (s.active ? "ok" : s.copyEpoch !== null ? "busy" : "off"),
         rows: (s) => [{ group: "rows", label: "R", detail: String(s.right), mood: s.active ? "info" : "off" }],
       },
       transitions: {
         [Restore]: {
           description: "Restores its storage from the snapshot, drops what is not its range, and says it is ready (not serving yet).",
-          sources: ["src/index.ts#SplittableObject.splittableRestore", "src/index.ts#SplittableObject.splittableReceive", "src/index.ts#SplittableObject.splittableClaim"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedRestore", "src/sharded/index.ts#ShardedObject.shardedReceive", "src/sharded/index.ts#ShardedObject.shardedClaim"],
           sends: [Restored],
           run(s, msg, ctx) {
-            if (s.active) return; // an active leaf is never overwritten
+            if (s.active) return; // an active shard is never overwritten
             if (s.copyEpoch !== null && msg.epoch < s.copyEpoch) return; // a late restore from an abandoned attempt
             s.copyEpoch = msg.epoch;
             s.right = msg.right;
@@ -260,7 +260,7 @@ export default defineSpec(
         },
         [Activate]: {
           description: "Starts serving the right half, if its copy is from this attempt.",
-          sources: ["src/index.ts#SplittableObject.splittableActivate"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedActivate"],
           sends: [Activated],
           run(s, msg, ctx) {
             if (s.copyEpoch !== msg.epoch) return;
@@ -270,7 +270,7 @@ export default defineSpec(
         },
         [Write]: {
           description: "Applies writes once active; until then asks the caller to retry.",
-          sources: ["src/index.ts#SplittableObject.splittableCall", "src/index.ts#SplittableObject.arrive"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedCall", "src/sharded/index.ts#ShardedObject.arrive"],
           sends: [Done, NotReady],
           run(s, msg, ctx) {
             if (!s.active) return ctx.reply(NotReady, { key: msg.key });
@@ -280,7 +280,7 @@ export default defineSpec(
         },
         [Read]: {
           description: "Serves reads once active.",
-          sources: ["src/index.ts#SplittableObject.splittableCall", "src/index.ts#SplittableObject.arrive"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedCall", "src/sharded/index.ts#ShardedObject.arrive"],
           sends: [Done, NotReady],
           run(s, msg, ctx) {
             if (!s.active) return ctx.reply(NotReady, { key: msg.key });

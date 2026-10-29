@@ -1,7 +1,7 @@
 {
-  "name": "@leostera/splittable-object",
-  "version": "0.1.0",
-  "description": "Self-splitting, key-routed Cloudflare Durable Objects",
+  "name": "@leostera/do-kit",
+  "version": "0.2.0",
+  "description": "Building blocks for Cloudflare Durable Objects: sharded objects that split themselves as they grow",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./sharded": {
+      "types": "./dist/sharded/index.d.ts",
+      "import": "./dist/sharded/index.js"
     }
   },
   "scripts": {
@@ -34,5 +38,19 @@
     "vite": "^8.3.5"
   },
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts"
+  "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leostera/do-kit.git"
+  },
+  "homepage": "https://github.com/leostera/do-kit#readme",
+  "keywords": [
+    "cloudflare",
+    "durable-objects",
+    "workers",
+    "sharding"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

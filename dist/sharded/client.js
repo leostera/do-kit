@@ -1,11 +1,11 @@
-// The client side of splittable objects: routes keys to leaves through the splits it
+// The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { hashBit, keyHash, leafObjectName, nodeName } from "./index.js";
-/** Keys that had to go to one leaf belong to several (nothing was applied). */
-export class SpansLeaves extends Error {
+import { hashBit, keyHash, shardObjectName, nodeName } from "./index.js";
+/** Keys that had to go to one shard belong to several (nothing was applied). */
+export class SpansShards extends Error {
 }
-const CACHE_ORIGIN = "https://splittable-object.invalid/";
+const CACHE_ORIGIN = "https://do-kit.invalid/";
 /**
  * Splits known per object (keyed by its root's Durable Object ID, unique per namespace and
  * name), shared by every client in this isolate.
@@ -14,10 +14,10 @@ const knownSplits = new Map();
 const loadedFromCache = new Set();
 /** A hop limit: deeper than any maxDepth, so a loop is a bug, not a slow call. */
 const MAX_HOPS = 64;
-/** How long a call waits for a new leaf to start serving (it is activated just after a split). */
+/** How long a call waits for a new shard to start serving (it is activated just after a split). */
 const NOT_READY_WAIT_MS = 30_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-/** Waits a little longer each time a leaf is not ready; throws once that has gone on too long. */
+/** Waits a little longer each time a shard is not ready; throws once that has gone on too long. */
 class Backoff {
     what;
     wait = 5;
@@ -27,13 +27,13 @@ class Backoff {
     }
     async next() {
         if (this.waited > NOT_READY_WAIT_MS)
-            throw new Error(`${this.what}: a new leaf did not start serving`);
+            throw new Error(`${this.what}: a new shard did not start serving`);
         await sleep(this.wait);
         this.waited += this.wait;
         this.wait = Math.min(this.wait * 2, 250);
     }
 }
-export class SplittableClient {
+export class ShardedClient {
     namespace;
     name;
     /** What known splits are filed under: two classes may share a name, never a root ID. */
@@ -50,7 +50,7 @@ export class SplittableClient {
         return set;
     }
     /** The deepest known node owning a hash. */
-    leafFor(hash) {
+    shardFor(hash) {
         let bits = "";
         while (this.splits.has(bits))
             bits += hashBit(hash, bits.length);
@@ -58,48 +58,48 @@ export class SplittableClient {
     }
     stub(bits) {
         const ns = this.namespace;
-        return ns.get(ns.idFromName(leafObjectName(this.name, bits)));
+        return ns.get(ns.idFromName(shardObjectName(this.name, bits)));
     }
     /**
-     * Calls `method(keys, payloads, ...args)` on every leaf owning some of the keys, with its share
-     * of them (and of `payloads`, aligned with `keys`). One result per leaf.
+     * Calls `method(keys, payloads, ...args)` on every shard owning some of the keys, with its share
+     * of them (and of `payloads`, aligned with `keys`). One result per shard.
      */
     async call(keys, method, payloads, ...args) {
         return this.route(false, keys, method, payloads, args);
     }
     /**
-     * Like `call`, for keys that must be handled together by one leaf (an all-or-nothing update):
-     * throws SpansLeaves, before anything is applied, if they belong to more than one.
+     * Like `call`, for keys that must be handled together by one shard (an all-or-nothing update):
+     * throws SpansShards, before anything is applied, if they belong to more than one.
      */
-    async callOneLeaf(keys, method, payloads, ...args) {
+    async callOneShard(keys, method, payloads, ...args) {
         const [only] = await this.route(true, keys, method, payloads, args);
         return only.result;
     }
-    async route(oneLeaf, keys, method, payloads, args) {
+    async route(oneShard, keys, method, payloads, args) {
         await this.loadCache();
         const hashes = keys.map(keyHash);
         const out = [];
         let pending = keys.map((_, i) => i);
-        const backoff = new Backoff(`splittable ${this.name}`);
+        const backoff = new Backoff(`sharded ${this.name}`);
         for (let hop = 0; pending.length > 0; hop++) {
             if (hop > MAX_HOPS)
-                throw new Error(`splittable ${this.name}: routing did not settle`);
+                throw new Error(`sharded ${this.name}: routing did not settle`);
             let waiting = false;
             const groups = new Map();
             for (const i of pending) {
-                const bits = this.leafFor(hashes[i]);
+                const bits = this.shardFor(hashes[i]);
                 let group = groups.get(bits);
                 if (!group)
                     groups.set(bits, (group = []));
                 group.push(i);
             }
-            if (oneLeaf && groups.size > 1)
-                throw new SpansLeaves(`keys of ${this.name} belong to ${groups.size} leaves`);
+            if (oneShard && groups.size > 1)
+                throw new SpansShards(`keys of ${this.name} belong to ${groups.size} shards`);
             const retry = [];
             await Promise.all([...groups].map(async ([bits, positions]) => {
                 const groupKeys = positions.map((i) => keys[i]);
                 const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
-                const answer = (await this.stub(bits).splittableCall(this.name, bits, method, groupKeys, groupPayloads, args));
+                const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args));
                 if ("ok" in answer)
                     out.push({ keys: groupKeys, positions, result: answer.ok });
                 else if ("moved" in answer) {
@@ -107,7 +107,7 @@ export class SplittableClient {
                     retry.push(...positions);
                 }
                 else {
-                    waiting = true; // not serving yet: the same leaf, a little later
+                    waiting = true; // not serving yet: the same shard, a little later
                     retry.push(...positions);
                 }
             }));
@@ -119,19 +119,19 @@ export class SplittableClient {
         }
         return out;
     }
-    /** Calls `method(...args)` on every leaf. */
+    /** Calls `method(...args)` on every shard. */
     async scan(method, ...args) {
         await this.loadCache();
         const out = [];
-        const backoff = new Backoff(`splittable ${this.name}`);
+        const backoff = new Backoff(`sharded ${this.name}`);
         const visit = async (bits, depth) => {
             if (depth > MAX_HOPS)
-                throw new Error(`splittable ${this.name}: scan did not settle`);
+                throw new Error(`sharded ${this.name}: scan did not settle`);
             if (this.splits.has(bits)) {
                 await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
                 return;
             }
-            const answer = (await this.stub(bits).splittableScan(this.name, bits, method, args));
+            const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args));
             if ("ok" in answer)
                 out.push(answer.ok);
             else if ("moved" in answer) {
@@ -184,7 +184,7 @@ export class SplittableClient {
         }
     }
 }
-export function splittable(namespace, name) {
-    return new SplittableClient(namespace, name);
+export function sharded(namespace, name) {
+    return new ShardedClient(namespace, name);
 }
 //# sourceMappingURL=client.js.map

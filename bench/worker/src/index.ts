@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { leafObjectName, nodeName, splittable, SplittableObject, type SplitPolicy, type UpdateResult } from "../../../src/index.ts";
+import { nodeName, sharded, ShardedObject, shardObjectName, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { splittable as twoCopySplittable, SplittableObject as TwoCopySplittableObject } from "./two-copy/index.ts";
 import { splittable as legacySplittable, SplittableObject as LegacySplittableObject } from "./legacy/index.ts";
 
@@ -114,10 +114,10 @@ async function seedRows(update: (keys: readonly string[], values: readonly strin
 }
 
 /** The identical key/value interface, distributed over hash-prefix leaves split with snapshots. */
-export class SplitObject extends SplittableObject<Env, string> {
+export class SplitObject extends ShardedObject<Env, string> {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 400, windowSeconds: 5, maxDepth: 12, keysPerCall: 25, copy: "native" };
-  protected nodes(): DurableObjectNamespace<SplittableObject<Env, string>> {
-    return this.env.SPLIT as DurableObjectNamespace<SplittableObject<Env, string>>;
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, string>> {
+    return this.env.SPLIT as DurableObjectNamespace<ShardedObject<Env, string>>;
   }
 
   async put(keys: readonly string[], values: readonly string[]): Promise<number> {
@@ -137,7 +137,7 @@ export class SplitObject extends SplittableObject<Env, string> {
 /** Starts as 16 leaves, before its first call: steady-state capacity, with no split while measuring. */
 export class PresplitObject extends SplitObject {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, initialDepth: 4, copy: "native" };
-  protected override nodes(): DurableObjectNamespace<SplittableObject<Env, string>> {
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, string>> {
     return this.env.PRESPLIT as never;
   }
 }
@@ -145,7 +145,7 @@ export class PresplitObject extends SplitObject {
 /** Splits only when told to: for timing one split. */
 export class ManualSplitObject extends SplitObject {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, copy: "native", splitTimeoutMs: 300_000 };
-  protected override nodes(): DurableObjectNamespace<SplittableObject<Env, string>> {
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, string>> {
     return this.env.SPLIT_MANUAL as never;
   }
 }
@@ -320,7 +320,7 @@ export class BenchDriver extends DurableObject<Env> {
       return;
     }
     if (target === "legacy") await legacySplittable(this.env.LEGACY, name).call(keys, "put", values);
-    else await splittable(target === "presplit" ? this.env.PRESPLIT : this.env.SPLIT, name).call(keys, "put", values);
+    else await sharded(target === "presplit" ? this.env.PRESPLIT : this.env.SPLIT, name).call(keys, "put", values);
   }
 
   private async read(target: Target, name: string, key: string): Promise<string | null> {
@@ -328,7 +328,7 @@ export class BenchDriver extends DurableObject<Env> {
       const stub = this.env.SINGLE.get(this.env.SINGLE.idFromName(name));
       return (await stub.get([key], null))[0] ?? null;
     }
-    const [leaf] = target === "legacy" ? await legacySplittable(this.env.LEGACY, name).call([key], "get", null) : await splittable(target === "presplit" ? this.env.PRESPLIT : this.env.SPLIT, name).call([key], "get", null);
+    const [leaf] = target === "legacy" ? await legacySplittable(this.env.LEGACY, name).call([key], "get", null) : await sharded(target === "presplit" ? this.env.PRESPLIT : this.env.SPLIT, name).call([key], "get", null);
     return leaf?.result[0] ?? null;
   }
 }
@@ -367,9 +367,9 @@ function percentile(histogram: readonly number[], p: number): number {
   return 120_000;
 }
 
-async function describeTree(env: Env, name: string, bits = "", ns: DurableObjectNamespace<SplittableObject<Env, string>> = env.SPLIT as never): Promise<{ leaves: number; rows: number; depth: number }> {
+async function describeTree(env: Env, name: string, bits = "", ns: DurableObjectNamespace<ShardedObject<Env, string>> = env.SPLIT as never): Promise<{ leaves: number; rows: number; depth: number }> {
   const namespace = ns;
-  const description = await namespace.get(namespace.idFromName(leafObjectName(name, bits))).splittableDescribe();
+  const description = await namespace.get(namespace.idFromName(shardObjectName(name, bits))).shardedDescribe();
   // The object hosting `bits` hosts a deeper leaf once `bits` has split.
   if (description.state === "new" || description.bits === bits) return { leaves: 1, rows: description.rows, depth: bits.length };
   const [zero, one] = await Promise.all([describeTree(env, name, `${bits}0`, ns), describeTree(env, name, `${bits}1`, ns)]);
@@ -397,9 +397,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Seeds `input.rows` rows, then splits the root once while `writers` write random seeded keys. */
 async function splitBench(env: Env, input: SplitBenchInput, progress: (line: unknown) => Promise<void>): Promise<unknown> {
   const name = input.objectName;
-  const split = env.SPLIT_MANUAL as unknown as DurableObjectNamespace<SplittableObject<Env, string>>;
+  const split = env.SPLIT_MANUAL as unknown as DurableObjectNamespace<ShardedObject<Env, string>>;
   const legacy = env.LEGACY_MANUAL as unknown as DurableObjectNamespace<LegacySplittableObject<Env, string>>;
-  const rootSplit = split.get(split.idFromName(leafObjectName(name, "")));
+  const rootSplit = split.get(split.idFromName(shardObjectName(name, "")));
   const rootLegacy = legacy.get(legacy.idFromName(nodeName(name, "")));
   const twoCopy = env.TWO_COPY_MANUAL as unknown as DurableObjectNamespace<TwoCopySplittableObject<Env, string>>;
   const rootTwoCopy = twoCopy.get(twoCopy.idFromName(nodeName(name, "")));
@@ -408,7 +408,7 @@ async function splitBench(env: Env, input: SplitBenchInput, progress: (line: unk
   for (let start = 0; start < input.rows; start += seedChunk) {
     const count = Math.min(seedChunk, input.rows - start);
     const args = [start, count, input.payloadBytes];
-    const answer = input.target === "split" ? await rootSplit.splittableCall(name, "", "seed", [], null, args) : input.target === "two-copy" ? await rootTwoCopy.splittableCall(name, "", "seed", [], null, args) : await rootLegacy.splittableCall(name, "", "seed", [], null, args);
+    const answer = input.target === "split" ? await rootSplit.shardedCall(name, "", "seed", [], null, args) : input.target === "two-copy" ? await rootTwoCopy.splittableCall(name, "", "seed", [], null, args) : await rootLegacy.splittableCall(name, "", "seed", [], null, args);
     if (!("ok" in answer)) throw new Error(`seeding: ${JSON.stringify(answer)}`);
     await progress({ seeded: start + count });
   }
@@ -422,7 +422,7 @@ async function splitBench(env: Env, input: SplitBenchInput, progress: (line: unk
   let stop = false;
   const value = "y".repeat(input.payloadBytes);
   const write = (key: string) =>
-    input.target === "split" ? splittable(env.SPLIT_MANUAL, name).call([key], "put", [value]) : input.target === "two-copy" ? twoCopySplittable(env.TWO_COPY_MANUAL, name).call([key], "put", [value]) : legacySplittable(env.LEGACY_MANUAL, name).call([key], "put", [value]);
+    input.target === "split" ? sharded(env.SPLIT_MANUAL, name).call([key], "put", [value]) : input.target === "two-copy" ? twoCopySplittable(env.TWO_COPY_MANUAL, name).call([key], "put", [value]) : legacySplittable(env.LEGACY_MANUAL, name).call([key], "put", [value]);
   const writer = async (w: number) => {
     for (let i = w; !stop; i += input.writers) {
       const key = `row-${Math.floor(Math.random() * input.rows)}`;
@@ -447,12 +447,12 @@ async function splitBench(env: Env, input: SplitBenchInput, progress: (line: unk
   let doneMs = 0;
   let copy: string | null = null;
   if (input.target === "split") {
-    if (!(await rootSplit.splittableSplit(name, ""))) throw new Error(`split abandoned: ${(await rootSplit.splittableDescribe()).lastSplitError}`);
+    if (!(await rootSplit.shardedSplit(name, ""))) throw new Error(`split abandoned: ${(await rootSplit.shardedDescribe()).lastSplitError}`);
     copyMs = Date.now() - splitStarted;
-    const right = split.get(split.idFromName(leafObjectName(name, "1")));
+    const right = split.get(split.idFromName(shardObjectName(name, "1")));
     for (;;) {
-      const [l, r] = await Promise.all([rootSplit.splittableDescribe(), right.splittableDescribe()]);
-      if (r.state === "leaf" && !servingMs) servingMs = Date.now() - splitStarted;
+      const [l, r] = await Promise.all([rootSplit.shardedDescribe(), right.shardedDescribe()]);
+      if (r.state === "shard" && !servingMs) servingMs = Date.now() - splitStarted;
       copy = l.lastSplit?.copy ?? null;
       if (servingMs && l.storedRows === l.rows && r.storedRows === r.rows) break;
       await sleep(100);

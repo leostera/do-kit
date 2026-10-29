@@ -1,8 +1,8 @@
-// Test Worker: counters keyed by name, on splittable objects. Routes:
+// Test Worker: counters keyed by name, on sharded objects. Routes:
 //   POST /call {cls, name, method, keys, payloads}  POST /scan {cls, name, method}
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
-import { leafObjectName, splittable, SplittableObject, type SplitPolicy, type UpdateResult } from "../../../src/index.ts";
+import { shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 
 interface Env {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
@@ -10,12 +10,12 @@ interface Env {
   readonly PRESPLIT_COUNTERS: DurableObjectNamespace<PresplitCounters>;
 }
 
-class CounterBase extends SplittableObject<Env, number> {
+class CounterBase extends ShardedObject<Env, number> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // A subclass table: which keys were added to here (a stand-in for an outbox).
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY)");
-    // A subclass table that both leaves clean after a split (a stand-in for a listing).
+    // A subclass table that both shards clean after a split (a stand-in for a listing).
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS listing (key TEXT PRIMARY KEY)");
   }
 
@@ -29,7 +29,7 @@ class CounterBase extends SplittableObject<Env, number> {
     return foreign.length;
   }
 
-  /** The keys in this object's listing table, and whether this leaf owns each. */
+  /** The keys in this object's listing table, and whether this shard owns each. */
   async listing(): Promise<{ key: string; owned: boolean }[]> {
     return this.ctx.storage.sql
       .exec<{ key: string }>("SELECT key FROM listing")
@@ -41,7 +41,7 @@ class CounterBase extends SplittableObject<Env, number> {
     for (const { key } of this.ctx.storage.sql.exec<{ key: string }>("SELECT key FROM history").toArray()) if (!owns(key)) this.ctx.storage.sql.exec("DELETE FROM history WHERE key = ?", key);
   }
 
-  /** The keys in this object's history table, and whether this leaf owns each. */
+  /** The keys in this object's history table, and whether this shard owns each. */
   async history(): Promise<{ key: string; owned: boolean }[]> {
     const owned = this.allRows();
     return this.ctx.storage.sql
@@ -50,7 +50,7 @@ class CounterBase extends SplittableObject<Env, number> {
       .map(({ key }) => ({ key, owned: owned.has(key) }));
   }
 
-  protected nodes(): DurableObjectNamespace<SplittableObject<Env, number>> {
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
     return this.env.COUNTERS as never;
   }
 
@@ -102,7 +102,7 @@ export class Counters extends CounterBase {}
 
 export class AutoCounters extends CounterBase {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 20, windowSeconds: 2, maxDepth: 3 };
-  protected override nodes(): DurableObjectNamespace<SplittableObject<Env, number>> {
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
     return this.env.AUTO_COUNTERS as never;
   }
 }
@@ -110,7 +110,7 @@ export class AutoCounters extends CounterBase {
 /** Splits to depth 2 while empty, never by load. */
 export class PresplitCounters extends CounterBase {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 4, initialDepth: 2 };
-  protected override nodes(): DurableObjectNamespace<SplittableObject<Env, number>> {
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
     return this.env.PRESPLIT_COUNTERS as never;
   }
 }
@@ -127,20 +127,20 @@ export default {
     try {
       switch (url.pathname) {
         case "/call": {
-          const results = await splittable(ns, body.name).call(body.keys, body.method as "get", (body.payloads ?? null) as null);
+          const results = await sharded(ns, body.name).call(body.keys, body.method as "get", (body.payloads ?? null) as null);
           // Back in the caller's order.
           const out: unknown[] = new Array(body.keys.length);
-          for (const leaf of results) leaf.positions.forEach((p, j) => (out[p] = (leaf.result as unknown[])[j]));
+          for (const shard of results) shard.positions.forEach((p, j) => (out[p] = (shard.result as unknown[])[j]));
           return Response.json(out);
         }
         case "/scan":
-          return Response.json(await splittable(ns, body.name).scan(body.method as "entries"));
+          return Response.json(await sharded(ns, body.name).scan(body.method as "entries"));
         case "/split":
-          return Response.json(await ns.get(ns.idFromName(leafObjectName(body.name, body.bits))).splittableSplit(body.name, body.bits));
+          return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedSplit(body.name, body.bits));
         case "/describe":
-          return Response.json(await ns.get(ns.idFromName(leafObjectName(body.name, body.bits))).splittableDescribe());
+          return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedDescribe());
         case "/splits":
-          return Response.json(splittable(ns, body.name).knownSplits());
+          return Response.json(sharded(ns, body.name).knownSplits());
       }
       return new Response("not found", { status: 404 });
     } catch (error) {
