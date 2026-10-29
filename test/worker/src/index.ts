@@ -2,7 +2,7 @@
 //   POST /call {cls, name, method, keys, payloads}  POST /scan {cls, name, method}
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
-import { nodeName, splittable, SplittableObject, type SplitPolicy, type UpdateResult } from "../../../src/index.ts";
+import { leafObjectName, splittable, SplittableObject, type SplitPolicy, type UpdateResult } from "../../../src/index.ts";
 
 interface Env {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
@@ -11,6 +11,25 @@ interface Env {
 }
 
 class CounterBase extends SplittableObject<Env, number> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // A subclass table: which keys were added to here (a stand-in for an outbox).
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY)");
+  }
+
+  protected override afterClone(owns: (key: string) => boolean): void {
+    for (const { key } of this.ctx.storage.sql.exec<{ key: string }>("SELECT key FROM history").toArray()) if (!owns(key)) this.ctx.storage.sql.exec("DELETE FROM history WHERE key = ?", key);
+  }
+
+  /** The keys in this object's history table, and whether this leaf owns each. */
+  async history(): Promise<{ key: string; owned: boolean }[]> {
+    const owned = this.allRows();
+    return this.ctx.storage.sql
+      .exec<{ key: string }>("SELECT key FROM history")
+      .toArray()
+      .map(({ key }) => ({ key, owned: owned.has(key) }));
+  }
+
   protected nodes(): DurableObjectNamespace<SplittableObject<Env, number>> {
     return this.env.COUNTERS as never;
   }
@@ -23,6 +42,7 @@ class CounterBase extends SplittableObject<Env, number> {
   /** Adds each payload to its key's counter; returns the new values. */
   async add(keys: readonly string[], payloads: readonly number[]): Promise<number[]> {
     return this.update(keys, (current): UpdateResult<number, number[]> => {
+      for (const k of keys) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO history (key) VALUES (?)", k);
       const writes = new Map<string, number>();
       const result = keys.map((k, i) => {
         const next = (writes.get(k) ?? current.get(k) ?? 0) + payloads[i]!;
@@ -45,6 +65,11 @@ class CounterBase extends SplittableObject<Env, number> {
       });
       return { writes, result };
     });
+  }
+
+  /** Sets each key to its payload (any JSON, for large rows). */
+  async put(keys: readonly string[], payloads: readonly unknown[]): Promise<number> {
+    return this.update(keys, () => ({ writes: new Map(keys.map((k, i) => [k, payloads[i] as number])), result: keys.length }));
   }
 
   async entries(): Promise<[string, number][]> {
@@ -90,9 +115,9 @@ export default {
         case "/scan":
           return Response.json(await splittable(ns, body.name).scan(body.method as "entries"));
         case "/split":
-          return Response.json(await ns.get(ns.idFromName(nodeName(body.name, body.bits))).splittableSplit(body.name, body.bits));
+          return Response.json(await ns.get(ns.idFromName(leafObjectName(body.name, body.bits))).splittableSplit(body.name, body.bits));
         case "/describe":
-          return Response.json(await ns.get(ns.idFromName(nodeName(body.name, body.bits))).splittableDescribe());
+          return Response.json(await ns.get(ns.idFromName(leafObjectName(body.name, body.bits))).splittableDescribe());
         case "/splits":
           return Response.json(splittable(ns, body.name).knownSplits());
       }
