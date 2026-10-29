@@ -2,7 +2,7 @@
 //   POST /call {cls, name, method, keys, payloads}  POST /scan {cls, name, method}
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
-import { DEFAULT_SPLIT_POLICY, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
+import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 
 interface Env {
@@ -282,6 +282,13 @@ export default {
         }
         case "/callOne":
           return Response.json(await sharded(ns, body.name).callOneShard(body.keys, body.method as "get", (body.payloads ?? null) as null));
+        case "/checkPolicy":
+          try {
+            checkSplitPolicy((body as unknown as { policy: SplitPolicy }).policy);
+            return Response.json(null);
+          } catch (error) {
+            return Response.json(String(error));
+          }
         case "/scan":
           return Response.json(await (sharded(ns, body.name).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(body.method, ...((body.args as unknown[]) ?? [])));
         case "/split":

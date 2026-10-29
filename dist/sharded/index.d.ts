@@ -48,6 +48,10 @@ export interface SplitPolicy {
  * 5 s.
  */
 export declare const DEFAULT_SPLIT_POLICY: SplitPolicy;
+/** The deepest a shard can be: ownership is decided on 64 bits of the key's hash. */
+export declare const MAX_SPLIT_DEPTH = 64;
+/** Checks a split policy, so a bad one fails loudly on the first call instead of quietly never splitting. */
+export declare function checkSplitPolicy(policy: SplitPolicy): SplitPolicy;
 /** What a node answers a routed call: `moved` names a split shard (its ancestors split too). */
 export type CallAnswer<R> = {
     readonly ok: R;
@@ -100,6 +104,9 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     protected splitPolicy: SplitPolicy;
     /** The namespace this class is bound to: to reach siblings. */
     protected abstract nodes(): DurableObjectNamespace<ShardedObject<Env, V>>;
+    /** `splitPolicy`, checked once (a subclass sets it after the constructor here runs). */
+    private get policy();
+    private checkedPolicy;
     private readonly sql;
     private meta;
     private readonly calls;

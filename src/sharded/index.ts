@@ -64,6 +64,26 @@ export interface SplitPolicy {
  */
 export const DEFAULT_SPLIT_POLICY: SplitPolicy = { callsPerSecond: 400, windowSeconds: 5, maxDepth: 12, keysPerCall: 25 };
 
+/** The deepest a shard can be: ownership is decided on 64 bits of the key's hash. */
+export const MAX_SPLIT_DEPTH = 64;
+
+/** Checks a split policy, so a bad one fails loudly on the first call instead of quietly never splitting. */
+export function checkSplitPolicy(policy: SplitPolicy): SplitPolicy {
+  const fail = (what: string) => {
+    throw new Error(`splitPolicy.${what}`);
+  };
+  if (!(policy.callsPerSecond > 0)) fail("callsPerSecond must be a positive number");
+  if (!Number.isInteger(policy.windowSeconds) || policy.windowSeconds < 1) fail("windowSeconds must be a whole number of seconds, at least 1");
+  if (!Number.isInteger(policy.maxDepth) || policy.maxDepth < 0 || policy.maxDepth > MAX_SPLIT_DEPTH) fail(`maxDepth must be an integer from 0 to ${MAX_SPLIT_DEPTH}`);
+  if (policy.keysPerCall !== undefined && !(policy.keysPerCall > 0)) fail("keysPerCall must be a positive number");
+  const initial = policy.initialDepth ?? 0;
+  if (!Number.isInteger(initial) || initial < 0 || initial > policy.maxDepth) fail("initialDepth must be an integer from 0 to maxDepth");
+  if (policy.copy !== undefined && !["auto", "native", "logical"].includes(policy.copy)) fail('copy must be "auto", "native" or "logical"');
+  if (policy.splitTimeoutMs !== undefined && !(policy.splitTimeoutMs > 0)) fail("splitTimeoutMs must be a positive number");
+  if (policy.holdWaitMs !== undefined && !(policy.holdWaitMs >= 0)) fail("holdWaitMs must be zero or more");
+  return policy;
+}
+
 /** What a node answers a routed call: `moved` names a split shard (its ancestors split too). */
 export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly notReady: string };
 
@@ -205,6 +225,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** The namespace this class is bound to: to reach siblings. */
   protected abstract nodes(): DurableObjectNamespace<ShardedObject<Env, V>>;
 
+  /** `splitPolicy`, checked once (a subclass sets it after the constructor here runs). */
+  private get policy(): SplitPolicy {
+    if (this.checkedPolicy !== this.splitPolicy) this.checkedPolicy = checkSplitPolicy(this.splitPolicy);
+    return this.checkedPolicy;
+  }
+  private checkedPolicy: SplitPolicy | null = null;
   private readonly sql: SqlStorage;
   private meta: Meta | null;
   private readonly calls = new Map<number, number>();
@@ -358,7 +384,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
   private async waitForHold(keys: readonly string[]): Promise<void> {
-    const deadline = Date.now() + (this.splitPolicy.holdWaitMs ?? HOLD_WAIT_MS);
+    const deadline = Date.now() + (this.policy.holdWaitMs ?? HOLD_WAIT_MS);
     for (let hold = this.holding(keys); hold; hold = this.holding(keys)) {
       const left = deadline - Date.now();
       if (left <= 0) throw new NotReady();
@@ -433,7 +459,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const answer = this.arrive(name, bits);
     if (answer) return answer;
     const meta = this.meta!;
-    if (this.presplitDeclined || meta.bits.length >= (this.splitPolicy.initialDepth ?? 0)) return null;
+    if (this.presplitDeclined || meta.bits.length >= (this.policy.initialDepth ?? 0)) return null;
     this.presplitting ??= this.presplit().finally(() => (this.presplitting = null));
     await this.presplitting;
     return this.arrive(name, bits);
@@ -469,7 +495,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     }
     // Empty: the right halves of every level start empty and serving; they split further on
     // their own first call.
-    const depth = this.splitPolicy.initialDepth ?? 0;
+    const depth = this.policy.initialDepth ?? 0;
     let bits = meta.bits;
     for (; bits.length < depth; bits += "0") await this.node(`${bits}1`).shardedAdoptEmpty(meta.name, `${bits}1`, bits);
     this.saveMeta({ ...this.meta!, bits, parent: meta.bits, splitAt: Date.now() });
@@ -489,19 +515,19 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   private countCall(keys: number): void {
     const second = Math.floor(Date.now() / 1000);
-    this.calls.set(second, (this.calls.get(second) ?? 0) + 1 + keys / (this.splitPolicy.keysPerCall ?? 25));
-    if (this.calls.size > this.splitPolicy.windowSeconds + 2) {
-      for (const s of this.calls.keys()) if (s < second - this.splitPolicy.windowSeconds - 1) this.calls.delete(s);
+    this.calls.set(second, (this.calls.get(second) ?? 0) + 1 + keys / (this.policy.keysPerCall ?? 25));
+    if (this.calls.size > this.policy.windowSeconds + 2) {
+      for (const s of this.calls.keys()) if (s < second - this.policy.windowSeconds - 1) this.calls.delete(s);
     }
-    if (Date.now() - this.quietUntil > this.splitPolicy.windowSeconds * 1000 && this.rate() > this.splitPolicy.callsPerSecond) void this.split();
+    if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond) void this.split();
   }
 
   /** Average calls/s over the last full `windowSeconds`. */
   private rate(): number {
     const now = Math.floor(Date.now() / 1000);
     let sum = 0;
-    for (let s = now - this.splitPolicy.windowSeconds; s < now; s++) sum += this.calls.get(s) ?? 0;
-    return sum / this.splitPolicy.windowSeconds;
+    for (let s = now - this.policy.windowSeconds; s < now; s++) sum += this.calls.get(s) ?? 0;
+    return sum / this.policy.windowSeconds;
   }
 
   /** Splits now if this object hosts the shard `bits` (also an operator's lever). */
@@ -517,14 +543,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    */
   private async split(): Promise<boolean> {
     const meta = this.meta;
-    if (!meta || this.hold || meta.state !== "shard" || meta.bits.length >= this.splitPolicy.maxDepth) return false;
+    if (!meta || this.hold || meta.state !== "shard" || meta.bits.length >= this.policy.maxDepth) return false;
     const epoch = meta.epoch + 1;
     const right = `${meta.bits}1`;
     let release!: () => void;
     const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)) };
     this.hold = hold;
     const started = Date.now();
-    const timeout = this.splitPolicy.splitTimeoutMs ?? 60_000;
+    const timeout = this.policy.splitTimeoutMs ?? 60_000;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });
@@ -579,7 +605,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   private async copyTo(right: string, epoch: number, live: () => boolean): Promise<"native" | "logical"> {
-    const mode = this.splitPolicy.copy ?? "auto";
+    const mode = this.policy.copy ?? "auto";
     if (mode !== "logical" && typeof this.ctx.storage.snapshot === "function") {
       let snapshot: DurableObjectSnapshot | null = null;
       try {

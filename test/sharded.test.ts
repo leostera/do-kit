@@ -244,3 +244,21 @@ test("a call whose payloads do not line up with its keys is refused before reach
   await expect(call("m", name, "add", ["a", "b"], [1])).rejects.toThrow("payloads");
   expect(await call<(number | null)[]>("m", name, "get", ["a", "b"])).toEqual([null, null]);
 }, 60_000);
+
+test("a split policy that cannot work is refused, saying why", async () => {
+  const ok = { callsPerSecond: 400, windowSeconds: 5, maxDepth: 12 };
+  expect(await post("/checkPolicy", { policy: ok })).toBeNull();
+  const bad: [object, string][] = [
+    [{ callsPerSecond: 0 }, "callsPerSecond"],
+    [{ windowSeconds: 0 }, "windowSeconds"],
+    [{ windowSeconds: 1.5 }, "windowSeconds"],
+    [{ maxDepth: 65 }, "maxDepth"],
+    [{ maxDepth: -1 }, "maxDepth"],
+    [{ keysPerCall: 0 }, "keysPerCall"],
+    [{ initialDepth: 13 }, "initialDepth"],
+    [{ copy: "fast" }, "copy"],
+    [{ splitTimeoutMs: 0 }, "splitTimeoutMs"],
+    [{ holdWaitMs: -1 }, "holdWaitMs"],
+  ];
+  for (const [change, field] of bad) expect(await post<string>("/checkPolicy", { policy: { ...ok, ...change } })).toContain(`splitPolicy.${field}`);
+}, 60_000);
