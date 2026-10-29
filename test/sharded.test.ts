@@ -398,6 +398,15 @@ test("a shard keeps a record of its splits, and counts what it answered", async 
 }, 60_000);
 
 
+test("a shard with a full-text (FTS5) table splits, and both shards can search their keys", async () => {
+  const name = `fts-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  await call("m", name, "index", KEYS, KEYS.map((k) => `hello ${k.replace("-", "")}`));
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  const found = (await post<string[][]>("/scan", { cls: "m", name, method: "search", args: ["hello"] })).flat().sort();
+  expect(found).toEqual([...KEYS].sort());
+}, 60_000);
+
 test("a split copies every subclass table, whatever its name", async () => {
   const name = `names-${Date.now()}`;
   await call("m", name, "add", KEYS, KEYS.map(() => 1));

@@ -867,14 +867,19 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const target = this.node(right);
     // Tables and indexes first, as a snapshot would carry them: the copy may not have created a
     // subclass's yet (a sharded table creates its own on first use).
+    // A virtual table's own (shadow) tables are not sent: creating it creates them, and its rows
+    // are copied through it.
+    const tables = this.tableList();
+    const names = new Set(tables.map((t) => t.name));
     const schema = this.sql
-      .exec<{ name: string; sql: string | null }>("SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') ORDER BY type DESC, name")
+      .exec<{ type: string; name: string; tbl_name: string; sql: string | null }>("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('table', 'index') ORDER BY type DESC, name")
       .toArray()
-      .filter((o): o is { name: string; sql: string } => o.sql !== null && !isInternalTable(o.name));
+      .filter((o): o is { type: string; name: string; tbl_name: string; sql: string } => o.sql !== null && names.has(o.type === "table" ? o.name : o.tbl_name))
+      .map(({ name, sql }) => ({ name, sql }));
     await target.shardedReceiveSchema(meta.name, right, epoch, schema);
     let first = true;
-    for (const table of this.tables()) {
-      const order = this.pageOrder(table, schema.find((o) => o.name === table)?.sql ?? "");
+    for (const { name: table, withoutRowid } of tables) {
+      const order = this.pageOrder(table, withoutRowid);
       const columns = order.columns.join(", ");
       const select = `SELECT ${order.rowid ? `${columns}, ` : ""}* FROM ${quoteIdentifier(table)}`;
       let after: SqlStorageValue[] | null = null;
@@ -905,9 +910,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * The columns that page a table in a stable order: its rowid (under a name no column shadows),
    * or the primary key of a WITHOUT ROWID table. Returned quoted, ready for SQL.
    */
-  private pageOrder(table: string, sql: string): { columns: string[]; rowid: boolean } {
+  private pageOrder(table: string, withoutRowid: boolean): { columns: string[]; rowid: boolean } {
     const info = this.sql.exec<{ name: string; pk: number }>(`PRAGMA table_info(${quoteIdentifier(table)})`).toArray();
-    if (/\bWITHOUT\s+ROWID\b/i.test(sql)) {
+    if (withoutRowid) {
       const key = info.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk);
       if (key.length === 0) throw new Error(`table ${table} has no primary key to copy it by`);
       return { columns: key.map((c) => quoteIdentifier(c.name)), rowid: false };
@@ -918,13 +923,21 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return { columns: [alias], rowid: true };
   }
 
-  /** This object's tables, the subclass's too (not SQLite's or the runtime's). */
-  private tables(): string[] {
+  /**
+   * This object's tables, the subclass's too, virtual ones included: not SQLite's, the runtime's,
+   * nor a virtual table's own (shadow) tables, which it manages itself.
+   */
+  private tableList(): { name: string; withoutRowid: boolean }[] {
     return this.sql
-      .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+      .exec<{ schema: string; name: string; type: string; wr: number }>("PRAGMA table_list")
       .toArray()
-      .map((t) => t.name)
-      .filter((name) => !isInternalTable(name));
+      .filter((t) => t.schema === "main" && (t.type === "table" || t.type === "virtual") && !isInternalTable(t.name))
+      .map((t) => ({ name: t.name, withoutRowid: t.wr === 1 }))
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+
+  private tables(): string[] {
+    return this.tableList().map((t) => t.name);
   }
 
   private node(bits: string): DurableObjectStub<ShardedObject<Env, V>> {

@@ -280,6 +280,13 @@ class CounterBase extends ShardedObject<Env, number> {
     return this.ctx.storage.sql.exec<{ key: string }>("SELECT key FROM work WHERE fired IS NOT NULL").toArray().map((r) => r.key);
   }
 
+  /** Adds a full-text index of these keys to this shard (an FTS5 table, written in a transaction). */
+  async index(keys: readonly string[], payloads: readonly string[]): Promise<null[]> {
+    this.ctx.storage.sql.exec("CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(key, body)");
+    await this.transact(keys, () => keys.forEach((k, i) => this.ctx.storage.sql.exec("INSERT INTO search (key, body) VALUES (?, ?)", k, payloads[i]!)));
+    return keys.map(() => null);
+  }
+
   /** Notes on keys, in a table whose name looks like a runtime's to a careless LIKE ("_cf_%"). */
   async note(keys: readonly string[], payloads: readonly string[]): Promise<null[]> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS scf_notes (key TEXT PRIMARY KEY, note TEXT NOT NULL)");

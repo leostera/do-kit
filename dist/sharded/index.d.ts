@@ -326,7 +326,11 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      * or the primary key of a WITHOUT ROWID table. Returned quoted, ready for SQL.
      */
     private pageOrder;
-    /** This object's tables, the subclass's too (not SQLite's or the runtime's). */
+    /**
+     * This object's tables, the subclass's too, virtual ones included: not SQLite's, the runtime's,
+     * nor a virtual table's own (shadow) tables, which it manages itself.
+     */
+    private tableList;
     private tables;
     private node;
     private activateSibling;
