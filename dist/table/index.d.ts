@@ -42,6 +42,8 @@ export declare abstract class ShardedTable<Env, Row extends RowShape> extends Sh
     protected patchRow(key: string, changes: Partial<Row>, options?: PutOptions): WriteResult;
     /** Deletes a row if its version is `ifVersion`. Call inside `transact`. */
     protected deleteRow(key: string, options?: PutOptions): WriteResult;
+    /** The highest version a deleted row of this shard had (0: none). */
+    private deletedVersion;
     /** Deletes rows (and counts) of hashes this shard gave away, a batch at a time. */
     protected cleanupForeign(owns: (key: string) => boolean, limit: number): number;
     private page;

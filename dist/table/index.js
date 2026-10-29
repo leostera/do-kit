@@ -6,6 +6,12 @@ export * from "./schema.js";
 export { table, TableClient } from "./client.js";
 const TABLE = "sharded_table";
 const COUNTS = "sharded_table_counts";
+/**
+ * One row, "deleted": the highest version a deleted row of this shard had. A row written where
+ * none is starts above it, so a version is never reused for a key, and a write conditional on a
+ * version read before a delete cannot land on the row written since. Copied with every split.
+ */
+const VERSIONS = "sharded_table_versions";
 const INDEX_PREFIX = "sharded_table_ix_";
 /** Each index keeps one hidden column of index keys (see encodeIndexKey), indexed alone. */
 const KEY_COLUMN_PREFIX = "_ix_";
@@ -83,7 +89,7 @@ export class ShardedTable extends ShardedObject {
         for (const ix of this.indexes())
             stored[ix.keyColumn] = this.indexKey(ix, stored);
         const names = Object.keys(stored);
-        const version = current + 1;
+        const version = (current === 0 ? this.deletedVersion() : current) + 1;
         this.db.exec(`INSERT INTO ${TABLE} (${names.map((n) => this.q(n)).join(", ")}, _hash, _version) VALUES (${names.map(() => "?").join(", ")}, ?, ?) ` +
             `ON CONFLICT (${this.q(this.table.primaryKey)}) DO UPDATE SET ${names.map((n) => `${this.q(n)} = excluded.${this.q(n)}`).join(", ")}, _version = excluded._version`, ...names.map((n) => stored[n]), keyHash(key), version);
         if (current === 0)
@@ -122,7 +128,12 @@ export class ShardedTable extends ShardedObject {
             return { ok: true, version: 0 };
         this.db.exec(`DELETE FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key);
         this.countRow(key, -1);
+        this.db.exec(`INSERT INTO ${VERSIONS} (name, version) VALUES ('deleted', ?) ON CONFLICT (name) DO UPDATE SET version = max(version, excluded.version)`, current);
         return { ok: true, version: 0 };
+    }
+    /** The highest version a deleted row of this shard had (0: none). */
+    deletedVersion() {
+        return this.db.exec(`SELECT version FROM ${VERSIONS} WHERE name = 'deleted'`).toArray()[0]?.version ?? 0;
     }
     // ---- Splits ----
     /** Deletes rows (and counts) of hashes this shard gave away, a batch at a time. */
@@ -218,6 +229,7 @@ export class ShardedTable extends ShardedObject {
         const pk = this.q(schema.primaryKey);
         this.db.exec(`CREATE TABLE IF NOT EXISTS ${TABLE} (${pk} TEXT PRIMARY KEY NOT NULL, _hash TEXT NOT NULL, _version INTEGER NOT NULL)`);
         this.db.exec(`CREATE TABLE IF NOT EXISTS ${COUNTS} (bucket TEXT PRIMARY KEY NOT NULL, n INTEGER NOT NULL) WITHOUT ROWID`);
+        this.db.exec(`CREATE TABLE IF NOT EXISTS ${VERSIONS} (name TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL) WITHOUT ROWID`);
         this.db.exec(`CREATE INDEX IF NOT EXISTS ${TABLE}_hash ON ${TABLE} (_hash)`);
         const existing = this.db.exec(`PRAGMA table_info(${TABLE})`).toArray();
         const key = existing.find((c) => c.pk === 1)?.name;

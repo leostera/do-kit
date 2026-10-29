@@ -102,9 +102,27 @@ test("puts, patches and deletes are conditional on the row's version", async () 
   expect(await op(name, "delete", "foo", { ifVersion: 2 })).toEqual({ ok: true, version: 0 });
   expect(await op(name, "get", "foo")).toBeNull();
   expect(await op(name, "count")).toBe(0);
-  // Unconditional: always writes.
-  expect(await op(name, "put", repo)).toEqual({ ok: true, version: 1 });
-  expect(await op(name, "put", repo)).toEqual({ ok: true, version: 2 });
+  // Unconditional: always writes. A row written again after a delete gets a version it never had.
+  expect(await op(name, "put", repo)).toEqual({ ok: true, version: 3 });
+  expect(await op(name, "put", repo)).toEqual({ ok: true, version: 4 });
+}, 60_000);
+
+test("a write conditional on a version from before a delete fails on the row written since", async () => {
+  const name = `aba-${Date.now()}`;
+  const repo: Repo = { name: "foo", id: "r1", createdAt: 1, lastPushAt: null, deleted: false, meta: null };
+  expect(await op(name, "put", repo, { ifVersion: 0 })).toEqual({ ok: true, version: 1 });
+  // A client reads version 1. Meanwhile the row is deleted and written again by someone else.
+  expect(await op(name, "delete", "foo")).toEqual({ ok: true, version: 0 });
+  const again = await op<{ ok: boolean; version: number }>(name, "put", { ...repo, id: "r2" }, { ifVersion: 0 });
+  expect(again.ok).toBe(true);
+  expect(again.version).toBeGreaterThan(1);
+  // The client's write, conditional on what it read, must not land on the new row.
+  expect((await op<{ ok: boolean }>(name, "patch", "foo", { lastPushAt: 5 }, { ifVersion: 1 })).ok).toBe(false);
+  expect(((await op<Versioned>(name, "get", "foo")).row as Repo).id).toBe("r2");
+  // A split's shards keep that guarantee for the keys they own.
+  expect(await op(name, "delete", "foo")).toEqual({ ok: true, version: 0 });
+  expect(await split(name, "")).toBe(true);
+  expect((await op<{ version: number }>(name, "put", repo)).version).toBeGreaterThan(again.version);
 }, 60_000);
 
 test("listings match a reference sort, before, across and after splits", async () => {

@@ -18,7 +18,11 @@ export declare function defineTable<Row extends RowShape>(schema: TableSchema<Ro
  * `json` as text. NaN is refused: SQLite would store it as null.
  */
 export declare function encodeValue<Row extends RowShape>(schema: TableSchema<Row>, column: string, value: unknown): SqlValue;
-/** A row and its version: 1 when written first, one more on every write. */
+/**
+ * A row and its version: one more on every write. A row written where none is starts above every
+ * version a deleted row of its shard had (1 if none was deleted), so a key never has a version
+ * twice: a write conditional on a version read before a delete fails on the row written since.
+ */
 export interface Versioned<Row> {
     readonly row: Row;
     readonly version: number;

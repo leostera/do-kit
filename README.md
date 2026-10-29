@@ -140,7 +140,7 @@ const page = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 const next = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "deleted", op: "=", value: false }], limit: 50, cursor: page.cursor });
 ```
 
-- **Writes** (`put`, `patch`, `delete`, and batches) are conditional on a version per row: `ifVersion: 0` means "only if absent". Each is one transaction with its index entries, fenced against splits.
+- **Writes** (`put`, `patch`, `delete`, and batches) are conditional on a version per row: `ifVersion: 0` means "only if absent". Each is one transaction with its index entries, fenced against splits. A key never has the same version twice: a row written again after a delete starts above the versions of the rows its shard deleted, so a write conditional on a version read before the delete fails. That costs a delete one more row written.
 - **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring case).
 - **Counts** are kept per hash prefix, so `count()` is cheap and exact at any depth up to 16.
 - **Schema changes:** add columns and indexes in the schema; each shard applies them the first time it runs the new code.
