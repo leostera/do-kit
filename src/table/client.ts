@@ -1,5 +1,5 @@
 // The client of a sharded table: routes rows by key and merges listing pages from every shard.
-import { sharded, type ShardedClient } from "../sharded/client.js";
+import { sharded, type ShardedClient, type ShardedClientOptions } from "../sharded/client.js";
 import {
   comparePositions,
   decodeCursor,
@@ -52,9 +52,10 @@ export class TableClient<Row extends RowShape> {
     namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>,
     readonly name: string,
     schema: TableSchema<Row>,
+    options: ShardedClientOptions = {},
   ) {
     this.primaryKey = schema.primaryKey;
-    this.client = sharded(namespace as never, name) as ShardedClient<never> as unknown as Untyped;
+    this.client = sharded(namespace as never, name, options) as ShardedClient<never> as unknown as Untyped;
   }
 
   async get(key: string): Promise<Versioned<Row> | null> {
@@ -167,6 +168,6 @@ export function mergePages(pages: readonly ShardPage[], request: Pick<ShardPageR
  * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
  * `schema` the table it declares (the client routes rows by its primary key).
  */
-export function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>): TableClient<Row> {
-  return new TableClient<Row>(namespace as unknown as DurableObjectNamespace<Rpc.DurableObjectBranded>, name, schema);
+export function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>, options: ShardedClientOptions = {}): TableClient<Row> {
+  return new TableClient<Row>(namespace as unknown as DurableObjectNamespace<Rpc.DurableObjectBranded>, name, schema, options);
 }

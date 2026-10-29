@@ -38,8 +38,21 @@ export const MAX_KNOWN_OBJECTS = 10_000;
 
 /** A hop limit: deeper than any maxDepth, so a loop is a bug, not a slow call. */
 const MAX_HOPS = 64;
-/** How long a call waits for a new shard to start serving (it is activated just after a split). */
+/**
+ * How long a call waits for a shard to serve, by default: a new shard is activated just after a
+ * split. A write held by a split in progress waits until that split is done or gives up.
+ */
 const NOT_READY_WAIT_MS = 30_000;
+/** Past a split's deadline, how long a held write still waits for the new shard to be activated. */
+const ACTIVATION_SLACK_MS = 5_000;
+/** The furthest a shard's "until" can push a call's wait, whatever it says. */
+const MAX_HELD_WAIT_MS = 10 * 60_000;
+
+/** How a client waits. */
+export interface ShardedClientOptions {
+  /** How long a call waits for a shard to start serving, at least (default 30 s). */
+  readonly notReadyWaitMs?: number;
+}
 /**
  * After waiting this long on shards that are not ready, a call forgets the splits it knows of this
  * object, once, and routes from the root again: an object whose storage was deleted is not ready
@@ -53,9 +66,18 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 class Backoff {
   private wait = 5;
   waited = 0;
-  constructor(private readonly what: string) {}
+  /** A split in progress said it is done or gives up by then: wait at least that long. */
+  private until = 0;
+  constructor(
+    private readonly what: string,
+    private readonly limitMs: number,
+  ) {}
+  /** A shard holding the call for a split that gives up at `until` (its clock). */
+  extend(until: number | undefined): void {
+    if (until !== undefined) this.until = Math.max(this.until, Math.min(until, Date.now() + MAX_HELD_WAIT_MS));
+  }
   async next(): Promise<void> {
-    if (this.waited > NOT_READY_WAIT_MS) throw new Error(`${this.what}: a new shard did not start serving`);
+    if (this.waited > this.limitMs && Date.now() > this.until + ACTIVATION_SLACK_MS) throw new Error(`${this.what}: a new shard did not start serving`);
     await sleep(this.wait);
     this.waited += this.wait;
     this.wait = Math.min(this.wait * 2, 250);
@@ -68,9 +90,12 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   /** What known splits are filed under: two classes may share a name, never a root ID. */
   private readonly identity: string;
 
-  constructor(namespace: DurableObjectNamespace<T>, name: string) {
+  private readonly notReadyWaitMs: number;
+
+  constructor(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}) {
     this.namespace = namespace;
     this.name = name;
+    this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
     this.identity = namespace.idFromName(nodeName(name, "")).toString();
   }
 
@@ -131,7 +156,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     const hashes = keys.map(keyHash);
     const out: ShardResult<Result<T[M]>>[] = [];
     let pending = keys.map((_, i) => i);
-    const backoff = new Backoff(`sharded ${this.name}`);
+    const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
     let forgot = false;
     for (let hop = 0; pending.length > 0; hop++) {
       if (hop > MAX_HOPS) throw new Error(`sharded ${this.name}: routing did not settle`);
@@ -160,6 +185,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
             retry.push(...positions);
           } else {
             waiting = true; // not serving yet: the same shard, a little later
+            backoff.extend(answer.until);
             retry.push(...positions);
           }
         }),
@@ -181,7 +207,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     await this.loadCache();
     for (let attempt = 0; ; attempt++) {
       const out: Result<T[M]>[] = [];
-      const backoff = new Backoff(`sharded ${this.name}`);
+      const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
       let stale = false;
       const visit = async (bits: string, depth: number): Promise<void> => {
         if (depth > MAX_HOPS) throw new Error(`sharded ${this.name}: scan did not settle`);
@@ -258,6 +284,6 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   }
 }
 
-export function sharded<T extends Rpc.DurableObjectBranded>(namespace: DurableObjectNamespace<T>, name: string): ShardedClient<T> {
-  return new ShardedClient(namespace, name);
+export function sharded<T extends Rpc.DurableObjectBranded>(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}): ShardedClient<T> {
+  return new ShardedClient(namespace, name, options);
 }

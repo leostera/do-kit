@@ -20,8 +20,15 @@ const loadedFromCache = new Set();
 export const MAX_KNOWN_OBJECTS = 10_000;
 /** A hop limit: deeper than any maxDepth, so a loop is a bug, not a slow call. */
 const MAX_HOPS = 64;
-/** How long a call waits for a new shard to start serving (it is activated just after a split). */
+/**
+ * How long a call waits for a shard to serve, by default: a new shard is activated just after a
+ * split. A write held by a split in progress waits until that split is done or gives up.
+ */
 const NOT_READY_WAIT_MS = 30_000;
+/** Past a split's deadline, how long a held write still waits for the new shard to be activated. */
+const ACTIVATION_SLACK_MS = 5_000;
+/** The furthest a shard's "until" can push a call's wait, whatever it says. */
+const MAX_HELD_WAIT_MS = 10 * 60_000;
 /**
  * After waiting this long on shards that are not ready, a call forgets the splits it knows of this
  * object, once, and routes from the root again: an object whose storage was deleted is not ready
@@ -32,13 +39,22 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Waits a little longer each time a shard is not ready; throws once that has gone on too long. */
 class Backoff {
     what;
+    limitMs;
     wait = 5;
     waited = 0;
-    constructor(what) {
+    /** A split in progress said it is done or gives up by then: wait at least that long. */
+    until = 0;
+    constructor(what, limitMs) {
         this.what = what;
+        this.limitMs = limitMs;
+    }
+    /** A shard holding the call for a split that gives up at `until` (its clock). */
+    extend(until) {
+        if (until !== undefined)
+            this.until = Math.max(this.until, Math.min(until, Date.now() + MAX_HELD_WAIT_MS));
     }
     async next() {
-        if (this.waited > NOT_READY_WAIT_MS)
+        if (this.waited > this.limitMs && Date.now() > this.until + ACTIVATION_SLACK_MS)
             throw new Error(`${this.what}: a new shard did not start serving`);
         await sleep(this.wait);
         this.waited += this.wait;
@@ -50,9 +66,11 @@ export class ShardedClient {
     name;
     /** What known splits are filed under: two classes may share a name, never a root ID. */
     identity;
-    constructor(namespace, name) {
+    notReadyWaitMs;
+    constructor(namespace, name, options = {}) {
         this.namespace = namespace;
         this.name = name;
+        this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
         this.identity = namespace.idFromName(nodeName(name, "")).toString();
     }
     get splits() {
@@ -110,7 +128,7 @@ export class ShardedClient {
         const hashes = keys.map(keyHash);
         const out = [];
         let pending = keys.map((_, i) => i);
-        const backoff = new Backoff(`sharded ${this.name}`);
+        const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
         let forgot = false;
         for (let hop = 0; pending.length > 0; hop++) {
             if (hop > MAX_HOPS)
@@ -144,6 +162,7 @@ export class ShardedClient {
                 }
                 else {
                     waiting = true; // not serving yet: the same shard, a little later
+                    backoff.extend(answer.until);
                     retry.push(...positions);
                 }
             }));
@@ -164,7 +183,7 @@ export class ShardedClient {
         await this.loadCache();
         for (let attempt = 0;; attempt++) {
             const out = [];
-            const backoff = new Backoff(`sharded ${this.name}`);
+            const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
             let stale = false;
             const visit = async (bits, depth) => {
                 if (depth > MAX_HOPS)
@@ -249,7 +268,7 @@ export class ShardedClient {
         }
     }
 }
-export function sharded(namespace, name) {
-    return new ShardedClient(namespace, name);
+export function sharded(namespace, name, options = {}) {
+    return new ShardedClient(namespace, name, options);
 }
 //# sourceMappingURL=client.js.map

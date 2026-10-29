@@ -14,7 +14,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { createHash } from "node:crypto";
 
-export { SpansShards, ShardedClient, sharded, type ShardResult } from "./client.js";
+export { SpansShards, ShardedClient, sharded, type ShardedClientOptions, type ShardResult } from "./client.js";
 
 declare global {
   /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
@@ -90,7 +90,7 @@ export function checkSplitPolicy(policy: SplitPolicy): SplitPolicy {
  * `stale` says the caller's map of splits is deeper than this object, so it outlived the storage
  * it was learned from (deleted, then the name used again): the caller forgets it.
  */
-export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly notReady: string } | { readonly stale: string };
+export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly notReady: string; readonly until?: number } | { readonly stale: string };
 
 /** An object's state, for tests and operators. */
 export interface NodeDescription {
@@ -163,8 +163,15 @@ export function shardObjectName(name: string, bits: string): string {
 
 /** Thrown inside a method when its keys left this shard; the dispatcher answers "moved". */
 class Moved extends Error {}
-/** A write waited on a split for `holdWaitMs`: nothing was applied, the client retries later. */
-class NotReady extends Error {}
+/**
+ * A write waited on a split for `holdWaitMs`: nothing was applied, the client retries later, until
+ * the split is done or gives up at `until`.
+ */
+class NotReady extends Error {
+  constructor(readonly until: number) {
+    super("not ready");
+  }
+}
 const HOLD_WAIT_MS = 2_000;
 
 const SCHEMA = `
@@ -244,7 +251,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private readonly calls = new Map<number, number>();
   private quietUntil = Date.now();
   /** The split in progress here: writes to `right` wait for `released`. */
-  private hold: { epoch: number; right: string; released: Promise<void> } | null = null;
+  private hold: { epoch: number; right: string; released: Promise<void>; deadline: number } | null = null;
   /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
   private receiving: number | null = null;
   /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
@@ -402,11 +409,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const deadline = Date.now() + (this.policy.holdWaitMs ?? HOLD_WAIT_MS);
     for (let hold = this.holding(keys); hold; hold = this.holding(keys)) {
       const left = deadline - Date.now();
-      if (left <= 0) throw new NotReady();
+      if (left <= 0) throw new NotReady(this.hold?.deadline ?? Date.now());
       let timer: ReturnType<typeof setTimeout> | undefined;
       const released = await Promise.race([hold.then(() => true), new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
       clearTimeout(timer);
-      if (!released) throw new NotReady();
+      if (!released) throw new NotReady(this.hold?.deadline ?? Date.now());
     }
   }
 
@@ -431,7 +438,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args) };
     } catch (error) {
       if (error instanceof Moved) return this.moved(bits);
-      if (error instanceof NotReady) return { notReady: bits };
+      if (error instanceof NotReady) return { notReady: bits, until: error.until };
       throw error;
     }
   }
@@ -578,10 +585,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const epoch = meta.epoch + 1;
     const right = `${meta.bits}1`;
     let release!: () => void;
-    const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)) };
-    this.hold = hold;
     const started = Date.now();
     const timeout = this.policy.splitTimeoutMs ?? 60_000;
+    const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)), deadline: started + timeout };
+    this.hold = hold;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });

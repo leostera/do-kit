@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-export { SpansShards, ShardedClient, sharded, type ShardResult } from "./client.js";
+export { SpansShards, ShardedClient, sharded, type ShardedClientOptions, type ShardResult } from "./client.js";
 declare global {
     /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
     interface DurableObjectSnapshot {
@@ -64,6 +64,7 @@ export type CallAnswer<R> = {
     readonly moved: string;
 } | {
     readonly notReady: string;
+    readonly until?: number;
 } | {
     readonly stale: string;
 };

@@ -1,3 +1,4 @@
+import { type ShardedClientOptions } from "../sharded/client.js";
 import { type ListPage, type ListQuery, type Position, type RowShape, type ShardPage, type TableSchema, type ShardPageRequest, type Versioned, type WriteResult } from "./schema.js";
 /**
  * Rows to ask each of `shards` shards for, to fill `wanted`: keys spread over shards by hash, so
@@ -8,7 +9,7 @@ export declare class TableClient<Row extends RowShape> {
     readonly name: string;
     private readonly client;
     private readonly primaryKey;
-    constructor(namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>, name: string, schema: TableSchema<Row>);
+    constructor(namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>, name: string, schema: TableSchema<Row>, options?: ShardedClientOptions);
     get(key: string): Promise<Versioned<Row> | null>;
     /** Rows of these keys, in order (null: absent). */
     getMany(keys: readonly string[]): Promise<(Versioned<Row> | null)[]>;
@@ -53,5 +54,5 @@ export declare function mergePages(pages: readonly ShardPage[], request: Pick<Sh
  * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
  * `schema` the table it declares (the client routes rows by its primary key).
  */
-export declare function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>): TableClient<Row>;
+export declare function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>, options?: ShardedClientOptions): TableClient<Row>;
 //# sourceMappingURL=client.d.ts.map

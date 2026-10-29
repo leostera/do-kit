@@ -25,12 +25,18 @@ export declare class SpansShards extends Error {
  * of the colo cache, or a few hops.
  */
 export declare const MAX_KNOWN_OBJECTS = 10000;
+/** How a client waits. */
+export interface ShardedClientOptions {
+    /** How long a call waits for a shard to start serving, at least (default 30 s). */
+    readonly notReadyWaitMs?: number;
+}
 export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly namespace;
     private readonly name;
     /** What known splits are filed under: two classes may share a name, never a root ID. */
     private readonly identity;
-    constructor(namespace: DurableObjectNamespace<T>, name: string);
+    private readonly notReadyWaitMs;
+    constructor(namespace: DurableObjectNamespace<T>, name: string, options?: ShardedClientOptions);
     private get splits();
     /** Marks this object as just used, so it is the last its isolate forgets. */
     private touch;
@@ -60,6 +66,6 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private loadCache;
     private saveCache;
 }
-export declare function sharded<T extends Rpc.DurableObjectBranded>(namespace: DurableObjectNamespace<T>, name: string): ShardedClient<T>;
+export declare function sharded<T extends Rpc.DurableObjectBranded>(namespace: DurableObjectNamespace<T>, name: string, options?: ShardedClientOptions): ShardedClient<T>;
 export {};
 //# sourceMappingURL=client.d.ts.map

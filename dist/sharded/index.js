@@ -87,8 +87,16 @@ export function shardObjectName(name, bits) {
 /** Thrown inside a method when its keys left this shard; the dispatcher answers "moved". */
 class Moved extends Error {
 }
-/** A write waited on a split for `holdWaitMs`: nothing was applied, the client retries later. */
+/**
+ * A write waited on a split for `holdWaitMs`: nothing was applied, the client retries later, until
+ * the split is done or gives up at `until`.
+ */
 class NotReady extends Error {
+    until;
+    constructor(until) {
+        super("not ready");
+        this.until = until;
+    }
 }
 const HOLD_WAIT_MS = 2_000;
 const SCHEMA = `
@@ -291,12 +299,12 @@ export class ShardedObject extends DurableObject {
         for (let hold = this.holding(keys); hold; hold = this.holding(keys)) {
             const left = deadline - Date.now();
             if (left <= 0)
-                throw new NotReady();
+                throw new NotReady(this.hold?.deadline ?? Date.now());
             let timer;
             const released = await Promise.race([hold.then(() => true), new Promise((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
             clearTimeout(timer);
             if (!released)
-                throw new NotReady();
+                throw new NotReady(this.hold?.deadline ?? Date.now());
         }
     }
     /** What an update of these keys waits for, if any. */
@@ -327,7 +335,7 @@ export class ShardedObject extends DurableObject {
             if (error instanceof Moved)
                 return this.moved(bits);
             if (error instanceof NotReady)
-                return { notReady: bits };
+                return { notReady: bits, until: error.until };
             throw error;
         }
     }
@@ -481,10 +489,10 @@ export class ShardedObject extends DurableObject {
         const epoch = meta.epoch + 1;
         const right = `${meta.bits}1`;
         let release;
-        const hold = { epoch, right, released: new Promise((resolve) => (release = resolve)) };
-        this.hold = hold;
         const started = Date.now();
         const timeout = this.policy.splitTimeoutMs ?? 60_000;
+        const hold = { epoch, right, released: new Promise((resolve) => (release = resolve)), deadline: started + timeout };
+        this.hold = hold;
         let timer;
         try {
             this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });
