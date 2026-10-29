@@ -9,7 +9,7 @@ export default defineConfig(() => ({
   worker: {
     name: NAME,
     compatibilityDate: "2026-10-27",
-    compatibilityFlags: ["nodejs_compat"],
+    compatibilityFlags: ["nodejs_compat", "durable_object_snapshots"],
     entrypoint,
     env: {
       COUNTERS: bindings.durableObject({ worker: NAME, exportName: "Counters" }),

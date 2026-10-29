@@ -1,58 +1,80 @@
-// Splittable objects (RFD0009): a Durable Object base class whose instances split themselves in
-// two, by the next bit of their keys' hash, when their call rate stays high; and a client that
-// routes each key to the leaf that owns it.
+// Splittable objects: a Durable Object base class whose instances split themselves in two, by the
+// next bit of their keys' hash, when their call rate stays high; and a client that routes each key
+// to the leaf that owns it.
 //
-// A node named `${name}#${bits}` owns the keys whose hash starts with `bits`. Splits are final, so
-// a client's map of splits can only lack some; it never names a wrong owner, only stops too
-// shallow, and the node it reaches answers "moved".
+// A leaf owns the keys whose hash starts with its `bits`. It lives in the Durable Object named
+// `${name}#${bits without trailing zeros}`, so when a leaf splits its left half (`bits0`) stays in
+// the same object and only the right half (`bits1`) moves, to a new object, as one copy of the
+// object's storage (`ctx.storage.snapshot()`, or a row copy where snapshots are not available).
+// Right-half writes wait while the copy is made; reads and left-half writes go on. Splits are
+// final, so a client's map of splits can only lack some: it stops too shallow, and the object it
+// reaches answers "moved".
+//
+// The protocol is modelled in specs/snapshot-split.ts.
 import { DurableObject } from "cloudflare:workers";
 import { createHash } from "node:crypto";
 
 export { SpansLeaves, SplittableClient, splittable, type LeafResult } from "./client.ts";
 
-/** When a node splits: its average calls/s over `windowSeconds` above `callsPerSecond`. */
+declare global {
+  /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
+  interface DurableObjectSnapshot {}
+  interface DurableObjectStorage {
+    snapshot?(options?: { bookmark?: string }): Promise<DurableObjectSnapshot>;
+    onNextSessionRestore?(target: DurableObjectSnapshot | string): Promise<string>;
+  }
+}
+
+/** When a leaf splits, and how. */
 export interface SplitPolicy {
   /** Load, in calls/s, above which a leaf splits (a call weighs 1 + keys / keysPerCall). */
   readonly callsPerSecond: number;
   readonly windowSeconds: number;
-  /** No node deeper than this (2^maxDepth leaves at most). */
+  /** No leaf deeper than this (2^maxDepth leaves at most). */
   readonly maxDepth: number;
   /**
-   * Keys that cost as much as one call (RFD0013): a batch of many keys is load as well. Workers
-   * cannot time synchronous work (clocks move only on I/O), so keys stand in for it. Default 25.
+   * Keys that cost as much as one call: a batch of many keys is load as well. Workers cannot time
+   * synchronous work (clocks move only on I/O), so keys stand in for it. Default 25.
    */
   readonly keysPerCall?: number;
   /**
-   * Depth a new object splits to before its first call, while empty (RFD0015): for uniform keys
-   * (hashes), so a fresh object starts with 2^initialDepth leaves and no rows to hand out.
+   * Depth a new object splits to before its first call, while empty: for uniform keys (hashes), so
+   * a fresh object starts with 2^initialDepth leaves and nothing to copy.
    */
   readonly initialDepth?: number;
+  /**
+   * How the right half is copied: "native" uses storage snapshots (compatibility flag
+   * `durable_object_snapshots`); "logical" copies the rows over RPC; "auto" (the default) uses
+   * snapshots where the runtime has them and rows elsewhere (local development).
+   */
+  readonly copy?: "auto" | "native" | "logical";
+  /** A split that has not finished copying after this long is abandoned. Default 60 s. */
+  readonly splitTimeoutMs?: number;
 }
 
 /**
- * Split at half of what one object takes: about 800 calls/s on the edge (RFD0008), so 400,
- * sustained for 5 s.
+ * Split at half of what one object takes: about 800 calls/s on the edge, so 400, sustained for
+ * 5 s.
  */
 export const DEFAULT_SPLIT_POLICY: SplitPolicy = { callsPerSecond: 400, windowSeconds: 5, maxDepth: 12, keysPerCall: 25 };
 
-/** What a node answers a routed call. */
-export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly unknown: string };
+/** What a node answers a routed call: `moved` names a split leaf (its ancestors split too). */
+export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly notReady: string };
 
-/** A node's state, for tests and operators. */
+/** An object's state, for tests and operators. */
 export interface NodeDescription {
+  /** The bits of the leaf this object hosts now. */
   readonly bits: string;
-  readonly state: "leaf" | "split" | "new";
-  readonly inherited: boolean;
+  /** "copy": a split's copy that does not serve yet; "new": never used. */
+  readonly state: "leaf" | "splitting" | "copy" | "new";
+  /** Rows of keys this object owns. */
   readonly rows: number;
+  /** Rows stored, including ones a split gave away and not deleted yet. */
+  readonly storedRows: number;
   readonly callsPerSecond: number;
+  /** How this object's last split copied its right half, and how long until the copy was claimed. */
+  readonly lastSplit: { readonly copy: "native" | "logical"; readonly ms: number } | null;
 }
-
-/** A row as handed from a parent to a child. */
-export type HandedRow = {
-  readonly key: string;
-  readonly hash: string;
-  readonly value: string;
-};
 
 /** The writes of an update (null deletes) and what the method returns. */
 export interface UpdateResult<V, R> {
@@ -76,7 +98,7 @@ function ownsHash(bits: string, hash: string): boolean {
   return true;
 }
 
-/** The hashes a node owns, inclusive, as 16-hex-digit strings (they sort like the numbers). */
+/** The hashes a leaf owns, inclusive, as 16-hex-digit strings (they sort like the numbers). */
 function hashRange(bits: string): readonly [string, string] {
   const lo = BigInt(`0b0${bits}${"0".repeat(64 - bits.length)}`);
   const hi = BigInt(`0b0${bits}${"1".repeat(64 - bits.length)}`);
@@ -87,73 +109,97 @@ export function nodeName(name: string, bits: string): string {
   return `${name}#${bits}`;
 }
 
-/** Thrown inside a method when its node split under it; the dispatcher answers "moved". */
+/** The bits of the object hosting a leaf: its bits without trailing zeros. */
+export function hostBits(bits: string): string {
+  return bits.replace(/0+$/, "");
+}
+
+/** The name of the Durable Object hosting the leaf `bits` of `name`. */
+export function leafObjectName(name: string, bits: string): string {
+  return nodeName(name, hostBits(bits));
+}
+
+/** Thrown inside a method when its keys left this leaf; the dispatcher answers "moved". */
 class Moved extends Error {}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS splittable_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS splittable_rows (key TEXT PRIMARY KEY, hash TEXT NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS splittable_rows_by_hash ON splittable_rows (hash, key);
-CREATE TABLE IF NOT EXISTS splittable_decided (key TEXT PRIMARY KEY) WITHOUT ROWID;
 `;
 
-/** Rows per background inheriting call. */
-const HAND_OUT_ROWS = 1000;
+/** Bytes of rows per logical-copy call, well under the RPC limit; a call always carries one row. */
+const COPY_BATCH_BYTES = 4 * 1024 * 1024;
+/** Rows read per page of the logical copy. */
+const COPY_PAGE_ROWS = 1000;
+/**
+ * Clearing what a split gave away is background work: those rows are already invisible. A delete
+ * blocks the object while it runs, for longer the more rows it deletes, so it goes in small
+ * batches with a pause between them, leaving the object to its calls.
+ */
+const DELETE_BATCH_ROWS = 250;
+const DELETE_PAUSE_MS = 25;
 
 interface Meta {
   name: string;
+  /** The leaf this object hosts. */
   bits: string;
+  /**
+   * "leaf" serves; "copy" is a split's copy, claimed and waiting to be activated. An object that
+   * holds another's storage verbatim (a snapshot not claimed yet) has the other's meta.
+   */
+  state: "leaf" | "copy";
+  /** Split attempts so far; a copy is claimed and activated only by the attempt that made it. */
+  epoch: number;
+  /** The attempt in progress; persisted so the copy carries it. */
+  splitting: number | null;
+  /** The id of the object that started `splitting`: an object whose own id differs is its copy. */
+  from?: string;
+  /** A sibling to activate (the alarm retries until it confirms). */
+  activate: { bits: string; epoch: number } | null;
+  /** Hash ranges this object no longer owns, whose rows the alarm deletes. */
+  cleanup: (readonly [string, string])[];
+  /** The leaf this one split from and when (null for the root). */
   parent: string | null;
-  state: "leaf" | "split";
-  inherited: boolean;
-  /** Background copy position: the last (hash, key) copied. */
-  cursorHash: string;
-  cursorKey: string;
-  /** Released to the parent (after inheriting). */
-  released: boolean;
-  /** Children that have finished inheriting (a split parent). */
-  releasedChildren: string[];
-  /** When the parent adopted this node (0 for the root). */
-  adoptedAt?: number;
+  splitAt: number;
+  lastSplit?: { copy: "native" | "logical"; ms: number };
 }
 
 /**
  * Extend like DurableObject. Methods called through the client take the keys they act on first
- * (all owned by this node), may take payloads aligned with the keys second, and read and write
+ * (all owned by this leaf), may take payloads aligned with the keys second, and read and write
  * only with `read` and one `update`.
  *
  * Subclasses that define `alarm` must call `super.alarm()`.
  */
 export abstract class SplittableObject<Env = unknown, V = unknown> extends DurableObject<Env> {
   protected splitPolicy: SplitPolicy = DEFAULT_SPLIT_POLICY;
-  /** The namespace this class is bound to: to reach parent and children. */
+  /** The namespace this class is bound to: to reach siblings. */
   protected abstract nodes(): DurableObjectNamespace<SplittableObject<Env, V>>;
 
   private readonly sql: SqlStorage;
   private meta: Meta | null;
   private readonly calls = new Map<number, number>();
-  private readonly bornAt = Date.now();
-  private splitting = false;
-  /** An empty node splitting to the initial depth; calls wait for it, then are moved. */
+  private quietUntil = Date.now();
+  /** The split in progress here: writes to `right` wait for `released`. */
+  private hold: { epoch: number; right: string; released: Promise<void> } | null = null;
+  /** An empty leaf splitting to the initial depth; calls wait for it, then are moved. */
   private presplitting: Promise<void> | null = null;
-  /** This node had rows when it could have presplit: it splits by load only. */
+  /** This leaf had rows when it could have presplit: it splits by load only. */
   private presplitDeclined = false;
-  private readonly pulls = new Map<string, Promise<void>>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
-    const row = this.sql.exec<{ value: string }>("SELECT value FROM splittable_meta WHERE key = 'meta'").toArray()[0];
-    this.meta = row ? (JSON.parse(row.value) as Meta) : null;
+    this.meta = this.loadMeta();
   }
 
   // ---- Reads and writes for subclasses ----
 
   /** The current rows of these keys (absent keys are missing from the map). */
   protected async read(keys: readonly string[]): Promise<Map<string, V>> {
-    await this.ensure(keys);
-    this.assertOwner();
+    this.assertOwner(keys);
     const out = new Map<string, V>();
     for (const key of keys) {
       const row = this.sql.exec<{ value: string }>("SELECT value FROM splittable_rows WHERE key = ?", key).toArray()[0];
@@ -163,12 +209,14 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
   }
 
   /**
-   * Reads these keys and writes what `decide` returns, in one transaction, if this node still owns
-   * them. `decide` must be synchronous.
+   * Reads these keys and writes what `decide` returns, in one transaction, if this leaf still owns
+   * them. `decide` must be synchronous. While the right half is being copied, an update touching
+   * it waits; once the copy serves, it answers "moved".
    */
   protected async update<R>(keys: readonly string[], decide: (current: Map<string, V>) => UpdateResult<V, R>): Promise<R> {
-    await this.ensure(keys);
-    this.assertOwner();
+    for (let hold = this.holding(keys); hold; hold = this.holding(keys)) await hold;
+    // No await from here on: the check and the transaction see the same split state.
+    this.assertOwner(keys);
     return this.ctx.storage.transactionSync(() => {
       const current = new Map<string, V>();
       for (const key of keys) {
@@ -179,47 +227,65 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
       for (const [key, value] of writes) {
         if (value === null) this.sql.exec("DELETE FROM splittable_rows WHERE key = ?", key);
         else this.sql.exec("INSERT INTO splittable_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, keyHash(key), JSON.stringify(value));
-        if (!this.meta!.inherited) this.sql.exec("INSERT OR IGNORE INTO splittable_decided (key) VALUES (?)", key);
       }
       return result;
     });
   }
 
   /**
-   * Runs before a split node hands rows to its children: a subclass with work queued under the
-   * rows it is giving away (an outbox) finishes it here, so a child continues after it.
+   * Runs before this leaf copies its storage for a split, while writes to the half that moves
+   * wait: a subclass with work queued under rows it is giving away (an outbox) finishes it here,
+   * so the new leaf continues after it. It may run more than once.
    */
   protected async beforeHandOut(): Promise<void> {}
 
-  /** This node's name (`${name}#${bits}`), once it has one. */
+  /**
+   * Runs in the new object of a split when it claims its copy, inside that transaction. A split
+   * copies every table, the subclass's too, and the original keeps its subclass tables and the
+   * work queued in them (an outbox it goes on delivering), so the copy drops its share of that
+   * work here. `owns(key)` says whether a key is the new leaf's. Synchronous. The rows of
+   * `read`/`update` are handled by the base class.
+   */
+  protected afterClone(_owns: (key: string) => boolean): void {}
+
+  /** This leaf's name (`${name}#${bits}`), once it has one. */
   protected nodeLabel(): string {
     if (!this.meta) throw new Error("node has no name yet");
     return nodeName(this.meta.name, this.meta.bits);
   }
 
-  /** The parent's node name and when it adopted this node; null for the root. */
+  /** The leaf this one split from and when; null for the root. */
   protected parentNode(): { label: string; adoptedAt: number } | null {
     if (!this.meta || this.meta.parent === null) return null;
-    return { label: nodeName(this.meta.name, this.meta.parent), adoptedAt: this.meta.adoptedAt ?? 0 };
+    return { label: nodeName(this.meta.name, this.meta.parent), adoptedAt: this.meta.splitAt };
   }
 
-  /** The name all nodes of this object share (what the client was created with). */
+  /** The name all leaves of this object share (what the client was created with). */
   protected objectName(): string {
     if (!this.meta) throw new Error("node has no name yet");
     return this.meta.name;
   }
 
-  private assertOwner(): void {
-    if (this.meta?.state !== "leaf") throw new Moved();
+  private assertOwner(keys: readonly string[]): void {
+    const meta = this.meta;
+    if (meta?.state !== "leaf") throw new Moved();
+    for (const key of keys) if (!ownsHash(meta.bits, keyHash(key))) throw new Moved();
+  }
+
+  /** What an update of these keys waits for, if any. */
+  private holding(keys: readonly string[]): Promise<void> | null {
+    const hold = this.hold;
+    if (!hold) return null;
+    for (const key of keys) if (ownsHash(hold.right, keyHash(key))) return hold.released;
+    return null;
   }
 
   // ---- The routed call ----
 
-  /** A call routed by the client: `method(keys, payloads, ...args)` if this node owns the keys. */
+  /** A call routed by the client: `method(keys, payloads, ...args)` if this leaf owns the keys. */
   async splittableCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<CallAnswer<unknown>> {
-    const meta = await this.arriveSettled(name, bits);
-    if (!meta) return { unknown: bits };
-    if (meta.state === "split") return { moved: bits };
+    const answer = await this.arriveSettled(name, bits);
+    if (answer) return answer;
     for (const key of keys) if (!ownsHash(bits, keyHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
     this.countCall(keys.length);
     const fn = (this as unknown as Record<string, unknown>)[method];
@@ -227,68 +293,93 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
     try {
       return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args) };
     } catch (error) {
-      if (error instanceof Moved) return { moved: bits };
+      if (error instanceof Moved) return this.moved(bits);
       throw error;
     }
   }
 
   /** A call to every leaf: `method(...args)`, with no keys. */
   async splittableScan(name: string, bits: string, method: string, args: readonly unknown[]): Promise<CallAnswer<unknown>> {
-    const meta = await this.arriveSettled(name, bits);
-    if (!meta) return { unknown: bits };
-    if (meta.state === "split") return { moved: bits };
+    const answer = await this.arriveSettled(name, bits);
+    if (answer) return answer;
     const fn = (this as unknown as Record<string, unknown>)[method];
     if (typeof fn !== "function" || method.startsWith("splittable")) throw new Error(`no method ${method}`);
-    if (!meta.inherited) await this.inheritAll();
     try {
       return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, ...args) };
     } catch (error) {
-      if (error instanceof Moved) return { moved: bits };
+      if (error instanceof Moved) return this.moved(bits);
       throw error;
     }
   }
 
-  /** Every row this node owns, for scans (a subclass's scan method may use it). */
+  /** Every row this leaf owns, for scans (a subclass's scan method may use it). */
   protected allRows(): Map<string, V> {
-    this.assertOwner();
+    this.assertOwner([]);
+    const [lo, hi] = hashRange(this.meta!.bits);
     const out = new Map<string, V>();
-    for (const r of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM splittable_rows")) out.set(r.key, JSON.parse(r.value) as V);
+    for (const r of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM splittable_rows WHERE hash >= ? AND hash <= ?", lo, hi)) out.set(r.key, JSON.parse(r.value) as V);
     return out;
   }
 
+  /** "moved" for a call addressed to `bits`: this leaf went deeper, so `bits` and more split. */
+  private moved(bits: string): CallAnswer<never> {
+    const now = this.meta!.bits;
+    return { moved: now.length > bits.length ? now.slice(0, -1) : bits };
+  }
+
   /**
-   * `arrive`, then the split to the initial depth if this node is above it and empty. Every call
-   * waits for that split, so nothing is written to a node that is about to hand out nothing.
+   * Null if this object serves `bits` now; otherwise what to answer. Splits to the initial depth
+   * first if this leaf is above it and empty: every call waits for that.
    */
-  private async arriveSettled(name: string, bits: string): Promise<Meta | null> {
-    const meta = this.arrive(name, bits);
-    if (!meta || meta.state !== "leaf" || this.presplitDeclined || meta.bits.length >= (this.splitPolicy.initialDepth ?? 0)) return meta;
+  private async arriveSettled(name: string, bits: string): Promise<CallAnswer<never> | null> {
+    const answer = this.arrive(name, bits);
+    if (answer) return answer;
+    const meta = this.meta!;
+    if (this.presplitDeclined || meta.bits.length >= (this.splitPolicy.initialDepth ?? 0)) return null;
     this.presplitting ??= this.presplit().finally(() => (this.presplitting = null));
     await this.presplitting;
-    return this.meta;
+    return this.arrive(name, bits);
+  }
+
+  /** Whether this object serves `bits`, initialising the root on its first call. */
+  private arrive(name: string, bits: string): CallAnswer<never> | null {
+    if (!this.meta) {
+      if (bits !== "") return { notReady: bits }; // a sibling whose copy has not arrived
+      this.saveMeta({ name, bits: "", state: "leaf", epoch: 0, splitting: null, activate: null, cleanup: [], parent: null, splitAt: 0 });
+    }
+    const meta = this.meta!;
+    // Storage copied from another object and not claimed yet: it keeps that object's meta.
+    if (this.isUnclaimedCopy()) return { notReady: bits };
+    if (meta.name !== name || hostBits(meta.bits) !== hostBits(bits)) throw new Error(`${nodeName(name, bits)} reached ${nodeName(meta.name, meta.bits)}`);
+    if (meta.state === "copy") return { notReady: bits };
+    // A split interrupted by a restart: abandoned (its copy is never activated).
+    if (meta.splitting !== null && !this.hold) {
+      this.saveMeta({ ...meta, splitting: null });
+      if (meta.activate || meta.cleanup.length > 0) void this.ctx.storage.setAlarm(Date.now());
+    }
+    if (meta.bits === bits) return null;
+    if (meta.bits.startsWith(bits)) return this.moved(bits);
+    throw new Error(`${nodeName(name, bits)} is not split, ${nodeName(meta.name, meta.bits)} is the leaf`);
   }
 
   private async presplit(): Promise<void> {
     const meta = this.meta!;
     const rows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM splittable_rows").one().n;
-    if (rows > 0 || !meta.inherited || meta.state !== "leaf") {
+    if (rows > 0 || meta.state !== "leaf" || this.hold) {
       this.presplitDeclined = true; // not empty: splits by load only
       return;
     }
-    // Children of an empty node start with everything inherited: there is nothing to hand out.
-    for (const child of [`${meta.bits}0`, `${meta.bits}1`]) await this.node(child).splittableAdopt(meta.name, child, meta.bits, true);
-    this.ctx.storage.transactionSync(() => this.saveMeta({ ...meta, state: "split", releasedChildren: [`${meta.bits}0`, `${meta.bits}1`] }));
+    // Empty: the right halves of every level start empty and serving; they split further on
+    // their own first call.
+    const depth = this.splitPolicy.initialDepth ?? 0;
+    let bits = meta.bits;
+    for (; bits.length < depth; bits += "0") await this.node(`${bits}1`).splittableAdoptEmpty(meta.name, `${bits}1`, bits);
+    this.saveMeta({ ...this.meta!, bits, parent: meta.bits, splitAt: Date.now() });
   }
 
-  /** The node's meta, initialising the root on its first call; null if never adopted. */
-  private arrive(name: string, bits: string): Meta | null {
-    if (this.meta) {
-      if (this.meta.bits !== bits || this.meta.name !== name) throw new Error(`${nodeName(name, bits)} reached ${nodeName(this.meta.name, this.meta.bits)}`);
-      return this.meta;
-    }
-    if (bits !== "") return null;
-    this.saveMeta({ name, bits: "", parent: null, state: "leaf", inherited: true, cursorHash: "", cursorKey: "", released: true, releasedChildren: [] });
-    return this.meta;
+  private loadMeta(): Meta | null {
+    const row = this.sql.exec<{ value: string }>("SELECT value FROM splittable_meta WHERE key = 'meta'").toArray()[0];
+    return row ? (JSON.parse(row.value) as Meta) : null;
   }
 
   private saveMeta(meta: Meta): void {
@@ -304,7 +395,7 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
     if (this.calls.size > this.splitPolicy.windowSeconds + 2) {
       for (const s of this.calls.keys()) if (s < second - this.splitPolicy.windowSeconds - 1) this.calls.delete(s);
     }
-    if (this.rate() > this.splitPolicy.callsPerSecond && Date.now() - this.bornAt > this.splitPolicy.windowSeconds * 1000) void this.split();
+    if (Date.now() - this.quietUntil > this.splitPolicy.windowSeconds * 1000 && this.rate() > this.splitPolicy.callsPerSecond) void this.split();
   }
 
   /** Average calls/s over the last full `windowSeconds`. */
@@ -315,175 +406,276 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
     return sum / this.splitPolicy.windowSeconds;
   }
 
-  /** Splits now if this is a leaf that has finished inheriting (also an operator's lever). */
+  /** Splits now if this object hosts the leaf `bits` (also an operator's lever). */
   async splittableSplit(name: string, bits: string): Promise<boolean> {
-    const meta = this.arrive(name, bits);
-    if (!meta) return false;
+    if (this.arrive(name, bits)) return false;
     return this.split();
   }
 
+  /**
+   * Hands the right half to a new object: holds writes to it, copies this object's storage there,
+   * and once the copy is claimed stops owning the right half and activates it. A copy that is not
+   * claimed in time is abandoned, and the held writes go ahead here.
+   */
   private async split(): Promise<boolean> {
     const meta = this.meta;
-    if (!meta || this.splitting || meta.state !== "leaf" || !meta.inherited || meta.bits.length >= this.splitPolicy.maxDepth) return false;
-    this.splitting = true;
+    if (!meta || this.hold || meta.state !== "leaf" || meta.bits.length >= this.splitPolicy.maxDepth) return false;
+    const epoch = meta.epoch + 1;
+    const right = `${meta.bits}1`;
+    let release!: () => void;
+    const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)) };
+    this.hold = hold;
+    const started = Date.now();
+    const timeout = this.splitPolicy.splitTimeoutMs ?? 60_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      // 1. Both children exist and know their parent before anything moves to them.
-      for (const child of [`${meta.bits}0`, `${meta.bits}1`]) await this.node(child).splittableAdopt(meta.name, child, meta.bits);
-      // 2. Frozen: no more calls here; rows wait for the children to take them.
-      this.ctx.storage.transactionSync(() => this.saveMeta({ ...meta, state: "split", releasedChildren: [] }));
-      console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), callsPerSecond: this.rate() }));
+      this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });
+      const live = () => this.hold === hold && Date.now() - started < timeout;
+      const copied = this.copyAndClaim(right, epoch, live);
+      copied.catch(() => {}); // after a timeout nobody waits for it
+      const expired = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`split did not finish in ${timeout} ms`)), timeout)));
+      const method = await Promise.race([copied, expired]);
+      // The copy is claimed: from this transaction on, the right half is the sibling's.
+      const now = this.meta!;
+      this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, activate: { bits: right, epoch }, cleanup: [...now.cleanup, hashRange(right)], parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started } });
+      this.calls.clear();
+      this.quietUntil = Date.now();
+      console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), copy: method, ms: Date.now() - started }));
+      this.hold = null;
+      release();
+      await this.ctx.storage.setAlarm(Date.now());
+      await this.activateSibling().catch(() => {}); // the alarm retries
       return true;
+    } catch (error) {
+      const now = this.meta;
+      if (now?.splitting === epoch) this.saveMeta({ ...now, splitting: null });
+      this.quietUntil = Date.now();
+      console.error(JSON.stringify({ event: "split-abandoned", node: nodeName(meta.name, meta.bits), error: String(error), ms: Date.now() - started }));
+      return false;
     } finally {
-      this.splitting = false;
+      clearTimeout(timer);
+      if (this.hold === hold) {
+        this.hold = null;
+        release();
+      }
     }
+  }
+
+  /** Copies this object's storage to the right sibling, then claims the copy there. */
+  private async copyAndClaim(right: string, epoch: number, live: () => boolean): Promise<"native" | "logical"> {
+    await this.beforeHandOut();
+    const method = await this.copyTo(right, epoch, live);
+    const meta = this.meta!;
+    for (let wait = 10; live(); wait = Math.min(wait * 2, 500)) {
+      if (await this.node(right).splittableClaim(meta.name, right, meta.bits, epoch)) return method;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    throw new Error("split timed out claiming its copy");
+  }
+
+  private async copyTo(right: string, epoch: number, live: () => boolean): Promise<"native" | "logical"> {
+    const mode = this.splitPolicy.copy ?? "auto";
+    if (mode !== "logical" && typeof this.ctx.storage.snapshot === "function") {
+      let snapshot: DurableObjectSnapshot | null = null;
+      try {
+        snapshot = await this.ctx.storage.snapshot();
+      } catch (error) {
+        if (mode === "native") throw error; // auto: no snapshots here (local development)
+      }
+      if (snapshot) {
+        await this.node(right).splittableRestore(snapshot);
+        return "native";
+      }
+    } else if (mode === "native") {
+      throw new Error("storage snapshots need the durable_object_snapshots compatibility flag");
+    }
+    await this.copyRows(right, epoch, live);
+    return "logical";
+  }
+
+  /**
+   * The logical copy, where snapshots are unavailable: every table, as a snapshot would carry
+   * them, in byte-bounded batches. Writes to the half that moves are held meanwhile; rows of the
+   * other half may change under the copy, which is fine: the copy drops them.
+   */
+  private async copyRows(right: string, epoch: number, live: () => boolean): Promise<void> {
+    const meta = this.meta!;
+    const target = this.node(right);
+    let first = true;
+    for (const table of this.tables()) {
+      for (let offset = 0; ; ) {
+        if (!live()) throw new Error("split timed out copying rows");
+        const cursor = this.sql.exec(`SELECT * FROM "${table}" LIMIT ? OFFSET ?`, COPY_PAGE_ROWS, offset);
+        const rows: SqlStorageValue[][] = [];
+        let bytes = 0;
+        for (const row of cursor.raw()) {
+          rows.push(row);
+          for (const value of row) bytes += value instanceof ArrayBuffer ? value.byteLength : String(value).length;
+          if (bytes >= COPY_BATCH_BYTES) break;
+        }
+        if (rows.length === 0 && !first) break;
+        await target.splittableReceive(meta.name, right, first, table, cursor.columnNames, rows);
+        first = false;
+        offset += rows.length;
+        if (rows.length === 0 || (rows.length < COPY_PAGE_ROWS && bytes < COPY_BATCH_BYTES)) break;
+      }
+    }
+    if (!(await target.splittableReceiveDone(meta.name, right, epoch))) throw new Error("the copy did not take this split's meta");
+  }
+
+  /** This object's tables, the subclass's too (not SQLite's or the runtime's). */
+  private tables(): string[] {
+    return this.sql
+      .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name")
+      .toArray()
+      .map((t) => t.name);
   }
 
   private node(bits: string): DurableObjectStub<SplittableObject<Env, V>> {
     const nodes = this.nodes();
-    return nodes.get(nodes.idFromName(nodeName(this.meta!.name, bits)));
+    return nodes.get(nodes.idFromName(leafObjectName(this.meta!.name, bits)));
   }
 
-  // ---- Inheriting (child side) ----
-
-  /** Called by the parent when it splits. */
-  async splittableAdopt(name: string, bits: string, parent: string, empty = false): Promise<void> {
-    if (this.meta) return;
-    if (empty) {
-      // The initial split (RFD0015): the parent had no rows, so there is nothing to inherit.
-      this.saveMeta({ name, bits, parent, state: "leaf", inherited: true, cursorHash: "", cursorKey: "", released: true, releasedChildren: [], adoptedAt: 0 });
+  private async activateSibling(): Promise<void> {
+    const pending = this.meta?.activate;
+    if (!pending) return;
+    if (!(await this.node(pending.bits).splittableActivate(this.meta!.name, pending.bits, pending.epoch))) {
+      console.error(JSON.stringify({ event: "split-activate-refused", node: this.nodeLabel(), sibling: pending.bits }));
       return;
     }
-    this.saveMeta({ name, bits, parent, state: "leaf", inherited: false, cursorHash: "", cursorKey: "", released: false, releasedChildren: [], adoptedAt: Date.now() });
-    await this.ctx.storage.setAlarm(Date.now());
-  }
-
-  /** Keys not decided yet are fetched from the parent first. */
-  private async ensure(keys: readonly string[]): Promise<void> {
-    if (!this.meta || this.meta.inherited) return;
-    const waits: Promise<void>[] = [];
-    const fresh: string[] = [];
-    for (const key of new Set(keys)) {
-      const pending = this.pulls.get(key);
-      if (pending) waits.push(pending);
-      else if (this.sql.exec("SELECT 1 FROM splittable_decided WHERE key = ?", key).toArray().length === 0) fresh.push(key);
-    }
-    if (fresh.length > 0) {
-      const pull = this.pull(fresh);
-      for (const key of fresh) this.pulls.set(key, pull);
-      waits.push(pull.finally(() => fresh.forEach((key) => this.pulls.delete(key))));
-    }
-    await Promise.all(waits);
-  }
-
-  private async pull(keys: readonly string[]): Promise<void> {
-    const meta = this.meta!;
-    const rows = await this.waitForParent(() => this.node(meta.parent!).splittableHandOut(meta.name, meta.parent!, keys));
-    if (this.meta!.inherited) return; // the background copy finished meanwhile and has these rows
-    this.ctx.storage.transactionSync(() => this.takeRows(keys, rows));
-  }
-
-  /** Stores handed rows for keys not decided yet, and marks the keys decided. */
-  private takeRows(keys: readonly string[], rows: readonly HandedRow[]): void {
-    for (const row of rows) {
-      if (this.sql.exec("SELECT 1 FROM splittable_decided WHERE key = ?", row.key).toArray().length > 0) continue;
-      this.sql.exec("INSERT OR IGNORE INTO splittable_rows (key, hash, value) VALUES (?, ?, ?)", row.key, row.hash, row.value);
-    }
-    for (const key of keys) this.sql.exec("INSERT OR IGNORE INTO splittable_decided (key) VALUES (?)", key);
-  }
-
-  /** The parent hands out rows only once split; adopt comes just before that. */
-  private async waitForParent<T>(ask: () => Promise<T | "not split">): Promise<T> {
-    for (let attempt = 0; ; attempt++) {
-      const answer = await ask();
-      if (answer !== "not split") return answer;
-      if (attempt > 100) throw new Error("parent did not split");
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-  }
-
-  /** Copies the rest of the range from the parent (the alarm's job), then releases the parent. */
-  private async inheritAll(): Promise<void> {
-    while (this.meta && !this.meta.inherited) await this.inheritStep();
-  }
-
-  private async inheritStep(): Promise<void> {
-    const meta = this.meta!;
-    const rows = await this.waitForParent(() => this.node(meta.parent!).splittableHandOutRange(meta.name, meta.parent!, meta.bits, meta.cursorHash, meta.cursorKey, HAND_OUT_ROWS));
     const now = this.meta!;
-    if (now.inherited || now.cursorHash !== meta.cursorHash || now.cursorKey !== meta.cursorKey) return; // another step got here first
-    this.ctx.storage.transactionSync(() => {
-      this.takeRows(rows.map((r) => r.key), rows);
-      const last = rows[rows.length - 1];
-      if (rows.length < HAND_OUT_ROWS) {
-        this.sql.exec("DELETE FROM splittable_decided");
-        this.saveMeta({ ...now, inherited: true, cursorHash: "", cursorKey: "" });
-      } else {
-        this.saveMeta({ ...now, cursorHash: last!.hash, cursorKey: last!.key });
-      }
-    });
+    if (now.activate?.epoch === pending.epoch && now.activate.bits === pending.bits) this.saveMeta({ ...now, activate: null });
   }
 
   override async alarm(): Promise<void> {
     const meta = this.meta;
-    if (!meta || meta.parent === null) return;
-    if (!meta.inherited) {
-      await this.inheritStep();
-      await this.ctx.storage.setAlarm(Date.now());
-      return;
+    // A verbatim copy not claimed yet carries the source's alarm: it is not this object's.
+    if (!meta || this.isUnclaimedCopy()) return;
+    if (meta.activate) await this.activateSibling();
+    const range = meta.cleanup[0];
+    if (range) {
+      const deleted = this.sql.exec("DELETE FROM splittable_rows WHERE key IN (SELECT key FROM splittable_rows WHERE hash >= ? AND hash <= ? LIMIT ?)", range[0], range[1], DELETE_BATCH_ROWS).rowsWritten;
+      if (deleted === 0) this.saveMeta({ ...this.meta!, cleanup: this.meta!.cleanup.slice(1) });
     }
-    if (!meta.released) {
-      await this.node(meta.parent).splittableRelease(meta.name, meta.parent, meta.bits);
-      this.saveMeta({ ...this.meta!, released: true });
-    }
+    if (this.meta!.activate) await this.ctx.storage.setAlarm(Date.now() + 1000);
+    else if (this.meta!.cleanup.length > 0) await this.ctx.storage.setAlarm(Date.now() + DELETE_PAUSE_MS);
   }
 
-  // ---- Handing out (parent side) ----
+  // ---- The sibling's side of a split ----
 
-  async splittableHandOut(name: string, bits: string, keys: readonly string[]): Promise<HandedRow[] | "not split"> {
-    const meta = this.arrive(name, bits);
-    if (meta?.state !== "split") return "not split";
-    await this.beforeHandOut();
-    const out: HandedRow[] = [];
-    for (const key of keys) {
-      const row = this.sql.exec<HandedRow>("SELECT key, hash, value FROM splittable_rows WHERE key = ?", key).toArray()[0];
-      if (row) out.push(row);
+  /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */
+  async splittableRestore(snapshot: DurableObjectSnapshot): Promise<void> {
+    if (this.serving()) throw new Error("refusing to overwrite a serving leaf");
+    try {
+      await this.ctx.storage.onNextSessionRestore!(snapshot);
+    } catch (error) {
+      // One pending restore per object: an earlier attempt's. Claiming tells which it was.
+      if (!String(error).includes("already been scheduled")) throw error;
     }
-    // A parent that is itself still inheriting would have to ask its own parent; it cannot be:
-    // a node splits only once it has inherited everything.
-    return out;
+    // Reply first, then restart: the next session starts on the copy.
+    this.ctx.waitUntil(
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          resolve();
+          try {
+            this.ctx.abort("apply snapshot restore");
+          } catch {
+            // aborting throws in the caller too
+          }
+        }, 50),
+      ),
+    );
   }
 
-  async splittableHandOutRange(name: string, bits: string, child: string, afterHash: string, afterKey: string, limit: number): Promise<HandedRow[] | "not split"> {
-    const meta = this.arrive(name, bits);
-    if (meta?.state !== "split") return "not split";
-    await this.beforeHandOut();
-    const [lo, hi] = hashRange(child);
-    return this.sql
-      .exec<HandedRow>(
-        "SELECT key, hash, value FROM splittable_rows WHERE hash >= ? AND hash <= ? AND (hash > ? OR (hash = ? AND key > ?)) ORDER BY hash, key LIMIT ?",
-        lo,
-        hi,
-        afterHash,
-        afterHash,
-        afterKey,
-        limit,
-      )
-      .toArray();
-  }
-
-  /** A child has all its rows: this node deletes them. */
-  async splittableRelease(name: string, bits: string, child: string): Promise<void> {
-    const meta = this.arrive(name, bits);
-    if (meta?.state !== "split" || meta.releasedChildren.includes(child)) return;
-    const [lo, hi] = hashRange(child);
+  /** One batch of the logical copy: rows of one table. The first batch wipes every table. */
+  async splittableReceive(_name: string, _bits: string, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void> {
+    if (first && this.serving()) throw new Error("refusing to overwrite a serving leaf");
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec("DELETE FROM splittable_rows WHERE hash >= ? AND hash <= ?", lo, hi);
-      this.saveMeta({ ...meta, releasedChildren: [...meta.releasedChildren, child] });
+      if (first) {
+        for (const t of this.tables()) this.sql.exec(`DELETE FROM "${t}"`);
+        this.meta = null;
+      }
+      if (rows.length === 0) return;
+      // A subclass table the copy has not created yet: its constructor creates it on a restart,
+      // but copies need it now.
+      if (!this.tables().includes(table)) throw new Error(`table ${table} does not exist in the copy`);
+      const sql = `INSERT OR REPLACE INTO "${table}" (${columns.map((c) => `"${c}"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
+      for (const row of rows) this.sql.exec(sql, ...row);
     });
   }
 
+  /** The logical copy is complete: it holds the source's meta, from this split. */
+  async splittableReceiveDone(name: string, bits: string, epoch: number): Promise<boolean> {
+    this.meta = this.loadMeta();
+    const meta = this.meta;
+    return meta !== null && meta.name === name && meta.splitting === epoch && `${meta.bits}1` === bits && this.isUnclaimedCopy();
+  }
+
+  /** Storage copied verbatim from a splitting object and not claimed yet: it is not this object's. */
+  private isUnclaimedCopy(): boolean {
+    const meta = this.meta;
+    return meta !== null && meta.splitting !== null && meta.from !== this.ctx.id.toString();
+  }
+
+  /**
+   * A leaf that serves and is not splitting. Anything else may be overwritten by a split's copy:
+   * an unused object, a copy (claimed or not) from an abandoned attempt.
+   */
+  private serving(): boolean {
+    return this.meta?.state === "leaf" && !this.isUnclaimedCopy();
+  }
+
+  /**
+   * Claims the copy for the leaf `bits`, if it is the copy made by attempt `epoch` of its parent:
+   * becomes that leaf, not serving yet, and deletes the rows of the half it does not own.
+   */
+  async splittableClaim(name: string, bits: string, parent: string, epoch: number): Promise<boolean> {
+    const meta = this.meta;
+    if (!meta || meta.name !== name) return false;
+    if (meta.bits === bits) return meta.epoch === epoch && meta.state === "copy"; // claimed already
+    if (!this.isUnclaimedCopy() || meta.bits !== parent || meta.splitting !== epoch) return false; // not this copy
+    this.ctx.storage.transactionSync(() => {
+      this.afterClone((key) => ownsHash(bits, keyHash(key)));
+      this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), parent, splitAt: Date.now() });
+    });
+    await this.ctx.storage.setAlarm(Date.now());
+    return true;
+  }
+
+  /** The hash ranges outside a leaf's. */
+  private outside(bits: string): (readonly [string, string])[] {
+    const [lo, hi] = hashRange(bits);
+    const out: (readonly [string, string])[] = [];
+    if (lo !== "0000000000000000") out.push(["0000000000000000", (BigInt(`0x${lo}`) - 1n).toString(16).padStart(16, "0")]);
+    if (hi !== "ffffffffffffffff") out.push([(BigInt(`0x${hi}`) + 1n).toString(16).padStart(16, "0"), "ffffffffffffffff"]);
+    return out;
+  }
+
+  /** Starts serving, if this is the copy of attempt `epoch`. */
+  async splittableActivate(name: string, bits: string, epoch: number): Promise<boolean> {
+    const meta = this.meta;
+    if (!meta || meta.name !== name) return false;
+    if (meta.bits !== bits) return meta.state === "leaf" && meta.splitting === null && meta.bits.startsWith(bits); // serving, and split since
+    if (meta.epoch !== epoch) return false;
+    if (meta.state === "copy") this.saveMeta({ ...meta, state: "leaf" });
+    return true;
+  }
+
+  /** The right half of an empty leaf's initial split: empty, and serving at once. */
+  async splittableAdoptEmpty(name: string, bits: string, parent: string): Promise<void> {
+    if (this.meta) return;
+    this.saveMeta({ name, bits, state: "leaf", epoch: 0, splitting: null, activate: null, cleanup: [], parent, splitAt: Date.now() });
+  }
+
   async splittableDescribe(): Promise<NodeDescription> {
-    const rows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM splittable_rows").one().n;
-    return { bits: this.meta?.bits ?? "", state: this.meta?.state ?? "new", inherited: this.meta?.inherited ?? false, rows, callsPerSecond: this.rate() };
+    const meta = this.meta;
+    const storedRows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM splittable_rows").one().n;
+    let rows = storedRows;
+    if (meta) {
+      const [lo, hi] = hashRange(meta.bits);
+      rows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM splittable_rows WHERE hash >= ? AND hash <= ?", lo, hi).one().n;
+    }
+    const state = !meta ? "new" : this.hold ? "splitting" : meta.state === "copy" || this.isUnclaimedCopy() ? "copy" : "leaf";
+    return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null };
   }
 }

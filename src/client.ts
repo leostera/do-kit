@@ -1,7 +1,7 @@
-// The client side of splittable objects (RFD0009): routes keys to leaves through the splits it
+// The client side of splittable objects: routes keys to leaves through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { hashBit, keyHash, nodeName, type CallAnswer, type SplittableObject } from "./index.ts";
+import { hashBit, keyHash, leafObjectName, nodeName, type CallAnswer, type SplittableObject } from "./index.ts";
 
 /** One leaf's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface LeafResult<R> {
@@ -32,6 +32,23 @@ const loadedFromCache = new Set<string>();
 
 /** A hop limit: deeper than any maxDepth, so a loop is a bug, not a slow call. */
 const MAX_HOPS = 64;
+/** How long a call waits for a new leaf to start serving (it is activated just after a split). */
+const NOT_READY_WAIT_MS = 30_000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Waits a little longer each time a leaf is not ready; throws once that has gone on too long. */
+class Backoff {
+  private wait = 5;
+  private waited = 0;
+  constructor(private readonly what: string) {}
+  async next(): Promise<void> {
+    if (this.waited > NOT_READY_WAIT_MS) throw new Error(`${this.what}: a new leaf did not start serving`);
+    await sleep(this.wait);
+    this.waited += this.wait;
+    this.wait = Math.min(this.wait * 2, 250);
+  }
+}
 
 export class SplittableClient<T extends Rpc.DurableObjectBranded> {
   private readonly namespace: DurableObjectNamespace<T>;
@@ -60,7 +77,7 @@ export class SplittableClient<T extends Rpc.DurableObjectBranded> {
 
   private stub(bits: string): DurableObjectStub<SplittableObject<never, unknown>> {
     const ns = this.namespace as unknown as DurableObjectNamespace<SplittableObject<never, unknown>>;
-    return ns.get(ns.idFromName(nodeName(this.name, bits)));
+    return ns.get(ns.idFromName(leafObjectName(this.name, bits)));
   }
 
   /**
@@ -85,8 +102,10 @@ export class SplittableClient<T extends Rpc.DurableObjectBranded> {
     const hashes = keys.map(keyHash);
     const out: LeafResult<Result<T[M]>>[] = [];
     let pending = keys.map((_, i) => i);
+    const backoff = new Backoff(`splittable ${this.name}`);
     for (let hop = 0; pending.length > 0; hop++) {
       if (hop > MAX_HOPS) throw new Error(`splittable ${this.name}: routing did not settle`);
+      let waiting = false;
       const groups = new Map<string, number[]>();
       for (const i of pending) {
         const bits = this.leafFor(hashes[i]!);
@@ -105,9 +124,16 @@ export class SplittableClient<T extends Rpc.DurableObjectBranded> {
           else if ("moved" in answer) {
             this.learn(answer.moved);
             retry.push(...positions);
-          } else throw new Error(`splittable ${this.name}: ${answer.unknown} was never created`);
+          } else {
+            waiting = true; // not serving yet: the same leaf, a little later
+            retry.push(...positions);
+          }
         }),
       );
+      if (waiting) {
+        await backoff.next();
+        hop--;
+      }
       pending = retry;
     }
     return out;
@@ -117,6 +143,7 @@ export class SplittableClient<T extends Rpc.DurableObjectBranded> {
   async scan<M extends ScanMethods<T>>(method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<Result<T[M]>[]> {
     await this.loadCache();
     const out: Result<T[M]>[] = [];
+    const backoff = new Backoff(`splittable ${this.name}`);
     const visit = async (bits: string, depth: number): Promise<void> => {
       if (depth > MAX_HOPS) throw new Error(`splittable ${this.name}: scan did not settle`);
       if (this.splits.has(bits)) {
@@ -128,7 +155,10 @@ export class SplittableClient<T extends Rpc.DurableObjectBranded> {
       else if ("moved" in answer) {
         this.learn(answer.moved);
         await visit(bits, depth + 1);
-      } else throw new Error(`splittable ${this.name}: ${answer.unknown} was never created`);
+      } else {
+        await backoff.next();
+        await visit(bits, depth);
+      }
     };
     await visit("", 0);
     return out;

@@ -39,12 +39,13 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 const call = <T>(cls: string, name: string, method: string, keys: string[], payloads: unknown[] | null = null) => post<T>("/call", { cls, name, method, keys, payloads });
-const describe = (cls: string, name: string, bits: string) => post<{ state: string; inherited: boolean; rows: number }>("/describe", { cls, name, bits });
+const describe = (cls: string, name: string, bits: string) => post<{ bits: string; state: string; rows: number; storedRows: number }>("/describe", { cls, name, bits });
 
-/** Leaves reachable from the root, by asking nodes (not the client's map). */
+/** Leaves reachable from the root, by asking objects (not the client's map). */
 async function leaves(cls: string, name: string, bits = ""): Promise<string[]> {
   const node = await describe(cls, name, bits);
-  if (node.state !== "split") return [bits];
+  // The object hosting `bits` hosts a deeper leaf once `bits` has split.
+  if (node.state === "new" || node.bits === bits) return [bits];
   return [...(await leaves(cls, name, `${bits}0`)), ...(await leaves(cls, name, `${bits}1`))];
 }
 
@@ -146,24 +147,51 @@ test("a new object splits to its initial depth before its first call, and concur
   );
   const found = await leaves("presplit", name);
   expect(found.sort()).toEqual(["00", "01", "10", "11"]);
-  for (const bits of found) expect((await describe("presplit", name, bits)).inherited).toBe(true);
-  expect((await describe("presplit", name, "")).rows).toBe(0);
+  for (const bits of found) expect((await describe("presplit", name, bits)).state).toBe("leaf");
   const got = await call<(number | null)[]>("presplit", name, "get", KEYS);
   KEYS.forEach((k, i) => expect(got[i] ?? 0).toBe(expected.get(k) ?? 0));
 }, 60_000);
 
-test("children finish inheriting and the parent releases its rows", async () => {
-  const name = `inherit-${Date.now()}`;
+test("a split copies the right half, and each object deletes the half it gave away", async () => {
+  const name = `copy-${Date.now()}`;
   const many = Array.from({ length: 2500 }, (_, i) => `row-${i}`);
   for (let i = 0; i < many.length; i += 500) await call("m", name, "add", many.slice(i, i + 500), many.slice(i, i + 500).map(() => 1));
-  await post("/split", { cls: "m", name, bits: "" });
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
   for (let i = 0; i < 100; i++) {
-    const [root, a, b] = await Promise.all([describe("m", name, ""), describe("m", name, "0"), describe("m", name, "1")]);
-    if (a.inherited && b.inherited && root.rows === 0) {
-      expect(a.rows + b.rows).toBe(many.length);
+    const [left, right] = await Promise.all([describe("m", name, "0"), describe("m", name, "1")]);
+    if (left.bits === "0" && right.state === "leaf" && left.storedRows === left.rows && right.storedRows === right.rows) {
+      expect(left.rows + right.rows).toBe(many.length);
+      expect(left.rows).toBeGreaterThan(0);
+      expect(right.rows).toBeGreaterThan(0);
+      const got = await call<(number | null)[]>("m", name, "get", many);
+      expect(got.every((v) => v === 1)).toBe(true);
       return;
     }
     await Bun.sleep(100);
   }
-  throw new Error("inheriting did not finish");
+  throw new Error("the split did not settle");
+}, 60_000);
+
+test("a split copies rows larger than one copy batch", async () => {
+  const name = `large-${Date.now()}`;
+  // 12 rows of 1 MiB: several batches of the logical copy (4 MiB each).
+  const keys = Array.from({ length: 12 }, (_, i) => `big-${i}`);
+  const blob = (i: number) => String(i % 10).repeat(1024 * 1024);
+  for (const [i, key] of keys.entries()) await call("m", name, "put", [key], [blob(i)]);
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  const got = await call<string[]>("m", name, "get", keys);
+  got.forEach((v, i) => expect(v === blob(i)).toBe(true));
+  expect((await describe("m", name, "1")).state).toBe("leaf");
+}, 60_000);
+
+test("a split copies subclass tables, and the new leaf drops what it does not own", async () => {
+  const name = `tables-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  const [left, right] = await post<{ key: string; owned: boolean }[][]>("/scan", { cls: "m", name, method: "history" }).then((leaves) => [...leaves].sort((a, b) => b.length - a.length));
+  // The original keeps its whole table (its queued work stays with it); the copy kept only its keys.
+  expect(left!.length).toBe(KEYS.length);
+  expect(right!.length).toBeGreaterThan(0);
+  expect(right!.every((h) => h.owned)).toBe(true);
+  expect(right!.length + left!.filter((h) => h.owned).length).toBe(KEYS.length);
 }, 60_000);

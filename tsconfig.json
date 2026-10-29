@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": ["@cloudflare/workers-types", "node", "bun"]
   },
-  "include": ["src", "test", "specs"]
+  "include": ["src", "test", "specs", "bench"]
 }
