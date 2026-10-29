@@ -42,6 +42,8 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private route;
     /** Calls `method(...args)` on every shard. */
     scan<M extends ScanMethods<T>>(method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<Result<T[M]>[]>;
+    /** How many shards this client knows of: one more than its known splits. There may be more. */
+    knownShardCount(): Promise<number>;
     /** The known splits (for tests and operators). */
     knownSplits(): string[];
     private learn;

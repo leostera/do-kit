@@ -1,4 +1,9 @@
 import { type ListPage, type ListQuery, type Position, type RowShape, type ShardPage, type TableSchema, type ShardPageRequest, type Versioned, type WriteResult } from "./schema.js";
+/**
+ * Rows to ask each of `shards` shards for, to fill `wanted`: keys spread over shards by hash, so
+ * each holds about wanted/shards of a page; twice that, plus two, rarely comes up short.
+ */
+export declare function perShardLimit(wanted: number, shards: number): number;
 export declare class TableClient<Row extends RowShape> {
     readonly name: string;
     private readonly client;

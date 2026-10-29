@@ -166,6 +166,12 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     return out;
   }
 
+  /** How many shards this client knows of: one more than its known splits. There may be more. */
+  async knownShardCount(): Promise<number> {
+    await this.loadCache();
+    return this.splits.size + 1;
+  }
+
   /** The known splits (for tests and operators). */
   knownSplits(): string[] {
     return [...this.splits].sort();

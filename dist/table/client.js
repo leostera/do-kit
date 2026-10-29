@@ -1,6 +1,15 @@
 // The client of a sharded table: routes rows by key and merges listing pages from every shard.
 import { sharded } from "../sharded/client.js";
 import { comparePositions, decodeCursor, encodeCursor, pageRequest, queryFingerprint, } from "./schema.js";
+/** Rounds of shard calls one page may take to fill up, when shards returned less than needed. */
+const MAX_ROUNDS = 3;
+/**
+ * Rows to ask each of `shards` shards for, to fill `wanted`: keys spread over shards by hash, so
+ * each holds about wanted/shards of a page; twice that, plus two, rarely comes up short.
+ */
+export function perShardLimit(wanted, shards) {
+    return Math.min(wanted, Math.ceil(wanted / shards) * 2 + 2);
+}
 export class TableClient {
     name;
     client;
@@ -44,11 +53,21 @@ export class TableClient {
         const fingerprint = queryFingerprint(pageRequest(query, null));
         const after = query.cursor ? decodeCursor(query.cursor, fingerprint) : null;
         const request = pageRequest(query, after);
-        const pages = (await this.client.scan("tablePage", request));
-        const merged = mergePages(pages, request);
+        const rows = [];
+        let next = after;
+        for (let round = 0; round < MAX_ROUNDS; round++) {
+            const wanted = request.limit - rows.length;
+            const limit = perShardLimit(wanted, await this.client.knownShardCount());
+            const pages = (await this.client.scan("tablePage", { ...request, limit, after: next }));
+            const merged = mergePages(pages, { limit: wanted, direction: request.direction });
+            rows.push(...merged.rows);
+            next = merged.next;
+            if (next === null || rows.length === request.limit)
+                break;
+        }
         return {
-            rows: merged.rows.map(({ row, version }) => ({ row: row, version })),
-            cursor: merged.next === null ? null : encodeCursor(fingerprint, merged.next),
+            rows: rows.map(({ row, version }) => ({ row: row, version })),
+            cursor: next === null ? null : encodeCursor(fingerprint, next),
         };
     }
     /** Every row of a query, page after page. */
