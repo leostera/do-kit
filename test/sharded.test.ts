@@ -325,3 +325,15 @@ test("work a shard schedules much later does not hold back a split's cleanup", a
 test("a sharded object that overrides alarm() is refused, pointing at onAlarm", async () => {
   await expect(call("oldAlarm", `old-${Date.now()}`, "get", ["a"])).rejects.toThrow("onAlarm");
 }, 60_000);
+
+test("an isolate keeps the splits of the objects it used last, up to a bound", async () => {
+  const name = `bounded-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  await call("m", name, "get", KEYS);
+  expect(await post<string[]>("/splits", { cls: "m", name })).toEqual([""]);
+  await post("/useManyObjects", { cls: "m", name });
+  expect(await post<string[]>("/splits", { cls: "m", name })).toEqual([]);
+  // Forgetting costs hops, never answers.
+  expect(await call<number[]>("m", name, "get", KEYS)).toEqual(KEYS.map(() => 1));
+}, 60_000);

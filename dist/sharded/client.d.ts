@@ -19,6 +19,12 @@ type Result<F> = F extends (...args: never[]) => infer R ? Awaited<R> : never;
 /** Keys that had to go to one shard belong to several (nothing was applied). */
 export declare class SpansShards extends Error {
 }
+/**
+ * Objects whose splits an isolate keeps, the most recently used: a Worker that reaches one object
+ * per account would otherwise grow these for the isolate's life. A forgotten object costs a read
+ * of the colo cache, or a few hops.
+ */
+export declare const MAX_KNOWN_OBJECTS = 10000;
 export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly namespace;
     private readonly name;
@@ -26,6 +32,8 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly identity;
     constructor(namespace: DurableObjectNamespace<T>, name: string);
     private get splits();
+    /** Marks this object as just used, so it is the last its isolate forgets. */
+    private touch;
     /** The deepest known node owning a hash. */
     private shardFor;
     private stub;
