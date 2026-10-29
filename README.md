@@ -88,7 +88,7 @@ protected override splitPolicy: SplitPolicy = {
 };
 ```
 
-`callsPerSecond` is a per-leaf threshold. Each call weighs `1 + keys.length / keysPerCall`; `keysPerCall` defaults to 25. `maxDepth` caps the tree depth, and `initialDepth` is optional and defaults to zero. This is a request-rate heuristic, not a CPU or storage-capacity measurement. Tune it against your workload and test on the Workers runtime you deploy to.
+`callsPerSecond` is a per-leaf threshold. Each call weighs `1 + keys.length / keysPerCall`; `keysPerCall` defaults to 25. `maxDepth` caps the tree depth, and `initialDepth` is optional and defaults to zero. This is a request-rate heuristic, not a CPU or storage-capacity measurement. Tune it against your workload and test on the Workers runtime you deploy to. See [performance expectations and benchmark guidance](docs/performance.md) for the reference Durable Object capacity data, limitations, and a fair comparison methodology.
 
 ## Subclass contract and caveats
 
