@@ -268,6 +268,30 @@ if (controlTargets.length > 1) {
   });
 }
 
+// ---- ShardedTable: the same table on 1, 4, 16 and 64 shards (bench/results/table.json) ----
+const tableFile = join(import.meta.dir, "results", "table.json");
+const tableResults = await readFile(tableFile, "utf8").then((t) => JSON.parse(t) as { points: (Omit<Point, "target" | "operation"> & { target: string; operation: "read" | "write" | "list" })[] }).catch(() => null);
+if (tableResults) {
+  const SHARDS = [
+    ["table-1", "1 shard: one Durable Object", "#667085"],
+    ["table-4", "4 shards", "#2e86ab"],
+    ["table-16", "16 shards", "#f79009"],
+    ["table-64", "64 shards", "#e4572e"],
+  ] as const;
+  const tLevels = [...new Set(tableResults.points.map((p) => p.concurrency))].sort((a, b) => a - b);
+  const tSeries = (operation: string, value: (p: Point) => number) =>
+    SHARDS.filter(([t]) => tableResults.points.some((p) => p.target === t && p.operation === operation)).map(([t, label, color]) => ({
+      label,
+      color,
+      points: tableResults.points.filter((p) => p.target === t && p.operation === operation).map((p): [number, number] => [p.concurrency, value(p as unknown as Point)]),
+    }));
+  const tSub = (what: string) => `ShardedTable, 10,000 rows of 1 KiB, two indexes. ${what}, 10 s per point`;
+  graphs["table-list-throughput"] = chart({ title: "Table listings: pages per second", subtitle: tSub("One page of 50 rows newest first, each caller walking its own cursor"), xLabel: "Concurrent in-flight pages", yLabel: "pages / s", xTicks: tLevels, series: tSeries("list", (p) => p.operationsPerSecond) });
+  graphs["table-list-p99"] = chart({ title: "Table listings: p99 latency", subtitle: tSub("One page of 50 rows newest first"), xLabel: "Concurrent in-flight pages", yLabel: "p99 latency (ms)", xTicks: tLevels, series: tSeries("list", (p) => p.latencyMs.p99) });
+  graphs["table-write-throughput"] = chart({ title: "Table writes: rows per second", subtitle: tSub("One-row puts that update both indexes"), xLabel: "Concurrent in-flight writes", yLabel: "writes / s", xTicks: tLevels, series: tSeries("write", (p) => p.operationsPerSecond) });
+  graphs["table-read-throughput"] = chart({ title: "Table reads: rows per second", subtitle: tSub("One-row gets by primary key"), xLabel: "Concurrent in-flight reads", yLabel: "reads / s", xTicks: tLevels, series: tSeries("read", (p) => p.operationsPerSecond) });
+}
+
 for (const [name, svg] of Object.entries(graphs)) await writeFile(join(outDir, `${name}.svg`), svg);
 console.log(`Wrote ${Object.keys(graphs).length} graphs to docs/bench/`);
 

@@ -16,6 +16,8 @@ export interface PutOptions {
 export declare abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObject<Env, never> {
     protected abstract readonly table: TableSchema<Row>;
     private migrated;
+    /** SQLite's index on the primary key, for listings in key order. */
+    private keyIndex;
     tableGet(keys: readonly string[], _payloads: null): Promise<(Versioned<Row> | null)[]>;
     tablePut(keys: readonly string[], payloads: readonly {
         readonly row: Row;
@@ -43,8 +45,9 @@ export declare abstract class ShardedTable<Env, Row extends RowShape> extends Sh
     /** Deletes rows (and counts) of hashes this shard gave away, a batch at a time. */
     protected cleanupForeign(owns: (key: string) => boolean, limit: number): number;
     private page;
-    /** Rows strictly after `position` in listing order, as SQLite orders (nulls first ascending). */
-    private after;
+    private indexes;
+    /** A row's key in an index, from its stored values. */
+    private indexKey;
     private condition;
     /** Brings this shard's storage up to the schema: once per instance, on its first use. */
     private migrate;

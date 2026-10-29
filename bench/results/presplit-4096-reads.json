@@ -1,0 +1,68 @@
+{
+  "generatedAt": "2026-10-29T19:42:08.248Z",
+  "suite": "wide-1793302582128",
+  "target": "presplit-4096",
+  "note": "each level warmed until throughput improved by under 10% (at most 6 warmups), then measured once for 10 s",
+  "points": [
+    {
+      "target": "presplit-4096",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 4096,
+      "durationMs": 10000,
+      "keyCount": 100000,
+      "payloadBytes": 1024,
+      "objectName": "wide-1793301468053-uniform",
+      "driverCount": 256,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "internal error; reference = f7ql7d2lsoc390ghsls95u3l"
+      ],
+      "successes": 280196,
+      "errors": 1,
+      "elapsedMs": 13322,
+      "operationsPerSecond": 21032.577691037382,
+      "mebibytesPerSecond": 20.539626651403694,
+      "latencyMs": {
+        "p50": 90,
+        "p95": 438,
+        "p99": 630,
+        "max": 3762
+      },
+      "topology": {
+        "leaves": 4096,
+        "rows": 46,
+        "depth": 12
+      }
+    },
+    {
+      "target": "presplit-4096",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 16384,
+      "durationMs": 10000,
+      "keyCount": 100000,
+      "payloadBytes": 1024,
+      "objectName": "wide-1793301468053-uniform",
+      "driverCount": 1024,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 1005107,
+      "errors": 0,
+      "elapsedMs": 12379,
+      "operationsPerSecond": 81194.52298247031,
+      "mebibytesPerSecond": 79.29152635006866,
+      "latencyMs": {
+        "p50": 107,
+        "p95": 466,
+        "p99": 691,
+        "max": 3083
+      },
+      "topology": {
+        "leaves": 4096,
+        "rows": 46,
+        "depth": 12
+      }
+    }
+  ]
+}

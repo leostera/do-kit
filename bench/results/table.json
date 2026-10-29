@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-c9abb849593b",
+  "generatedAt": "2026-10-29T18:59:59.286Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1,
+      16,
+      64,
+      256,
+      1024
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "table-1",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-c9abb849593b-table-1-write-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "successes": 139,
+      "errors": 0,
+      "elapsedMs": 10029,
+      "operationsPerSecond": 13.859806560973178,
+      "mebibytesPerSecond": 0.013534967344700369,
+      "latencyMs": {
+        "p50": 61,
+        "p95": 138,
+        "p99": 292,
+        "max": 373
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 148,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-c9abb849593b-table-1-write-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 1253,
+      "errors": 0,
+      "elapsedMs": 10222,
+      "operationsPerSecond": 122.57875171199375,
+      "mebibytesPerSecond": 0.11970581221874389,
+      "latencyMs": {
+        "p50": 97,
+        "p95": 219,
+        "p99": 353,
+        "max": 509
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 172,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-c9abb849593b-table-1-write-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 3924,
+      "errors": 0,
+      "elapsedMs": 10380,
+      "operationsPerSecond": 378.0346820809248,
+      "mebibytesPerSecond": 0.36917449421965315,
+      "latencyMs": {
+        "p50": 132,
+        "p95": 379,
+        "p99": 488,
+        "max": 843
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 607,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-c9abb849593b-table-1-write-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 6281,
+      "errors": 0,
+      "elapsedMs": 10885,
+      "operationsPerSecond": 577.0326136885623,
+      "mebibytesPerSecond": 0.5635084118052366,
+      "latencyMs": {
+        "p50": 295,
+        "p95": 952,
+        "p99": 1102,
+        "max": 1303
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 764,
+        "depth": 0
+      }
+    }
+  ],
+  "splits": []
+}

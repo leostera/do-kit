@@ -1,0 +1,734 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-25559f035755",
+  "generatedAt": "2026-10-29T19:38:00.825Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1,
+      16,
+      64,
+      256,
+      1024
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "table-1",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-read-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "successes": 760,
+      "errors": 0,
+      "elapsedMs": 10005,
+      "operationsPerSecond": 75.96201899050475,
+      "mebibytesPerSecond": 0.07418165917041479,
+      "latencyMs": {
+        "p50": 12,
+        "p95": 18,
+        "p99": 36,
+        "max": 1140
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 2738,
+      "errors": 0,
+      "elapsedMs": 10142,
+      "operationsPerSecond": 269.96647604022877,
+      "mebibytesPerSecond": 0.2636391367580359,
+      "latencyMs": {
+        "p50": 42,
+        "p95": 152,
+        "p99": 220,
+        "max": 483
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 8521,
+      "errors": 0,
+      "elapsedMs": 10430,
+      "operationsPerSecond": 816.9702780441036,
+      "mebibytesPerSecond": 0.7978225371524449,
+      "latencyMs": {
+        "p50": 45,
+        "p95": 276,
+        "p99": 407,
+        "max": 1815
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 12609,
+      "errors": 0,
+      "elapsedMs": 11007,
+      "operationsPerSecond": 1145.5437448896157,
+      "mebibytesPerSecond": 1.1186950633687653,
+      "latencyMs": {
+        "p50": 115,
+        "p95": 746,
+        "p99": 1119,
+        "max": 2974
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-read-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "successes": 14381,
+      "errors": 0,
+      "elapsedMs": 10627,
+      "operationsPerSecond": 1353.251152724193,
+      "mebibytesPerSecond": 1.3215343288322197,
+      "latencyMs": {
+        "p50": 703,
+        "p95": 1258,
+        "p99": 1385,
+        "max": 1847
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-4",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-4-read-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "successes": 871,
+      "errors": 0,
+      "elapsedMs": 10011,
+      "operationsPerSecond": 87.0042952751973,
+      "mebibytesPerSecond": 0.08496513210468486,
+      "latencyMs": {
+        "p50": 12,
+        "p95": 19,
+        "p99": 29,
+        "max": 66
+      },
+      "topology": {
+        "leaves": 4,
+        "rows": 10000,
+        "depth": 2
+      }
+    },
+    {
+      "target": "table-4",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-4-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 3309,
+      "errors": 0,
+      "elapsedMs": 10186,
+      "operationsPerSecond": 324.8576477518162,
+      "mebibytesPerSecond": 0.317243796632633,
+      "latencyMs": {
+        "p50": 30,
+        "p95": 153,
+        "p99": 194,
+        "max": 408
+      },
+      "topology": {
+        "leaves": 4,
+        "rows": 10000,
+        "depth": 2
+      }
+    },
+    {
+      "target": "table-4",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-4-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 12337,
+      "errors": 0,
+      "elapsedMs": 10450,
+      "operationsPerSecond": 1180.5741626794259,
+      "mebibytesPerSecond": 1.1529044557416268,
+      "latencyMs": {
+        "p50": 23,
+        "p95": 247,
+        "p99": 366,
+        "max": 582
+      },
+      "topology": {
+        "leaves": 4,
+        "rows": 10000,
+        "depth": 2
+      }
+    },
+    {
+      "target": "table-4",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-4-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 21158,
+      "errors": 0,
+      "elapsedMs": 11028,
+      "operationsPerSecond": 1918.5709104098657,
+      "mebibytesPerSecond": 1.8736044046971345,
+      "latencyMs": {
+        "p50": 55,
+        "p95": 664,
+        "p99": 975,
+        "max": 1696
+      },
+      "topology": {
+        "leaves": 4,
+        "rows": 10000,
+        "depth": 2
+      }
+    },
+    {
+      "target": "table-4",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-4-read-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "successes": 32605,
+      "errors": 0,
+      "elapsedMs": 11144,
+      "operationsPerSecond": 2925.7896625987078,
+      "mebibytesPerSecond": 2.8572164673815506,
+      "latencyMs": {
+        "p50": 243,
+        "p95": 883,
+        "p99": 1201,
+        "max": 1971
+      },
+      "topology": {
+        "leaves": 4,
+        "rows": 10000,
+        "depth": 2
+      }
+    },
+    {
+      "target": "table-16",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-16-read-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "successes": 851,
+      "errors": 0,
+      "elapsedMs": 10014,
+      "operationsPerSecond": 84.98102656281206,
+      "mebibytesPerSecond": 0.08298928375274615,
+      "latencyMs": {
+        "p50": 12,
+        "p95": 18,
+        "p99": 27,
+        "max": 156
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "table-16",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-16-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 2601,
+      "errors": 0,
+      "elapsedMs": 10207,
+      "operationsPerSecond": 254.8251200156755,
+      "mebibytesPerSecond": 0.24885265626530811,
+      "latencyMs": {
+        "p50": 44,
+        "p95": 161,
+        "p99": 221,
+        "max": 1998
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "table-16",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-16-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 10189,
+      "errors": 0,
+      "elapsedMs": 10390,
+      "operationsPerSecond": 980.6544754571703,
+      "mebibytesPerSecond": 0.9576703861886429,
+      "latencyMs": {
+        "p50": 45,
+        "p95": 206,
+        "p99": 238,
+        "max": 1810
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "table-16",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-16-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 16610,
+      "errors": 0,
+      "elapsedMs": 11140,
+      "operationsPerSecond": 1491.0233393177737,
+      "mebibytesPerSecond": 1.4560774798025133,
+      "latencyMs": {
+        "p50": 114,
+        "p95": 456,
+        "p99": 624,
+        "max": 1762
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "table-16",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-16-read-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "successes": 58633,
+      "errors": 0,
+      "elapsedMs": 10841,
+      "operationsPerSecond": 5408.4494050364365,
+      "mebibytesPerSecond": 5.281688872105895,
+      "latencyMs": {
+        "p50": 111,
+        "p95": 546,
+        "p99": 707,
+        "max": 1673
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      }
+    },
+    {
+      "target": "table-64",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-64-read-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "successes": 567,
+      "errors": 0,
+      "elapsedMs": 10015,
+      "operationsPerSecond": 56.61507738392411,
+      "mebibytesPerSecond": 0.05528816150773839,
+      "latencyMs": {
+        "p50": 18,
+        "p95": 31,
+        "p99": 43,
+        "max": 64
+      },
+      "topology": {
+        "leaves": 64,
+        "rows": 10000,
+        "depth": 6
+      }
+    },
+    {
+      "target": "table-64",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-64-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 1918,
+      "errors": 0,
+      "elapsedMs": 12354,
+      "operationsPerSecond": 155.25335923587502,
+      "mebibytesPerSecond": 0.1516146086287842,
+      "latencyMs": {
+        "p50": 32,
+        "p95": 330,
+        "p99": 944,
+        "max": 2517
+      },
+      "topology": {
+        "leaves": 64,
+        "rows": 10000,
+        "depth": 6
+      }
+    },
+    {
+      "target": "table-64",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-64-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 9427,
+      "errors": 0,
+      "elapsedMs": 10229,
+      "operationsPerSecond": 921.595463877212,
+      "mebibytesPerSecond": 0.8999955701925898,
+      "latencyMs": {
+        "p50": 42,
+        "p95": 173,
+        "p99": 204,
+        "max": 983
+      },
+      "topology": {
+        "leaves": 64,
+        "rows": 10000,
+        "depth": 6
+      }
+    },
+    {
+      "target": "table-64",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-64-read-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 18421,
+      "errors": 0,
+      "elapsedMs": 11682,
+      "operationsPerSecond": 1576.8703989042972,
+      "mebibytesPerSecond": 1.5399124989299777,
+      "latencyMs": {
+        "p50": 54,
+        "p95": 450,
+        "p99": 517,
+        "max": 2976
+      },
+      "topology": {
+        "leaves": 64,
+        "rows": 10000,
+        "depth": 6
+      }
+    },
+    {
+      "target": "table-64",
+      "operation": "read",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-64-read-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "successes": 64094,
+      "errors": 0,
+      "elapsedMs": 12426,
+      "operationsPerSecond": 5158.055689682923,
+      "mebibytesPerSecond": 5.0371637594559795,
+      "latencyMs": {
+        "p50": 96,
+        "p95": 473,
+        "p99": 566,
+        "max": 3314
+      },
+      "topology": {
+        "leaves": 64,
+        "rows": 10000,
+        "depth": 6
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "list",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-list-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "successes": 96,
+      "errors": 140,
+      "elapsedMs": 10015,
+      "operationsPerSecond": 9.585621567648527,
+      "mebibytesPerSecond": 0.46804792810783824,
+      "latencyMs": {
+        "p50": 20,
+        "p95": 115,
+        "p99": 138,
+        "max": 160
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "list",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-list-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 96,
+      "errors": 818,
+      "elapsedMs": 10262,
+      "operationsPerSecond": 9.354901578639641,
+      "mebibytesPerSecond": 0.4567823036445137,
+      "latencyMs": {
+        "p50": 43,
+        "p95": 993,
+        "p99": 1836,
+        "max": 1952
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "list",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-list-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 141,
+      "errors": 283,
+      "elapsedMs": 12253,
+      "operationsPerSecond": 11.507385946298866,
+      "mebibytesPerSecond": 0.5618840794091243,
+      "latencyMs": {
+        "p50": 242,
+        "p95": 5910,
+        "p99": 5964,
+        "max": 5990
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "list",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-list-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "successes": 179,
+      "errors": 1094,
+      "elapsedMs": 13490,
+      "operationsPerSecond": 13.269088213491475,
+      "mebibytesPerSecond": 0.6479046979243884,
+      "latencyMs": {
+        "p50": 1390,
+        "p95": 5996,
+        "p99": 6045,
+        "max": 6639
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    },
+    {
+      "target": "table-1",
+      "operation": "list",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-25559f035755-table-1-list-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "successes": 175,
+      "errors": 990,
+      "elapsedMs": 14343,
+      "operationsPerSecond": 12.201073694485114,
+      "mebibytesPerSecond": 0.595755551488531,
+      "latencyMs": {
+        "p50": 14071,
+        "p95": 14272,
+        "p99": 14307,
+        "max": 14343
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10000,
+        "depth": 0
+      }
+    }
+  ],
+  "splits": []
+}

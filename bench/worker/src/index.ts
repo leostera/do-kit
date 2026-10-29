@@ -1,19 +1,24 @@
 import { DurableObject } from "cloudflare:workers";
 import { nodeName, sharded, ShardedObject, shardObjectName, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
+import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
 import { splittable as twoCopySplittable, SplittableObject as TwoCopySplittableObject } from "./two-copy/index.ts";
 import { splittable as legacySplittable, SplittableObject as LegacySplittableObject } from "./legacy/index.ts";
 
 const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096";
-const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096"];
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget;
+const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64"];
+/** A ShardedTable that starts as this many shards and never splits by load: "table-1" is one object. */
+type TableTarget = "table-1" | "table-4" | "table-16" | "table-64";
+const isTable = (t: Target): t is TableTarget => t.startsWith("table-");
 /** Drivers per fleet: one fleet object starts and gathers this many drivers, as one Worker did before. */
 const DRIVERS_PER_FLEET = 256;
 /** The most drivers one measurement starts (32 fleets). */
 const MAX_DRIVERS = 8192;
 /** Calls each driver keeps in flight: one driver completes only about 90 calls/s, however many it keeps. */
 const CALLS_PER_DRIVER = 16;
-type Operation = "read" | "write";
+/** "list": one page of 50 rows, newest first, each worker walking its own cursor (tables only). */
+type Operation = "read" | "write" | "list";
 /**
  * How keys are chosen: "uniform" over `keyCount` keys, one "hot" key, or "control-plane": a handful
  * (`keyCount`) of popular objects, mostly read. Key shape does not matter beyond that: keys are
@@ -57,6 +62,55 @@ interface Env {
   readonly PRESPLIT: DurableObjectNamespace<PresplitObject>;
   readonly PRESPLIT_4096: DurableObjectNamespace<WidePresplitObject>;
   readonly BENCH_FLEETS: DurableObjectNamespace<BenchFleet>;
+  readonly TABLE_1: DurableObjectNamespace<Table1>;
+  readonly TABLE_4: DurableObjectNamespace<Table4>;
+  readonly TABLE_16: DurableObjectNamespace<Table16>;
+  readonly TABLE_64: DurableObjectNamespace<Table64>;
+}
+
+// ---- Sharded tables: the same rows, indexes and queries on 1, 4, 16 and 64 shards ----
+
+type BenchRow = { name: string; createdAt: number; owner: string; size: number; payload: string };
+const benchRows = defineTable<BenchRow>({
+  primaryKey: "name",
+  columns: { name: "text", createdAt: "integer", owner: "text", size: "integer", payload: "text" },
+  indexes: { byCreated: ["createdAt"], byOwner: ["owner", "createdAt"] },
+});
+function benchRow(key: string, payloadBytes: number): BenchRow {
+  return { name: key, createdAt: Date.now(), owner: `owner-${key.length % 16}`, size: payloadBytes, payload: "x".repeat(payloadBytes) };
+}
+
+abstract class TableBench extends ShardedTable<Env, BenchRow> {
+  protected table = benchRows;
+}
+const tablePolicy = (depth: number): SplitPolicy => ({ callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, initialDepth: depth, copy: "native" });
+export class Table1 extends TableBench {
+  protected override splitPolicy = tablePolicy(0);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.TABLE_1 as never;
+  }
+}
+export class Table4 extends TableBench {
+  protected override splitPolicy = tablePolicy(2);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.TABLE_4 as never;
+  }
+}
+export class Table16 extends TableBench {
+  protected override splitPolicy = tablePolicy(4);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.TABLE_16 as never;
+  }
+}
+export class Table64 extends TableBench {
+  protected override splitPolicy = tablePolicy(6);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.TABLE_64 as never;
+  }
+}
+function tableClient(env: Env, target: TableTarget, name: string): TableClient<BenchRow> {
+  const ns = { "table-1": env.TABLE_1, "table-4": env.TABLE_4, "table-16": env.TABLE_16, "table-64": env.TABLE_64 }[target];
+  return table(ns as never, name, benchRows);
 }
 
 interface MeasureConfig {
@@ -82,6 +136,8 @@ interface DriverResult {
   /** Non-empty buckets only, as [bucket, count]: a dense histogram per driver is too big to gather from many. */
   readonly latencyMs: readonly (readonly number[])[];
   readonly maxLatencyMs: number;
+  /** The first failed call's error, to tell what failed. */
+  readonly errorSample?: string;
 }
 
 abstract class KeyValueBase<EnvT> extends DurableObject<EnvT> {
@@ -160,7 +216,7 @@ export class WidePresplitObject extends SplitObject {
 }
 
 /** The namespace of a sharded target. */
-function shardedNamespace(env: Env, target: "split" | "presplit" | "presplit-4096"): DurableObjectNamespace<SplitObject> {
+function shardedNamespace(env: Env, target: Target): DurableObjectNamespace<SplitObject> {
   if (target === "presplit") return env.PRESPLIT;
   if (target === "presplit-4096") return env.PRESPLIT_4096;
   return env.SPLIT;
@@ -254,6 +310,7 @@ function keyFor(config: MeasureConfig, seq: number): string {
 
 /** Driver results merged: a fleet's drivers, or every fleet's. */
 interface MergedResult {
+  readonly errorSample?: string;
   readonly successes: number;
   readonly errors: number;
   readonly bytes: number;
@@ -270,6 +327,7 @@ function merge(results: readonly (DriverResult & { readonly failedDrivers?: numb
   let bytes = 0;
   let elapsedMs = 0;
   let maxLatencyMs = 0;
+  let errorSample: string | undefined;
   for (const result of results) {
     successes += result.successes;
     errors += result.errors;
@@ -277,9 +335,10 @@ function merge(results: readonly (DriverResult & { readonly failedDrivers?: numb
     elapsedMs = Math.max(elapsedMs, result.elapsedMs);
     maxLatencyMs = Math.max(maxLatencyMs, result.maxLatencyMs);
     failedDrivers += result.failedDrivers ?? 0;
+    errorSample ??= result.errorSample;
     for (const [bucket, count] of result.latencyMs) buckets.set(bucket!, (buckets.get(bucket!) ?? 0) + count!);
   }
-  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets] };
+  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSample };
 }
 
 function driverStub(env: Env, config: { readonly objectName: string; readonly driverIndex: number }): DurableObjectStub<BenchDriver> {
@@ -312,6 +371,23 @@ export class BenchDriver extends DurableObject<Env> {
       if (config.driverIndex !== 0) return;
       const keys = Array.from({ length: config.keyCount }, (_, i) => `config-${i}`);
       await this.write(config.target, config.objectName, keys, keys.map(() => value));
+      return;
+    }
+    if (isTable(config.target)) {
+      if (config.operation === "write" || config.driverIndex !== 0) return;
+      const t = tableClient(this.env, config.target, config.objectName);
+      for (let i = 0; i < config.keyCount; i += 100) {
+        const rows = Array.from({ length: Math.min(100, config.keyCount - i) }, (_, j) => ({ row: benchRow(`key-${i + j}`, config.payloadBytes) }));
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await t.putMany(rows);
+            break;
+          } catch (error) {
+            if (attempt >= 5) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 200 * 2 ** attempt));
+          }
+        }
+      }
       return;
     }
     if (config.operation !== "read" || config.distribution !== "uniform" && config.distribution !== "hot") return;
@@ -365,8 +441,40 @@ export class BenchDriver extends DurableObject<Env> {
     let bytes = 0;
     let maxLatencyMs = 0;
     let sequence = config.driverIndex;
+    let errorSample: string | undefined;
+
+    const tableWorker = async (): Promise<void> => {
+      const t = tableClient(this.env, config.target as TableTarget, config.objectName);
+      let cursor: string | null = null;
+      while (Date.now() < stopAt) {
+        const key = keyFor(config, sequence++);
+        const before = performance.now();
+        try {
+          if (config.operation === "write") {
+            await t.put(benchRow(key, config.payloadBytes));
+            bytes += config.payloadBytes;
+          } else if (config.operation === "read") {
+            const found = await t.get(key);
+            bytes += found ? config.payloadBytes : 0;
+          } else {
+            const page: Awaited<ReturnType<typeof t.list>> = await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor });
+            cursor = page.cursor;
+            bytes += page.rows.length * config.payloadBytes;
+          }
+          successes++;
+        } catch (error) {
+          errors++;
+          errorSample ??= String(error).slice(0, 500);
+        } finally {
+          const elapsed = performance.now() - before;
+          maxLatencyMs = Math.max(maxLatencyMs, elapsed);
+          latencyMs[Math.min(120_000, Math.floor(elapsed))]++;
+        }
+      }
+    };
 
     const worker = async (): Promise<void> => {
+      if (isTable(config.target)) return tableWorker();
       while (Date.now() < stopAt) {
         const seq = sequence++;
         const key = keyFor(config, seq);
@@ -395,7 +503,7 @@ export class BenchDriver extends DurableObject<Env> {
     await Promise.all(Array.from({ length: config.concurrency }, worker));
     const sparse: [number, number][] = [];
     latencyMs.forEach((count, bucket) => count && sparse.push([bucket, count]));
-    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs };
+    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSample };
   }
 
   private async write(target: Target, name: string, keys: readonly string[], values: readonly string[]): Promise<void> {
@@ -429,7 +537,8 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   const keyCount = body.keyCount ?? 10_000;
   const payloadBytes = body.payloadBytes ?? 1024;
   if (!TARGETS.includes(target as Target)) throw new Error(`target must be one of ${TARGETS.join(", ")}`);
-  if (operation !== "read" && operation !== "write") throw new Error("operation must be read or write");
+  if (operation !== "read" && operation !== "write" && operation !== "list") throw new Error("operation must be read, write or list");
+  if (operation === "list" && !isTable(target as Target)) throw new Error("list is for table targets");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
   if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > MAX_DRIVERS * CALLS_PER_DRIVER) throw new Error(`concurrency must be an integer from 1 to ${MAX_DRIVERS * CALLS_PER_DRIVER}`);
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");
@@ -662,7 +771,7 @@ export default {
     const settled = await Promise.allSettled(fleets.map((fleet) => fleet.stub.measure(fleet.configs.map((config) => ({ ...config, startAt })))));
     const fleetResults = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
     const lostDrivers = settled.reduce((n, r, i) => n + (r.status === "rejected" ? fleets[i]!.configs.length : 0), 0);
-    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs } = merge(fleetResults, lostDrivers);
+    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSample } = merge(fleetResults, lostDrivers);
     const histogram = new Array<number>(120_001).fill(0);
     for (const [bucket, count] of latencyMs) histogram[bucket!] = count!;
 
@@ -670,6 +779,12 @@ export default {
     if (input.target === "split") topology = await describeTree(env, input.objectName);
     if (input.target === "legacy") topology = await describeLegacyTree(env, input.objectName);
     if (input.target === "presplit") topology = await describeTree(env, input.objectName, "", env.PRESPLIT as never);
+    if (isTable(input.target)) {
+      const leaves = Number(input.target.slice("table-".length));
+      // Counting asks every shard: one still overloaded from the run answers nothing.
+      const rows = await tableClient(env, input.target, input.objectName).count().catch(() => -1);
+      topology = { leaves, rows, depth: Math.log2(leaves) };
+    }
     // Walking 4,096 shards is 8,191 calls. A presplit tree is complete, so the depth of the shards on
     // its first and last paths gives it: the root's object and the object of "1" (bits "1000…").
     if (input.target === "presplit-4096") {
@@ -690,6 +805,7 @@ export default {
       mebibytesPerSecond: bytes / (1024 * 1024) / (elapsedMs / 1000),
       latencyMs: { p50: percentile(histogram, 0.5), p95: percentile(histogram, 0.95), p99: percentile(histogram, 0.99), max: Math.round(maxLatencyMs * 100) / 100 },
       topology,
+      errorSample: errorSample ?? null,
     });
   },
 };
