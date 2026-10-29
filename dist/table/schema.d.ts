@@ -92,8 +92,12 @@ export declare function compareText(a: string, b: string): number;
  * 0x00 escaped as 0x00 0xFF, then 0x00): nulls first ascending, last descending.
  */
 export declare function encodeIndexKey(values: readonly SqlValue[]): string;
-/** A short fingerprint of what a cursor belongs to: the index, direction and conditions. */
-export declare function queryFingerprint(request: Pick<ShardPageRequest, "index" | "direction" | "where">): string;
+/**
+ * A short fingerprint of what a cursor belongs to: the index (its name and columns, so a cursor
+ * from before an index was redefined is refused, not resumed at a meaningless position), the
+ * direction and the conditions.
+ */
+export declare function queryFingerprint(request: Pick<ShardPageRequest, "index" | "direction" | "where">, columns: readonly string[]): string;
 export declare function encodeCursor(fingerprint: string, position: Position): string;
 export declare function decodeCursor(cursor: string, fingerprint: string): Position;
 //# sourceMappingURL=schema.d.ts.map

@@ -47,6 +47,7 @@ export function perShardLimit(wanted: number, shards: number): number {
 export class TableClient<Row extends RowShape> {
   private readonly client: Untyped;
   private readonly primaryKey: keyof Row & string;
+  private readonly indexes: Readonly<Record<string, readonly string[]>>;
 
   constructor(
     namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>,
@@ -55,6 +56,7 @@ export class TableClient<Row extends RowShape> {
     options: ShardedClientOptions = {},
   ) {
     this.primaryKey = schema.primaryKey;
+    this.indexes = schema.indexes ?? {};
     this.client = sharded(namespace as never, name, options) as ShardedClient<never> as unknown as Untyped;
   }
 
@@ -96,7 +98,8 @@ export class TableClient<Row extends RowShape> {
    * filter ran out of budget) and still have a cursor.
    */
   async list(query: ListQuery = {}): Promise<ListPage<Row>> {
-    const fingerprint = queryFingerprint(pageRequest(query, null));
+    const request0 = pageRequest(query, null);
+    const fingerprint = queryFingerprint(request0, request0.index === null ? [] : (this.indexes[request0.index] ?? []));
     const after = query.cursor ? decodeCursor(query.cursor, fingerprint) : null;
     const request = pageRequest(query, after);
     const rows: ShardPage["rows"][number][] = [];

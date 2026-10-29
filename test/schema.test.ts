@@ -1,7 +1,7 @@
-// Column values as a sharded table stores them: checked against the column's type, never
-// silently changed into something else.
+// A sharded table's schema helpers: column values checked against their type (never silently
+// changed into something else), and what a listing cursor belongs to.
 import { expect, test } from "bun:test";
-import { defineTable, encodeValue } from "../src/table/schema.ts";
+import { defineTable, encodeValue, queryFingerprint } from "../src/table/schema.ts";
 
 const schema = defineTable<{ id: string; n: number; x: number; ok: boolean; data: unknown }>({
   primaryKey: "id",
@@ -24,4 +24,10 @@ test("a value SQLite would store as something else is refused", () => {
   expect(() => encodeValue(schema, "data", () => 1)).toThrow("JSON"); // JSON.stringify gives undefined
   expect(() => encodeValue(schema, "id", null)).toThrow("primary key");
   expect(() => encodeValue(schema, "nope", 1)).toThrow("no column");
+});
+
+test("a cursor's fingerprint changes when its index is redefined under the same name", () => {
+  const request = { index: "byCreated", direction: "asc" as const, where: [] };
+  expect(queryFingerprint(request, ["createdAt"])).toBe(queryFingerprint(request, ["createdAt"]));
+  expect(queryFingerprint(request, ["createdAt"])).not.toBe(queryFingerprint(request, ["createdAt", "id"]));
 });
