@@ -13,6 +13,11 @@ export interface TableSchema<Row extends RowShape> {
 }
 /** Checks a schema and returns it: names are plain identifiers, the key is text, indexes name columns. */
 export declare function defineTable<Row extends RowShape>(schema: TableSchema<Row>): TableSchema<Row>;
+/**
+ * A column's value as SQLite stores it, checked against the column's type: `boolean` as 0/1,
+ * `json` as text. NaN is refused: SQLite would store it as null.
+ */
+export declare function encodeValue<Row extends RowShape>(schema: TableSchema<Row>, column: string, value: unknown): SqlValue;
 /** A row and its version: 1 when written first, one more on every write. */
 export interface Versioned<Row> {
     readonly row: Row;
