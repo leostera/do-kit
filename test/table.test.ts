@@ -253,3 +253,14 @@ test("a split's copy that is not claimed never runs the subclass's alarm, even w
   const original = await table<{ self: string; ran: string[] }>("flaky", name, "alarmRan", null, "");
   expect(original.ran).toContain(original.self);
 }, 60_000);
+
+test("a new index on a table with many rows lists every row", async () => {
+  const name = `evolve-many-${Date.now()}`;
+  const evolve = <T>(operation: string, ...args: unknown[]) => post<T>("/table", { cls: "evolving", name, op: operation, args });
+  const rows = makeRepos(1234);
+  for (let i = 0; i < rows.length; i += 200) await evolve("putMany", rows.slice(i, i + 200).map((row) => ({ row })));
+  await evolve("upgrade"); // adds byStars: every existing row needs its key in it
+  const listed = await evolve<Versioned[]>("all", { index: "byStars", limit: 1000 });
+  expect(listed.length).toBe(rows.length);
+  expect(new Set(listed.map((r) => r.row.name)).size).toBe(rows.length);
+}, 120_000);

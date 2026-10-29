@@ -23,6 +23,8 @@ interface IndexDef {
 const BUCKET_DIGITS = 4;
 const MAX_TABLE_DEPTH = BUCKET_DIGITS * 4;
 const CLEANUP_BATCH = 250;
+/** Rows read at a time to fill in the keys of a new index. */
+const BACKFILL_PAGE = 500;
 
 const AFFINITY: Record<ColumnType, string> = { text: "TEXT", integer: "INTEGER", real: "REAL", boolean: "INTEGER", json: "TEXT" };
 
@@ -259,9 +261,13 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     for (const ix of wanted) {
       if (!have.has(ix.keyColumn)) {
         this.db.exec(`ALTER TABLE ${TABLE} ADD COLUMN "${ix.keyColumn}" TEXT`);
-        // A new index on existing rows: fill in their keys.
-        for (const stored of this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE}`).toArray()) {
-          this.db.exec(`UPDATE ${TABLE} SET "${ix.keyColumn}" = ? WHERE ${pk} = ?`, this.indexKey(ix, stored), stored[schema.primaryKey]!);
+        // A new index on existing rows: fill in their keys, a page at a time (never every row in
+        // memory). It all commits together: the writes of one synchronous call are atomic.
+        for (let after: SqlValue = null; ; ) {
+          const page = this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE (? IS NULL OR ${pk} > ?) ORDER BY ${pk} LIMIT ?`, after, after, BACKFILL_PAGE).toArray();
+          for (const stored of page) this.db.exec(`UPDATE ${TABLE} SET "${ix.keyColumn}" = ? WHERE ${pk} = ?`, this.indexKey(ix, stored), stored[schema.primaryKey]!);
+          if (page.length < BACKFILL_PAGE) break;
+          after = page.at(-1)![schema.primaryKey]!;
         }
       }
       this.db.exec(`CREATE INDEX IF NOT EXISTS "${ix.sqlIndex}" ON ${TABLE} ("${ix.keyColumn}")`);
