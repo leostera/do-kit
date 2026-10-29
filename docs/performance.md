@@ -54,6 +54,9 @@ The throughput benchmark sends one-key writes of 1 KiB values to uniform keys fr
 
 | In flight | One Durable Object | splittable-object, 16 leaves |
 |---|---|---|
+| 1 | 43 writes/s, p50 14 ms | 9 writes/s, p50 69 ms |
+| 16 | 283 writes/s, p50 37 ms | 173 writes/s, p50 71 ms |
+| 64 | 626 writes/s, p50 49 ms | 683 writes/s, p50 67 ms |
 | 256 | 1,208 writes/s, p50 87 ms, p99 1,160 ms | 1,438 writes/s, p50 104 ms, p99 817 ms |
 | 1,024 | 1,499 writes/s, p50 613 ms, p99 1,334 ms | 5,207 writes/s, p50 103 ms, p99 709 ms |
 | 2,048 | 1,435 writes/s, p99 1,822 ms, **26,816 calls refused** | 9,960 writes/s, p50 126 ms, p99 765 ms, none refused |
@@ -66,6 +69,7 @@ The throughput benchmark sends one-key writes of 1 KiB values to uniform keys fr
 
 - **One object saturates at about 1,500 writes/s.** Past that, it queues, so its median latency at 1,024 in flight is 613 ms. Then it refuses calls: 26,816 in 10 s at 2,048 in flight. (Its 17 ms median at that level is misleading, because most of those calls failed fast.)
 - **16 leaves keep their median latency near 100 ms** while writes grow from 1,438/s to 9,960/s, and they had not saturated at the highest load we offered.
+- **At low load, one object can be faster.** With one call in flight, a leaf answered in 69 ms against 14 ms. A new leaf is placed near the object that created it, not near the caller, so some keys live farther away. Splitting pays off when one object is the bottleneck, not before.
 - **The load generator matters.** A driver Durable Object completes about 90 calls/s, however many it keeps in flight. An earlier run with 64 calls per driver capped every target near 1,500 writes/s, and made splitting look useless. The graphs above use the fixed harness.
 - **Not yet measured with this harness:** reads, an object that splits by load while measured (the run stopped with an error from the controlling Worker at 256 in flight), and a single hot key. A hot key cannot be split: it always lives on one leaf. In an earlier run, a hot key also kept triggering splits that could not help, which is a known gap in the split policy.
 
