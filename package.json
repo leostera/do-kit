@@ -1,0 +1,30 @@
+{
+  "name": "splittable-object",
+  "version": "0.1.0",
+  "description": "Self-splitting, key-routed Cloudflare Durable Objects",
+  "license": "MIT",
+  "type": "module",
+  "files": ["src"],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "test": "bun test",
+    "specs:check": "feynman check splitting-and-routing"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "beta",
+    "@cloudflare/workers-types": "5.20261027.1",
+    "@leostera/feynman": "0.10.0",
+    "@types/bun": "^1.4.4",
+    "@types/node": "26.6.5",
+    "cf": "^1.0.0-beta.23",
+    "fast-check": "^4.10.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}
