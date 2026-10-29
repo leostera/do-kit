@@ -33,7 +33,7 @@ export default defineSpec(
         callOneShard: {
           label: "Call one shard",
           description: "Requires every key to stay on one shard.",
-          sources: ["src/sharded/client.ts:95-116"],
+          sources: ["src/sharded/client.ts#ShardedClient.callOneShard", "src/sharded/client.ts#ShardedClient.route"],
           sends: [Call],
           run(s, _inputs, ctx) {
             s.callsSent++;
@@ -45,7 +45,7 @@ export default defineSpec(
       transitions: {
         [Moved]: {
           description: "Learns the split, then rejects the batch before retrying any key.",
-          sources: ["src/sharded/client.ts:91-116", "src/sharded/client.ts:124-126"],
+          sources: ["src/sharded/client.ts#ShardedClient.route", "src/sharded/client.ts#ShardedClient.learn"],
           run(s, msg) {
             s.knowsSplit = true;
             if (msg.keys.includes("L") && msg.keys.includes("R")) s.rejected = true;

@@ -33,7 +33,7 @@ export default defineSpec(
           label: "Scan all shards",
           description: "Asks both shards for their owned rows.",
           when: (s) => !s.started,
-          sources: ["src/sharded/client.ts:142-160"],
+          sources: ["src/sharded/client.ts#ShardedClient.scan"],
           sends: [Scan],
           run(s, _inputs, ctx) {
             s.started = true;
@@ -47,7 +47,7 @@ export default defineSpec(
       transitions: {
         [Rows]: {
           description: "Adds this shard's rows to the scan result.",
-          sources: ["src/sharded/client.ts:142-160"],
+          sources: ["src/sharded/client.ts#ShardedClient.scan"],
           run(s, msg) {
             for (const key of msg.keys) s.seen[key]++;
             s.pending--;
