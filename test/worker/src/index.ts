@@ -241,6 +241,19 @@ class CounterBase extends ShardedObject<Env, number> {
     return this.update(keys, () => ({ writes: new Map(keys.map((k) => [k, null])), result: keys.length }));
   }
 
+  /** Makes this shard's next split slow to start copying (beforeHandOut waits `ms`). */
+  async slowHandOut(ms: number): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_slow (ms INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_slow");
+    this.ctx.storage.sql.exec("INSERT INTO test_slow (ms) VALUES (?)", ms);
+  }
+
+  protected override async beforeHandOut(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_slow (ms INTEGER NOT NULL)");
+    const ms = this.ctx.storage.sql.exec<{ ms: number }>("SELECT ms FROM test_slow").toArray()[0]?.ms ?? 0;
+    if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   /** Schedules work on this key's shard, due in `delayMs` (a stand-in for an outbox retry). */
   async scheduleWork(keys: readonly string[], payloads: readonly number[]): Promise<null[]> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS work (key TEXT PRIMARY KEY, due INTEGER NOT NULL, fired INTEGER)");
@@ -348,7 +361,8 @@ export default {
     try {
       switch (url.pathname) {
         case "/call": {
-          const results = await sharded(ns, body.name).call(body.keys, body.method as "get", (body.payloads ?? null) as null);
+          const options = { notReadyWaitMs: (body as { notReadyWaitMs?: number }).notReadyWaitMs };
+          const results = await sharded(ns, body.name, options).call(body.keys, body.method as "get", (body.payloads ?? null) as null);
           // Back in the caller's order.
           const out: unknown[] = new Array(body.keys.length);
           for (const shard of results) shard.positions.forEach((p, j) => (out[p] = (shard.result as unknown[])[j]));
@@ -386,6 +400,9 @@ export default {
           await stub.shardedReceive(body.name, b.bits, b.epoch, false, "sharded_rows", ["key", "hash", "value"], [[b.keys[0], keyHash(b.keys[0]!), JSON.stringify(b.payloads[0])]]);
           return Response.json(null);
         }
+        case "/slowHandOut":
+          await (ns.get(ns.idFromName(shardObjectName(body.name, body.bits))) as unknown as { slowHandOut(ms: number): Promise<void> }).slowHandOut((body as unknown as { ms: number }).ms);
+          return Response.json(null);
         case "/splits":
           return Response.json(sharded(ns, body.name).knownSplits());
       }

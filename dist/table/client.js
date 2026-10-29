@@ -14,10 +14,10 @@ export class TableClient {
     name;
     client;
     primaryKey;
-    constructor(namespace, name, schema) {
+    constructor(namespace, name, schema, options = {}) {
         this.name = name;
         this.primaryKey = schema.primaryKey;
-        this.client = sharded(namespace, name);
+        this.client = sharded(namespace, name, options);
     }
     async get(key) {
         return (await this.getMany([key]))[0];
@@ -124,7 +124,7 @@ export function mergePages(pages, request) {
  * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
  * `schema` the table it declares (the client routes rows by its primary key).
  */
-export function table(namespace, name, schema) {
-    return new TableClient(namespace, name, schema);
+export function table(namespace, name, schema, options = {}) {
+    return new TableClient(namespace, name, schema, options);
 }
 //# sourceMappingURL=client.js.map

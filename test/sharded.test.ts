@@ -348,3 +348,17 @@ test("a serving shard refuses a late batch of a split's copy", async () => {
   await expect(post("/lateBatch", { cls: "m", name, bits: "1", keys: [key], payloads: [1], epoch: 1 })).rejects.toThrow();
   expect(await call<number[]>("m", name, "get", [key])).toEqual([2]);
 }, 60_000);
+
+test("a write held by a slow split waits for it, however short the client's own wait", async () => {
+  const name = `slow-split-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  const key = KEYS.find((k) => firstBit(k) === 1)!; // in the half that moves
+  await post("/slowHandOut", { cls: "m", name, bits: "", ms: 1500 });
+  const split = post<boolean>("/split", { cls: "m", name, bits: "" });
+  await Bun.sleep(100); // the split holds writes to the moving half now
+  // The client would give up after 300 ms of "not ready"; the split takes longer, and says so.
+  const added = await post<number[]>("/call", { cls: "m", name, method: "add", keys: [key], payloads: [1], notReadyWaitMs: 300 });
+  expect(added).toEqual([2]);
+  expect(await split).toBe(true);
+  expect(await call<number[]>("m", name, "get", [key])).toEqual([2]);
+}, 60_000);

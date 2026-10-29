@@ -161,6 +161,7 @@ const shards = await counters.call(["apples", "pears"], "add", [2, 1]);
 A method called through `client.call` takes its `keys` first and their `payloads` second (`null` when it needs none), then any other arguments. The client groups keys by shard and returns one `ShardResult` per shard, with the `positions` of its keys in your list.
 
 - **All-or-nothing updates:** `callOneShard` runs a method on one shard, or throws `SpansShards` before applying anything.
+- **Waiting:** a call waits up to 30 s for a shard that is not serving yet (`sharded(ns, name, { notReadyWaitMs })` to change it). A write held by a split in progress waits until that split finishes or gives up (`splitTimeoutMs`), however long that is.
 - **Scans:** `client.scan("method")` calls a method on every shard. It can enumerate that shard's rows with `this.allRows()`. There is one result per shard, not a global snapshot.
 
 ## Split policy
@@ -174,7 +175,7 @@ protected override splitPolicy: SplitPolicy = {
   initialDepth: 0,     // presplit an empty object, for uniformly distributed keys
   copy: "auto",        // "native" snapshots, "logical" row copy, or auto-detect
   splitTimeoutMs: 60_000,
-  holdWaitMs: 2_000,   // a write to the half being copied waits this long, then the client backs off
+  holdWaitMs: 2_000,   // a write to the half being copied waits this long, then the client backs off and retries until the split ends
 };
 ```
 
