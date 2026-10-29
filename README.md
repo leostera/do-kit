@@ -2,7 +2,7 @@
 
 A TypeScript base class and client for **Cloudflare Durable Objects** that split a busy keyspace into independently addressable Durable Object leaves. Keys are assigned by the leading bits of their SHA-256 hash. Splits are permanent; clients learn the tree lazily and retry calls when their route is stale.
 
-> This package is an early-stage library extracted from another project. The API and persistence format may change before `1.0.0`.
+> This package is an early-stage library. The API and persistence format may change before `1.0.0`.
 
 ## Install
 
