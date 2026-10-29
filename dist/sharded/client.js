@@ -150,6 +150,11 @@ export class ShardedClient {
         await visit("", 0);
         return out;
     }
+    /** How many shards this client knows of: one more than its known splits. There may be more. */
+    async knownShardCount() {
+        await this.loadCache();
+        return this.splits.size + 1;
+    }
     /** The known splits (for tests and operators). */
     knownSplits() {
         return [...this.splits].sort();

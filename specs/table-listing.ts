@@ -8,12 +8,14 @@ const ROWS = [0, 1, 2] as const;
 const END = 3;
 /** Rows per page. */
 const LIMIT = 2;
+/** Rows asked of each shard once there are two: fewer than a page (the code asks for its share). */
+const SHARD_LIMIT = 1;
 type Shard = "root" | "left" | "right";
 
-/** A shard's page: its owned rows after `after`, up to LIMIT, and how far it has reported. */
-function shardPage(owned: readonly number[], after: number): { rows: number[]; frontier: number } {
-  const rows = owned.filter((r) => r > after).slice(0, LIMIT);
-  return { rows, frontier: rows.length === LIMIT ? rows[LIMIT - 1]! : END };
+/** A shard's page: its owned rows after `after`, up to `limit`, and how far it has reported. */
+function shardPage(owned: readonly number[], after: number, limit: number): { rows: number[]; frontier: number } {
+  const rows = owned.filter((r) => r > after).slice(0, limit);
+  return { rows, frontier: rows.length === limit ? rows[limit - 1]! : END };
 }
 
 export default defineSpec(
@@ -21,7 +23,7 @@ export default defineSpec(
   {
     description: "How a listing pages through a sharded table, with a cursor that survives a split, without skipping or repeating a row.",
     messages: {
-      Page: call<{ after: number; as: Shard }>({ name: "list page" }),
+      Page: call<{ after: number; as: Shard; limit: number }>({ name: "list page" }),
       Rows: message<{ shard: Shard; rows: number[]; frontier: number }>({ name: "rows", tone: "reply" }),
       Moved: message<{}>({ name: "moved", tone: "refused" }),
       NotReady: message<{}>({ name: "not ready", tone: "refused" }),
@@ -71,14 +73,14 @@ export default defineSpec(
       transitions: {
         nextPage: {
           description: "Asks every shard it knows for a page after the cursor.",
-          sources: ["src/table/client.ts#TableClient.list", "src/sharded/client.ts#ShardedClient.scan"],
+          sources: ["src/table/client.ts#TableClient.list", "src/table/client.ts#perShardLimit", "src/sharded/client.ts#ShardedClient.scan"],
           when: (s) => s.started && !s.done && s.waiting.size === 0,
           sends: [Page],
           run(s, ctx) {
             s.answers = {};
             for (const shard of s.knowsSplit ? (["left", "right"] as const) : (["root"] as const)) {
               s.waiting.add(shard);
-              ctx.send(shard === "right" ? ctx.the(Sibling) : ctx.the(Original), Page, { after: s.cursor, as: shard });
+              ctx.send(shard === "right" ? ctx.the(Sibling) : ctx.the(Original), Page, { after: s.cursor, as: shard, limit: s.knowsSplit ? SHARD_LIMIT : LIMIT });
             }
           },
         },
@@ -107,7 +109,7 @@ export default defineSpec(
             s.knowsSplit = true;
             for (const shard of ["left", "right"] as const) {
               s.waiting.add(shard);
-              ctx.send(shard === "right" ? ctx.the(Sibling) : ctx.the(Original), Page, { after: s.cursor, as: shard });
+              ctx.send(shard === "right" ? ctx.the(Sibling) : ctx.the(Original), Page, { after: s.cursor, as: shard, limit: SHARD_LIMIT });
             }
           },
         },
@@ -123,7 +125,7 @@ export default defineSpec(
           after: "a few milliseconds",
           sends: [Page],
           run(s, ctx) {
-            if (s.waiting.has("right")) ctx.send(ctx.the(Sibling), Page, { after: s.cursor, as: "right" });
+            if (s.waiting.has("right")) ctx.send(ctx.the(Sibling), Page, { after: s.cursor, as: "right", limit: SHARD_LIMIT });
           },
         },
         [spec.failed(Page)]: {
@@ -178,7 +180,7 @@ export default defineSpec(
           run(s, msg, ctx) {
             if (msg.as === "root" && s.committed) return ctx.reply(Moved, {});
             // Owned rows only: row 1 may still be stored, but after the commit it is not listed.
-            ctx.reply(Rows, { shard: msg.as, ...shardPage(s.committed ? [0, 2] : [...ROWS], msg.after) });
+            ctx.reply(Rows, { shard: msg.as, ...shardPage(s.committed ? [0, 2] : [...ROWS], msg.after, msg.limit) });
           },
         },
         [Copied]: {
@@ -251,7 +253,7 @@ export default defineSpec(
           sends: [Rows, NotReady],
           run(s, msg, ctx) {
             if (!s.active) return ctx.reply(NotReady, {});
-            ctx.reply(Rows, { shard: msg.as, ...shardPage([1], msg.after) });
+            ctx.reply(Rows, { shard: msg.as, ...shardPage([1], msg.after, msg.limit) });
           },
         },
       },
