@@ -155,6 +155,13 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      * that moved keeps those rows.
      */
     protected cleanupForeign(_owns: (key: string) => boolean, _limit: number): number;
+    /**
+     * Throws (and the call answers "moved") unless this shard serves and owns every key. For reads of
+     * the subclass's own tables; writes go through `update` or `transact`, which also wait on splits.
+     */
+    protected assertOwns(keys: readonly string[]): void;
+    /** The routing hashes this shard owns, inclusive, as 16-hex-digit strings that sort like numbers. */
+    protected ownedHashRange(): readonly [string, string];
     /** Whether `key` is this shard's now. Keys of a split's moving half stay this shard's until it commits. */
     protected owns(key: string): boolean;
     /** This shard's name (`${name}#${bits}`), once it has one. */
@@ -216,6 +223,11 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     alarm(): Promise<void>;
     /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */
     shardedRestore(snapshot: DurableObjectSnapshot): Promise<void>;
+    /** The logical copy's tables and indexes: creates the ones this object does not have. */
+    shardedReceiveSchema(_name: string, _bits: string, objects: readonly {
+        readonly name: string;
+        readonly sql: string;
+    }[]): Promise<void>;
     /** One batch of the logical copy: rows of one table. The first batch wipes every table. */
     shardedReceive(_name: string, _bits: string, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void>;
     /** The logical copy is complete: it holds the source's meta, from this split. */

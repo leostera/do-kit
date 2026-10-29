@@ -1,53 +1,11 @@
 // Sharded objects under cf dev (workerd with local Durable Objects), driven through the test
 // Worker: concurrent writes and compare-and-swap across splits lose nothing and stay linearisable
 // per key; load splits a node by itself; the client finds shards its map does not know yet.
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import fc from "fast-check";
-import { join } from "node:path";
+import { call, describe, post, shards, useWorker } from "./harness.ts";
 
-let base = "";
-let stop = async () => {};
-
-beforeAll(async () => {
-  const probe = Bun.serve({ port: 0, fetch: () => new Response() });
-  const port = probe.port!;
-  probe.stop(true);
-  const dir = join(import.meta.dir, "worker");
-  const child = Bun.spawn([join(import.meta.dir, "../node_modules/.bin/vite"), "--mode", "test", "--port", String(port), "--strictPort"], { cwd: dir, stdout: "ignore", stderr: "ignore", env: { ...process.env, NO_COLOR: "1" } });
-  base = `http://localhost:${port}`;
-  for (let i = 0; ; i++) {
-    try {
-      if ((await fetch(`${base}/splits`, { method: "POST", body: JSON.stringify({ cls: "m", name: "probe" }) })).ok) break;
-    } catch {
-      // not up yet
-    }
-    if (i > 300) throw new Error("cf dev did not start");
-    await Bun.sleep(100);
-  }
-  stop = async () => {
-    child.kill();
-    await child.exited;
-  };
-}, 60_000);
-
-afterAll(() => stop());
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(base + path, { method: "POST", body: JSON.stringify(body) });
-  if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`);
-  return (await response.json()) as T;
-}
-
-const call = <T>(cls: string, name: string, method: string, keys: string[], payloads: unknown[] | null = null) => post<T>("/call", { cls, name, method, keys, payloads });
-const describe = (cls: string, name: string, bits: string) => post<{ bits: string; state: string; rows: number; storedRows: number }>("/describe", { cls, name, bits });
-
-/** Shards reachable from the root, by asking objects (not the client's map). */
-async function shards(cls: string, name: string, bits = ""): Promise<string[]> {
-  const node = await describe(cls, name, bits);
-  // The object hosting `bits` hosts a deeper shard once `bits` has split.
-  if (node.state === "new" || node.bits === bits) return [bits];
-  return [...(await shards(cls, name, `${bits}0`)), ...(await shards(cls, name, `${bits}1`))];
-}
+useWorker();
 
 let run = 0;
 const KEYS = Array.from({ length: 64 }, (_, i) => `key-${i}`);

@@ -16,6 +16,10 @@
     "./sharded": {
       "types": "./dist/sharded/index.d.ts",
       "import": "./dist/sharded/index.js"
+    },
+    "./table": {
+      "types": "./dist/table/index.d.ts",
+      "import": "./dist/table/index.js"
     }
   },
   "scripts": {
@@ -29,7 +33,7 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "beta",
     "@cloudflare/workers-types": "5.20261027.1",
-    "@leostera/feynman": "0.10.0",
+    "@leostera/feynman": "0.12.0",
     "@types/bun": "^1.4.4",
     "@types/node": "26.6.5",
     "cf": "^1.0.0-beta.23",

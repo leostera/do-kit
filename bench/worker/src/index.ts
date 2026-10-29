@@ -5,7 +5,14 @@ import { splittable as legacySplittable, SplittableObject as LegacySplittableObj
 
 const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
-type Target = "single" | "split" | "legacy" | "presplit";
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096";
+const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096"];
+/** Drivers per fleet: one fleet object starts and gathers this many drivers, as one Worker did before. */
+const DRIVERS_PER_FLEET = 256;
+/** The most drivers one measurement starts (32 fleets). */
+const MAX_DRIVERS = 8192;
+/** Calls each driver keeps in flight: one driver completes only about 90 calls/s, however many it keeps. */
+const CALLS_PER_DRIVER = 16;
 type Operation = "read" | "write";
 /**
  * How keys are chosen: "uniform" over `keyCount` keys, one "hot" key, or "control-plane": a handful
@@ -48,6 +55,8 @@ interface Env {
   readonly BENCH_TOKEN: string;
   readonly SPLIT_JOBS: DurableObjectNamespace<SplitBenchJob>;
   readonly PRESPLIT: DurableObjectNamespace<PresplitObject>;
+  readonly PRESPLIT_4096: DurableObjectNamespace<WidePresplitObject>;
+  readonly BENCH_FLEETS: DurableObjectNamespace<BenchFleet>;
 }
 
 interface MeasureConfig {
@@ -142,6 +151,21 @@ export class PresplitObject extends SplitObject {
   }
 }
 
+/** Starts as 4,096 shards (depth 12) before its first call: the widest object the default depth allows. */
+export class WidePresplitObject extends SplitObject {
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, initialDepth: 12, copy: "native" };
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, string>> {
+    return this.env.PRESPLIT_4096 as never;
+  }
+}
+
+/** The namespace of a sharded target. */
+function shardedNamespace(env: Env, target: "split" | "presplit" | "presplit-4096"): DurableObjectNamespace<SplitObject> {
+  if (target === "presplit") return env.PRESPLIT;
+  if (target === "presplit-4096") return env.PRESPLIT_4096;
+  return env.SPLIT;
+}
+
 /** Splits only when told to: for timing one split. */
 export class ManualSplitObject extends SplitObject {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, copy: "native", splitTimeoutMs: 300_000 };
@@ -228,6 +252,58 @@ function keyFor(config: MeasureConfig, seq: number): string {
   }
 }
 
+/** Driver results merged: a fleet's drivers, or every fleet's. */
+interface MergedResult {
+  readonly successes: number;
+  readonly errors: number;
+  readonly bytes: number;
+  readonly elapsedMs: number;
+  readonly latencyMs: readonly (readonly number[])[];
+  readonly maxLatencyMs: number;
+  readonly failedDrivers: number;
+}
+
+function merge(results: readonly (DriverResult & { readonly failedDrivers?: number })[], failedDrivers: number): MergedResult {
+  const buckets = new Map<number, number>();
+  let successes = 0;
+  let errors = 0;
+  let bytes = 0;
+  let elapsedMs = 0;
+  let maxLatencyMs = 0;
+  for (const result of results) {
+    successes += result.successes;
+    errors += result.errors;
+    bytes += result.bytes;
+    elapsedMs = Math.max(elapsedMs, result.elapsedMs);
+    maxLatencyMs = Math.max(maxLatencyMs, result.maxLatencyMs);
+    failedDrivers += result.failedDrivers ?? 0;
+    for (const [bucket, count] of result.latencyMs) buckets.set(bucket!, (buckets.get(bucket!) ?? 0) + count!);
+  }
+  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets] };
+}
+
+function driverStub(env: Env, config: { readonly objectName: string; readonly driverIndex: number }): DurableObjectStub<BenchDriver> {
+  const id = env.BENCH_DRIVERS.idFromName(`${config.objectName}-driver-${config.driverIndex}`);
+  return env.BENCH_DRIVERS.get(id, { locationHint: LOCATIONS[config.driverIndex % LOCATIONS.length] });
+}
+
+/**
+ * Starts and gathers up to DRIVERS_PER_FLEET drivers, so that one measurement can start thousands of
+ * them: the Worker starts the fleets, each fleet starts its drivers.
+ */
+export class BenchFleet extends DurableObject<Env> {
+  async prepare(configs: readonly Omit<MeasureConfig, "startAt">[]): Promise<void> {
+    await Promise.all(configs.map((config) => driverStub(this.env, config).prepare(config)));
+  }
+
+  async measure(configs: readonly MeasureConfig[]): Promise<MergedResult> {
+    // A driver that fails outright (rather than counting its failed calls) is reported, not fatal.
+    const settled = await Promise.allSettled(configs.map((config) => driverStub(this.env, config).measure(config)));
+    const results = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    return merge(results, settled.length - results.length);
+  }
+}
+
 /** Distributed load generator. locationHint is set only when each fresh driver is first created. */
 export class BenchDriver extends DurableObject<Env> {
   async prepare(config: Omit<MeasureConfig, "startAt">): Promise<void> {
@@ -243,6 +319,15 @@ export class BenchDriver extends DurableObject<Env> {
     const values: string[] = [];
     if (config.distribution === "hot") {
       if (config.driverIndex === 0) await this.write(config.target, config.objectName, ["hot-key"], [value]);
+      return;
+    }
+    // Thousands of shards take a seed from every driver at once: each seeds its own stripe of keys.
+    if (config.target === "presplit-4096") {
+      for (let i = config.driverIndex; i < config.keyCount; i += config.driverCount) {
+        keys.push(`key-${i}`);
+        values.push(value);
+      }
+      for (let i = 0; i < keys.length; i += 100) await this.write(config.target, config.objectName, keys.slice(i, i + 100), values.slice(i, i + 100));
       return;
     }
     // One driver seeds every key, in batches, retrying: a hundred drivers seeding at once would
@@ -320,7 +405,7 @@ export class BenchDriver extends DurableObject<Env> {
       return;
     }
     if (target === "legacy") await legacySplittable(this.env.LEGACY, name).call(keys, "put", values);
-    else await sharded(target === "presplit" ? this.env.PRESPLIT : this.env.SPLIT, name).call(keys, "put", values);
+    else await sharded(shardedNamespace(this.env, target), name).call(keys, "put", values);
   }
 
   private async read(target: Target, name: string, key: string): Promise<string | null> {
@@ -328,7 +413,7 @@ export class BenchDriver extends DurableObject<Env> {
       const stub = this.env.SINGLE.get(this.env.SINGLE.idFromName(name));
       return (await stub.get([key], null))[0] ?? null;
     }
-    const [leaf] = target === "legacy" ? await legacySplittable(this.env.LEGACY, name).call([key], "get", null) : await sharded(target === "presplit" ? this.env.PRESPLIT : this.env.SPLIT, name).call([key], "get", null);
+    const [leaf] = target === "legacy" ? await legacySplittable(this.env.LEGACY, name).call([key], "get", null) : await sharded(shardedNamespace(this.env, target), name).call([key], "get", null);
     return leaf?.result[0] ?? null;
   }
 }
@@ -343,16 +428,16 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   const durationMs = body.durationMs;
   const keyCount = body.keyCount ?? 10_000;
   const payloadBytes = body.payloadBytes ?? 1024;
-  if (target !== "single" && target !== "split" && target !== "legacy" && target !== "presplit") throw new Error("target must be single, split, presplit or legacy");
+  if (!TARGETS.includes(target as Target)) throw new Error(`target must be one of ${TARGETS.join(", ")}`);
   if (operation !== "read" && operation !== "write") throw new Error("operation must be read or write");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
-  if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > 4096) throw new Error("concurrency must be an integer from 1 to 4096");
+  if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > MAX_DRIVERS * CALLS_PER_DRIVER) throw new Error(`concurrency must be an integer from 1 to ${MAX_DRIVERS * CALLS_PER_DRIVER}`);
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");
   if (!Number.isSafeInteger(keyCount) || (keyCount as number) < 1 || (keyCount as number) > 100_000) throw new Error("keyCount must be from 1 to 100000");
   if (!Number.isSafeInteger(payloadBytes) || (payloadBytes as number) < 16 || (payloadBytes as number) > 64 * 1024) throw new Error("payloadBytes must be from 16 to 65536");
   const objectName = body.objectName;
   if (typeof objectName !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(objectName)) throw new Error("objectName must be 1-80 safe characters");
-  return { target, operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
+  return { target: target as Target, operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
 }
 
 function percentile(histogram: readonly number[], p: number): number {
@@ -561,39 +646,38 @@ export default {
       return Response.json({ error: error instanceof Error ? error.message : "invalid request" }, { status: 400 });
     }
 
-    // One driver tops out at about 90 calls/s, whatever its concurrency: 16 in-flight calls each,
-    // up to 256 drivers, so the drivers are not what is measured.
-    const driverCount = Math.min(256, Math.max(Math.min(16, input.concurrency), Math.ceil(input.concurrency / 16)));
-    const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount }));
-    const drivers = configs.map((config, i) => {
-      const id = env.BENCH_DRIVERS.idFromName(`${input.objectName}-driver-${i}`);
-      return env.BENCH_DRIVERS.get(id, { locationHint: LOCATIONS[i % LOCATIONS.length] });
-    });
-    await Promise.all(drivers.map((driver, i) => driver.prepare(configs[i]!)));
-    const startAt = Date.now() + 750;
-    // A driver that fails outright (rather than counting its failed calls) is reported, not fatal.
-    const settled = await Promise.allSettled(drivers.map((driver, i) => driver.measure({ ...configs[i]!, startAt, concurrency: Math.ceil(input.concurrency / driverCount) })));
-    const results: DriverResult[] = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
-    const failedDrivers = settled.length - results.length;
-
-    const histogram = new Array<number>(120_001).fill(0);
-    let successes = 0;
-    let errors = 0;
-    let bytes = 0;
-    let elapsedMs = 0;
-    let maxLatencyMs = 0;
-    for (const result of results) {
-      successes += result.successes;
-      errors += result.errors;
-      bytes += result.bytes;
-      elapsedMs = Math.max(elapsedMs, result.elapsedMs);
-      maxLatencyMs = Math.max(maxLatencyMs, result.maxLatencyMs);
-      for (const [bucket, count] of result.latencyMs) histogram[bucket!] = histogram[bucket!]! + count!;
+    // One driver tops out at about 90 calls/s, whatever its concurrency: 16 in-flight calls each, so
+    // the drivers are not what is measured. Fleets of 256 drivers start them.
+    const driverCount = Math.min(MAX_DRIVERS, Math.max(Math.min(16, input.concurrency), Math.ceil(input.concurrency / CALLS_PER_DRIVER)));
+    const perDriver = Math.ceil(input.concurrency / driverCount);
+    const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount, concurrency: perDriver }));
+    const fleets: { stub: DurableObjectStub<BenchFleet>; configs: typeof configs }[] = [];
+    for (let i = 0; i < configs.length; i += DRIVERS_PER_FLEET) {
+      const stub = env.BENCH_FLEETS.get(env.BENCH_FLEETS.idFromName(`${input.objectName}-fleet-${i / DRIVERS_PER_FLEET}`));
+      fleets.push({ stub, configs: configs.slice(i, i + DRIVERS_PER_FLEET) });
     }
+    await Promise.all(fleets.map((fleet) => fleet.stub.prepare(fleet.configs)));
+    // Later with more fleets: every driver must have its start time before it comes.
+    const startAt = Date.now() + 750 + 250 * fleets.length;
+    const settled = await Promise.allSettled(fleets.map((fleet) => fleet.stub.measure(fleet.configs.map((config) => ({ ...config, startAt })))));
+    const fleetResults = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    const lostDrivers = settled.reduce((n, r, i) => n + (r.status === "rejected" ? fleets[i]!.configs.length : 0), 0);
+    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs } = merge(fleetResults, lostDrivers);
+    const histogram = new Array<number>(120_001).fill(0);
+    for (const [bucket, count] of latencyMs) histogram[bucket!] = count!;
+
     let topology: Awaited<ReturnType<typeof describeTree>> | null = null;
     if (input.target === "split") topology = await describeTree(env, input.objectName);
     if (input.target === "legacy") topology = await describeLegacyTree(env, input.objectName);
     if (input.target === "presplit") topology = await describeTree(env, input.objectName, "", env.PRESPLIT as never);
+    // Walking 4,096 shards is 8,191 calls. A presplit tree is complete, so the depth of the shards on
+    // its first and last paths gives it: the root's object and the object of "1" (bits "1000…").
+    if (input.target === "presplit-4096") {
+      const ns = env.PRESPLIT_4096 as unknown as DurableObjectNamespace<ShardedObject<Env, string>>;
+      const sampled = await Promise.all(["", "1"].map((bits) => ns.get(ns.idFromName(shardObjectName(input.objectName, bits))).shardedDescribe()));
+      const depth = Math.min(...sampled.map((d) => d.bits.length));
+      topology = { leaves: 2 ** depth, rows: sampled.reduce((n, d) => n + d.rows, 0), depth };
+    }
     return Response.json({
       ...input,
       concurrency: Math.ceil(input.concurrency / driverCount) * driverCount,

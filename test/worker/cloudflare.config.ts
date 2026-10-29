@@ -15,11 +15,15 @@ export default defineConfig(() => ({
       COUNTERS: bindings.durableObject({ worker: NAME, exportName: "Counters" }),
       AUTO_COUNTERS: bindings.durableObject({ worker: NAME, exportName: "AutoCounters" }),
       PRESPLIT_COUNTERS: bindings.durableObject({ worker: NAME, exportName: "PresplitCounters" }),
+      REPOS: bindings.durableObject({ worker: NAME, exportName: "Repos" }),
+      EVOLVING: bindings.durableObject({ worker: NAME, exportName: "EvolvingRepos" }),
     },
     exports: {
       Counters: exports.durableObject({ storage: "sqlite" }),
       AutoCounters: exports.durableObject({ storage: "sqlite" }),
       PresplitCounters: exports.durableObject({ storage: "sqlite" }),
+      Repos: exports.durableObject({ storage: "sqlite" }),
+      EvolvingRepos: exports.durableObject({ storage: "sqlite" }),
     },
   },
 }));

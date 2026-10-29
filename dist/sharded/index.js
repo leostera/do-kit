@@ -188,6 +188,19 @@ export class ShardedObject extends DurableObject {
     cleanupForeign(_owns, _limit) {
         return 0;
     }
+    /**
+     * Throws (and the call answers "moved") unless this shard serves and owns every key. For reads of
+     * the subclass's own tables; writes go through `update` or `transact`, which also wait on splits.
+     */
+    assertOwns(keys) {
+        this.assertOwner(keys);
+    }
+    /** The routing hashes this shard owns, inclusive, as 16-hex-digit strings that sort like numbers. */
+    ownedHashRange() {
+        if (!this.meta)
+            throw new Error("node has no name yet");
+        return hashRange(this.meta.bits);
+    }
     /** Whether `key` is this shard's now. Keys of a split's moving half stay this shard's until it commits. */
     owns(key) {
         if (!this.meta)
@@ -500,6 +513,13 @@ export class ShardedObject extends DurableObject {
     async copyRows(right, epoch, live) {
         const meta = this.meta;
         const target = this.node(right);
+        // Tables and indexes first, as a snapshot would carry them: the copy may not have created a
+        // subclass's yet (a sharded table creates its own on first use).
+        const schema = this.sql
+            .exec("SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY type DESC, name")
+            .toArray()
+            .filter((o) => o.sql !== null);
+        await target.shardedReceiveSchema(meta.name, right, schema);
         let first = true;
         for (const table of this.tables()) {
             for (let offset = 0;;) {
@@ -598,6 +618,17 @@ export class ShardedObject extends DurableObject {
             }
         }, 50)));
     }
+    /** The logical copy's tables and indexes: creates the ones this object does not have. */
+    async shardedReceiveSchema(_name, _bits, objects) {
+        if (this.serving())
+            throw new Error("refusing to change a serving shard");
+        const have = new Set(this.sql.exec("SELECT name FROM sqlite_master").toArray().map((o) => o.name));
+        this.ctx.storage.transactionSync(() => {
+            for (const o of objects)
+                if (!have.has(o.name))
+                    this.sql.exec(o.sql);
+        });
+    }
     /** One batch of the logical copy: rows of one table. The first batch wipes every table. */
     async shardedReceive(_name, _bits, first, table, columns, rows) {
         if (first && this.serving())
@@ -610,8 +641,7 @@ export class ShardedObject extends DurableObject {
             }
             if (rows.length === 0)
                 return;
-            // A subclass table the copy has not created yet: its constructor creates it on a restart,
-            // but copies need it now.
+            // shardedReceiveSchema created every table first.
             if (!this.tables().includes(table))
                 throw new Error(`table ${table} does not exist in the copy`);
             const sql = `INSERT OR REPLACE INTO "${table}" (${columns.map((c) => `"${c}"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;

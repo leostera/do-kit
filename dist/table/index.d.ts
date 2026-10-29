@@ -1,0 +1,59 @@
+import { ShardedObject } from "../sharded/index.js";
+import { type RowShape, type ShardPage, type ShardPageRequest, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
+export * from "./schema.js";
+export { table, TableClient } from "./client.js";
+/** A put: the whole row, written if the row's version is `ifVersion` (0: absent), or always. */
+export interface PutOptions {
+    readonly ifVersion?: number;
+}
+/**
+ * Extend with `protected table = defineTable({...})` and `nodes()`. The client (`table()`) calls
+ * the `table*` methods. Custom transactional methods read and write rows with `getRow`, `putRow`,
+ * `patchRow` and `deleteRow` inside `transact`.
+ *
+ * Subclasses that override `cleanupForeign` must call `super.cleanupForeign`.
+ */
+export declare abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObject<Env, never> {
+    protected abstract readonly table: TableSchema<Row>;
+    private migrated;
+    tableGet(keys: readonly string[], _payloads: null): Promise<(Versioned<Row> | null)[]>;
+    tablePut(keys: readonly string[], payloads: readonly {
+        readonly row: Row;
+        readonly ifVersion?: number;
+    }[]): Promise<WriteResult[]>;
+    tablePatch(keys: readonly string[], payloads: readonly {
+        readonly changes: Partial<Row>;
+        readonly ifVersion?: number;
+    }[]): Promise<WriteResult[]>;
+    tableDelete(keys: readonly string[], payloads: readonly {
+        readonly ifVersion?: number;
+    }[] | null): Promise<WriteResult[]>;
+    /** One shard's part of a listing page. */
+    tablePage(request: ShardPageRequest): Promise<ShardPage>;
+    /** Rows this shard owns. */
+    tableCount(): Promise<number>;
+    /** The row of `key`, or null. */
+    protected getRow(key: string): Versioned<Row> | null;
+    /** Writes a whole row if its version is `ifVersion` (0: absent). Call inside `transact`. */
+    protected putRow(row: Row, options?: PutOptions): WriteResult;
+    /** Changes some columns of an existing row if its version is `ifVersion`. Call inside `transact`. */
+    protected patchRow(key: string, changes: Partial<Row>, options?: PutOptions): WriteResult;
+    /** Deletes a row if its version is `ifVersion`. Call inside `transact`. */
+    protected deleteRow(key: string, options?: PutOptions): WriteResult;
+    /** Deletes rows (and counts) of hashes this shard gave away, a batch at a time. */
+    protected cleanupForeign(owns: (key: string) => boolean, limit: number): number;
+    private page;
+    /** Rows strictly after `position` in listing order, as SQLite orders (nulls first ascending). */
+    private after;
+    private condition;
+    /** Brings this shard's storage up to the schema: once per instance, on its first use. */
+    private migrate;
+    private version;
+    private countRow;
+    private checkKey;
+    private encode;
+    private decode;
+    private q;
+    private get db();
+}
+//# sourceMappingURL=index.d.ts.map
