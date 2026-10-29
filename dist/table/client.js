@@ -90,10 +90,9 @@ export function mergePages(pages, request) {
         .filter((r) => frontier === null || cmp(r.position, frontier) <= 0)
         .filter((r) => {
         // A key reported by two shards in one page (one before a split committed, one after).
-        const key = JSON.stringify(r.position.at(-1));
-        if (seen.has(key))
+        if (seen.has(r.key))
             return false;
-        seen.add(key);
+        seen.add(r.key);
         return true;
     })
         .sort((a, b) => cmp(a.position, b.position));
@@ -102,7 +101,10 @@ export function mergePages(pages, request) {
         return { rows, next: rows.at(-1).position };
     return { rows, next: frontier };
 }
-/** The client of the sharded table `name` with this schema (one object, split into shards as it grows). */
+/**
+ * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
+ * `schema` the table it declares (the client routes rows by its primary key).
+ */
 export function table(namespace, name, schema) {
     return new TableClient(namespace, name, schema);
 }

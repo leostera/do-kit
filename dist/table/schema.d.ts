@@ -47,12 +47,17 @@ export interface ListPage<Row> {
     /** For the next page; null when the listing is done. */
     readonly cursor: string | null;
 }
-/** A row's place in an index: the stored values of its columns, then its key. */
-export type Position = readonly SqlValue[];
+/**
+ * A row's place in an index: its index key (the index's values and the row's key, in an
+ * order-preserving encoding, as hex), or the row's key for primary-key order. Positions of one
+ * listing compare as plain strings, by code point.
+ */
+export type Position = string;
 export type SqlValue = string | number | null;
 /** What a shard answers for one page. `frontier`: up to where it reported every match; null: the end. */
 export interface ShardPage {
     readonly rows: readonly {
+        readonly key: string;
         readonly row: RowShape;
         readonly version: number;
         readonly position: Position;
@@ -72,10 +77,16 @@ export declare const MAX_LIMIT = 1000;
 export declare const MAX_BUDGET = 10000;
 /** The request for a query, with defaults and bounds applied. */
 export declare function pageRequest(query: ListQuery, after: Position | null): ShardPageRequest;
-/** SQLite's order: null, then numbers, then text by code point (the order of its UTF-8 bytes). */
-export declare function compareValues(a: SqlValue, b: SqlValue): number;
-/** Compares two positions in listing order: `desc` reverses every column, the key included. */
+/** Compares two positions in listing order: code point order, reversed for `desc`. */
 export declare function comparePositions(a: Position, b: Position, direction: "asc" | "desc"): number;
+/** Code point order: the order of UTF-8 bytes, which is how SQLite compares text. */
+export declare function compareText(a: string, b: string): number;
+/**
+ * The index key of these values, as hex: byte order is the values' order. Null (0x00) sorts
+ * before numbers (0x01, then an order-preserving float64) and text (0x02, then its UTF-8 with
+ * 0x00 escaped as 0x00 0xFF, then 0x00): nulls first ascending, last descending.
+ */
+export declare function encodeIndexKey(values: readonly SqlValue[]): string;
 /** A short fingerprint of what a cursor belongs to: the index, direction and conditions. */
 export declare function queryFingerprint(request: Pick<ShardPageRequest, "index" | "direction" | "where">): string;
 export declare function encodeCursor(fingerprint: string, position: Position): string;

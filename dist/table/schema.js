@@ -42,20 +42,13 @@ export function pageRequest(query, after) {
         throw new Error("direction must be asc or desc");
     return { index: query.index ?? null, direction, where: query.where ?? [], limit, budget, after };
 }
-/** SQLite's order: null, then numbers, then text by code point (the order of its UTF-8 bytes). */
-export function compareValues(a, b) {
-    const rank = (v) => (v === null ? 0 : typeof v === "number" ? 1 : 2);
-    const ra = rank(a);
-    const rb = rank(b);
-    if (ra !== rb)
-        return ra - rb;
-    if (a === null)
-        return 0;
-    if (typeof a === "number")
-        return a - b;
-    return compareText(a, b);
+/** Compares two positions in listing order: code point order, reversed for `desc`. */
+export function comparePositions(a, b, direction) {
+    const d = compareText(a, b);
+    return direction === "asc" ? d : -d;
 }
-function compareText(a, b) {
+/** Code point order: the order of UTF-8 bytes, which is how SQLite compares text. */
+export function compareText(a, b) {
     if (a === b)
         return 0;
     const ia = a[Symbol.iterator]();
@@ -70,14 +63,43 @@ function compareText(a, b) {
             return d;
     }
 }
-/** Compares two positions in listing order: `desc` reverses every column, the key included. */
-export function comparePositions(a, b, direction) {
-    for (let i = 0; i < a.length; i++) {
-        const d = compareValues(a[i], b[i]);
-        if (d !== 0)
-            return direction === "asc" ? d : -d;
+/**
+ * The index key of these values, as hex: byte order is the values' order. Null (0x00) sorts
+ * before numbers (0x01, then an order-preserving float64) and text (0x02, then its UTF-8 with
+ * 0x00 escaped as 0x00 0xFF, then 0x00): nulls first ascending, last descending.
+ */
+export function encodeIndexKey(values) {
+    const bytes = [];
+    for (const v of values) {
+        if (v === null)
+            bytes.push(0x00);
+        else if (typeof v === "number") {
+            if (Number.isNaN(v))
+                throw new Error("NaN cannot be indexed");
+            const view = new DataView(new ArrayBuffer(8));
+            view.setFloat64(0, v === 0 ? 0 : v);
+            const b = new Uint8Array(view.buffer);
+            if (b[0] & 0x80)
+                for (let i = 0; i < 8; i++)
+                    b[i] = ~b[i] & 0xff;
+            else
+                b[0] = b[0] | 0x80;
+            bytes.push(0x01, ...b);
+        }
+        else {
+            bytes.push(0x02);
+            for (const byte of new TextEncoder().encode(v)) {
+                bytes.push(byte);
+                if (byte === 0x00)
+                    bytes.push(0xff);
+            }
+            bytes.push(0x00);
+        }
     }
-    return 0;
+    let hex = "";
+    for (const byte of bytes)
+        hex += byte.toString(16).padStart(2, "0");
+    return hex;
 }
 /** A short fingerprint of what a cursor belongs to: the index, direction and conditions. */
 export function queryFingerprint(request) {
@@ -101,7 +123,7 @@ export function decodeCursor(cursor, fingerprint) {
     const { f, p } = (parsed ?? {});
     if (f !== fingerprint)
         throw new Error("the cursor belongs to another query (index, direction or conditions)");
-    if (!Array.isArray(p) || !p.every((v) => v === null || typeof v === "string" || typeof v === "number"))
+    if (typeof p !== "string")
         throw new Error("not a cursor of this table");
     return p;
 }

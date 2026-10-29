@@ -1,6 +1,5 @@
 // The client of a sharded table: routes rows by key and merges listing pages from every shard.
 import { sharded, type ShardedClient } from "../sharded/client.js";
-import type { ShardedTable } from "./index.js";
 import {
   comparePositions,
   decodeCursor,
@@ -38,7 +37,7 @@ export class TableClient<Row extends RowShape> {
   private readonly primaryKey: keyof Row & string;
 
   constructor(
-    namespace: DurableObjectNamespace<ShardedTable<unknown, Row>>,
+    namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>,
     readonly name: string,
     schema: TableSchema<Row>,
   ) {
@@ -133,9 +132,8 @@ export function mergePages(pages: readonly ShardPage[], request: Pick<ShardPageR
     .filter((r) => frontier === null || cmp(r.position, frontier) <= 0)
     .filter((r) => {
       // A key reported by two shards in one page (one before a split committed, one after).
-      const key = JSON.stringify(r.position.at(-1));
-      if (seen.has(key)) return false;
-      seen.add(key);
+      if (seen.has(r.key)) return false;
+      seen.add(r.key);
       return true;
     })
     .sort((a, b) => cmp(a.position, b.position));
@@ -144,7 +142,10 @@ export function mergePages(pages: readonly ShardPage[], request: Pick<ShardPageR
   return { rows, next: frontier };
 }
 
-/** The client of the sharded table `name` with this schema (one object, split into shards as it grows). */
-export function table<Row extends RowShape>(namespace: DurableObjectNamespace<ShardedTable<never, Row>>, name: string, schema: TableSchema<Row>): TableClient<Row> {
-  return new TableClient<Row>(namespace as never, name, schema);
+/**
+ * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
+ * `schema` the table it declares (the client routes rows by its primary key).
+ */
+export function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>): TableClient<Row> {
+  return new TableClient<Row>(namespace as unknown as DurableObjectNamespace<Rpc.DurableObjectBranded>, name, schema);
 }

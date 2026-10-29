@@ -1,8 +1,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096";
-type Operation = "read" | "write";
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | "table-1" | "table-4" | "table-16" | "table-64";
+type Operation = "read" | "write" | "list";
 type Distribution = "uniform" | "hot" | "control-plane";
 
 interface Point {

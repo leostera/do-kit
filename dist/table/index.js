@@ -1,12 +1,14 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/design/sharded-table.md.
 import { keyHash, ShardedObject } from "../sharded/index.js";
-import { pageRequest } from "./schema.js";
+import { encodeIndexKey, pageRequest } from "./schema.js";
 export * from "./schema.js";
 export { table, TableClient } from "./client.js";
 const TABLE = "sharded_table";
 const COUNTS = "sharded_table_counts";
 const INDEX_PREFIX = "sharded_table_ix_";
+/** Each index keeps one hidden column of index keys (see encodeIndexKey), indexed alone. */
+const KEY_COLUMN_PREFIX = "_ix_";
 /** Rows per hash prefix are counted with this many hex digits (16 bits: exact to depth 16). */
 const BUCKET_DIGITS = 4;
 const CLEANUP_BATCH = 250;
@@ -20,6 +22,8 @@ const AFFINITY = { text: "TEXT", integer: "INTEGER", real: "REAL", boolean: "INT
  */
 export class ShardedTable extends ShardedObject {
     migrated = false;
+    /** SQLite's index on the primary key, for listings in key order. */
+    keyIndex = "";
     // ---- Called by the client ----
     async tableGet(keys, _payloads) {
         this.migrate();
@@ -67,11 +71,15 @@ export class ShardedTable extends ShardedObject {
         const current = this.version(key);
         if (options.ifVersion !== undefined && options.ifVersion !== current)
             return { ok: false, version: current };
-        const names = Object.keys(this.table.columns);
-        const values = names.map((name) => this.encode(name, row[name]));
+        const stored = {};
+        for (const name of Object.keys(this.table.columns))
+            stored[name] = this.encode(name, row[name]);
+        for (const ix of this.indexes())
+            stored[ix.keyColumn] = this.indexKey(ix, stored);
+        const names = Object.keys(stored);
         const version = current + 1;
         this.db.exec(`INSERT INTO ${TABLE} (${names.map((n) => this.q(n)).join(", ")}, _hash, _version) VALUES (${names.map(() => "?").join(", ")}, ?, ?) ` +
-            `ON CONFLICT (${this.q(this.table.primaryKey)}) DO UPDATE SET ${names.map((n) => `${this.q(n)} = excluded.${this.q(n)}`).join(", ")}, _version = excluded._version`, ...values, keyHash(key), version);
+            `ON CONFLICT (${this.q(this.table.primaryKey)}) DO UPDATE SET ${names.map((n) => `${this.q(n)} = excluded.${this.q(n)}`).join(", ")}, _version = excluded._version`, ...names.map((n) => stored[n]), keyHash(key), version);
         if (current === 0)
             this.countRow(key, 1);
         return { ok: true, version };
@@ -82,12 +90,20 @@ export class ShardedTable extends ShardedObject {
         const current = this.version(key);
         if (current === 0 || (options.ifVersion !== undefined && options.ifVersion !== current))
             return { ok: false, version: current };
-        const names = Object.keys(changes).filter((name) => name !== this.table.primaryKey);
-        for (const name of names)
+        const changed = Object.keys(changes).filter((name) => name !== this.table.primaryKey);
+        for (const name of changed)
             if (!(name in this.table.columns))
                 throw new Error(`no column ${name}`);
+        const stored = this.db.exec(`SELECT * FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).one();
+        const updates = {};
+        for (const name of changed)
+            updates[name] = stored[name] = this.encode(name, changes[name]);
+        for (const ix of this.indexes())
+            if (ix.columns.some((c) => changed.includes(c)))
+                updates[ix.keyColumn] = this.indexKey(ix, stored);
+        const names = Object.keys(updates);
         const version = current + 1;
-        this.db.exec(`UPDATE ${TABLE} SET ${[...names.map((n) => `${this.q(n)} = ?`), "_version = ?"].join(", ")} WHERE ${this.q(this.table.primaryKey)} = ?`, ...names.map((name) => this.encode(name, changes[name])), version, key);
+        this.db.exec(`UPDATE ${TABLE} SET ${[...names.map((n) => `${this.q(n)} = ?`), "_version = ?"].join(", ")} WHERE ${this.q(this.table.primaryKey)} = ?`, ...names.map((n) => updates[n]), version, key);
         return { ok: true, version };
     }
     /** Deletes a row if its version is `ifVersion`. Call inside `transact`. */
@@ -115,27 +131,28 @@ export class ShardedTable extends ShardedObject {
     }
     // ---- Listing ----
     page(request) {
-        const schema = this.table;
-        const columns = request.index === null ? [] : schema.indexes?.[request.index];
-        if (!columns)
+        const pk = this.table.primaryKey;
+        const ix = request.index === null ? null : this.indexes().find((i) => i.name === request.index);
+        if (request.index !== null && !ix)
             throw new Error(`no index ${request.index}`);
-        const order = [...columns, schema.primaryKey];
-        const dir = request.direction === "asc" ? "ASC" : "DESC";
+        // One column holds each row's position: its index key, or its primary key. SQLite seeks to the
+        // cursor in that column's index and reads on in order.
+        const column = this.q(ix ? ix.keyColumn : pk);
+        const sqlIndex = ix ? ix.sqlIndex : this.keyIndex;
         const [lo, hi] = this.ownedHashRange();
         const params = [];
         const matches = request.where.length ? request.where.map((c) => this.condition(c, params)).join(" AND ") : "1";
-        const whereParams = params.splice(0);
-        const after = request.after ? this.after(order, request.after, request.direction, params) : "1";
-        const sql = `SELECT *, (${matches}) AS _m FROM ${TABLE} WHERE _hash >= ? AND _hash <= ? AND ${after} ` +
-            `ORDER BY ${order.map((c) => `${this.q(c)} ${dir}`).join(", ")} LIMIT ?`;
+        const after = request.after === null ? "" : `${column} ${request.direction === "asc" ? ">" : "<"} ? AND `;
+        const sql = `SELECT *, (${matches}) AS _m FROM ${TABLE} INDEXED BY "${sqlIndex}" WHERE ${after}_hash >= ? AND _hash <= ? ` +
+            `ORDER BY ${column} ${request.direction === "asc" ? "ASC" : "DESC"} LIMIT ?`;
         const rows = [];
         let last = null;
         let scanned = 0;
-        for (const found of this.db.exec(sql, ...whereParams, lo, hi, ...params, request.budget)) {
+        for (const found of this.db.exec(sql, ...params, ...(request.after === null ? [] : [request.after]), lo, hi, request.budget)) {
             scanned++;
-            last = order.map((c) => found[c] ?? null);
+            last = found[ix ? ix.keyColumn : pk];
             if (found._m) {
-                rows.push({ row: this.decode(found), version: found._version, position: last });
+                rows.push({ key: found[pk], row: this.decode(found), version: found._version, position: last });
                 if (rows.length === request.limit)
                     return { rows, frontier: last };
             }
@@ -143,48 +160,15 @@ export class ShardedTable extends ShardedObject {
         // Out of budget: reported everything up to the last row scanned. Out of rows: the end.
         return { rows, frontier: scanned === request.budget ? last : null };
     }
-    /** Rows strictly after `position` in listing order, as SQLite orders (nulls first ascending). */
-    after(order, position, direction, params) {
-        if (position.length !== order.length)
-            throw new Error("the cursor does not fit this index");
-        const term = (i) => {
-            const col = this.q(order[i]);
-            const v = position[i];
-            const isKey = i === order.length - 1;
-            if (isKey) {
-                params.push(v);
-                return `${col} ${direction === "asc" ? ">" : "<"} ?`;
-            }
-            if (direction === "asc") {
-                if (v === null)
-                    return `(${col} IS NOT NULL OR (${col} IS NULL AND ${term(i + 1)}))`;
-                params.push(v, v);
-                return `(${col} > ? OR (${col} = ? AND ${term(i + 1)}))`;
-            }
-            if (v === null)
-                return `(${col} IS NULL AND ${term(i + 1)})`;
-            params.push(v, v);
-            return `(${col} < ? OR ${col} IS NULL OR (${col} = ? AND ${term(i + 1)}))`;
-        };
-        // A plain bound on the first column lets SQLite seek in the index before the exact test.
-        const first = this.q(order[0]);
-        const v = position[0];
-        let seek = "1";
-        if (order.length > 1) {
-            if (direction === "asc" && v !== null) {
-                params.push(v);
-                seek = `${first} >= ?`;
-            }
-            else if (direction === "desc") {
-                if (v === null)
-                    seek = `${first} IS NULL`;
-                else {
-                    params.push(v);
-                    seek = `(${first} <= ? OR ${first} IS NULL)`;
-                }
-            }
-        }
-        return `(${seek} AND ${term(0)})`;
+    indexes() {
+        return Object.entries(this.table.indexes ?? {}).map(([name, columns]) => {
+            const id = `${name}_${shortHash(columns.join(","))}`;
+            return { name, columns, keyColumn: `${KEY_COLUMN_PREFIX}${id}`, sqlIndex: `${INDEX_PREFIX}${id}` };
+        });
+    }
+    /** A row's key in an index, from its stored values. */
+    indexKey(ix, stored) {
+        return encodeIndexKey([...ix.columns.map((c) => stored[c] ?? null), stored[this.table.primaryKey]]);
     }
     condition(c, params) {
         const type = this.table.columns[c.column];
@@ -235,15 +219,25 @@ export class ShardedTable extends ShardedObject {
             if (!have.has(name))
                 this.db.exec(`ALTER TABLE ${TABLE} ADD COLUMN ${this.q(name)} ${AFFINITY[type]}`);
         }
-        const wanted = new Map();
-        for (const [name, cols] of Object.entries(schema.indexes ?? {}))
-            wanted.set(`${INDEX_PREFIX}${name}_${shortHash(cols.join(","))}`, cols);
-        for (const { name } of this.db.exec(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name LIKE ?`, TABLE, `${INDEX_PREFIX}%`).toArray()) {
-            if (!wanted.has(name))
+        const wanted = this.indexes();
+        const sqlIndexes = this.db.exec(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name LIKE ?`, TABLE, `${INDEX_PREFIX}%`).toArray();
+        for (const { name } of sqlIndexes)
+            if (!wanted.some((ix) => ix.sqlIndex === name))
                 this.db.exec(`DROP INDEX IF EXISTS "${name}"`);
+        for (const { name } of existing)
+            if (name.startsWith(KEY_COLUMN_PREFIX) && !wanted.some((ix) => ix.keyColumn === name))
+                this.db.exec(`ALTER TABLE ${TABLE} DROP COLUMN "${name}"`);
+        for (const ix of wanted) {
+            if (!have.has(ix.keyColumn)) {
+                this.db.exec(`ALTER TABLE ${TABLE} ADD COLUMN "${ix.keyColumn}" TEXT`);
+                // A new index on existing rows: fill in their keys.
+                for (const stored of this.db.exec(`SELECT * FROM ${TABLE}`).toArray()) {
+                    this.db.exec(`UPDATE ${TABLE} SET "${ix.keyColumn}" = ? WHERE ${pk} = ?`, this.indexKey(ix, stored), stored[schema.primaryKey]);
+                }
+            }
+            this.db.exec(`CREATE INDEX IF NOT EXISTS "${ix.sqlIndex}" ON ${TABLE} ("${ix.keyColumn}")`);
         }
-        for (const [name, cols] of wanted)
-            this.db.exec(`CREATE INDEX IF NOT EXISTS "${name}" ON ${TABLE} (${[...cols, schema.primaryKey].map((c) => this.q(c)).join(", ")})`);
+        this.keyIndex = this.db.exec(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name LIKE 'sqlite_autoindex_%'`, TABLE).one().name;
         this.migrated = true;
     }
     version(key) {

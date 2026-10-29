@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-971cf035f530",
+  "generatedAt": "2026-10-29T19:02:24.529Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1024
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "table-1",
+      "operation": "write",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-971cf035f530-table-1-write-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "successes": 7550,
+      "errors": 10697,
+      "elapsedMs": 10582,
+      "operationsPerSecond": 713.4757134757134,
+      "mebibytesPerSecond": 0.6967536264411264,
+      "latencyMs": {
+        "p50": 12,
+        "p95": 1751,
+        "p99": 1804,
+        "max": 2771
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 668,
+        "depth": 0
+      }
+    }
+  ],
+  "splits": []
+}

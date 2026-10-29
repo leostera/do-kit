@@ -31,9 +31,9 @@
     "src/sharded/index.ts#ShardedObject.update": "e757c263164b",
     "src/sharded/index.ts#ShardedObject.waitForHold": "e9f287f59aad",
     "src/table/client.ts#TableClient.list": "b29b8da0041e",
-    "src/table/client.ts#mergePages": "6e0d69fa0539",
+    "src/table/client.ts#mergePages": "2edd6fab6b9c",
     "src/table/index.ts#ShardedTable.cleanupForeign": "46ce9716e350",
-    "src/table/index.ts#ShardedTable.page": "d2b5b93d3df5",
+    "src/table/index.ts#ShardedTable.page": "a4dc147f1802",
     "src/table/index.ts#ShardedTable.tablePage": "1ebd0ecefa89",
     "src/table/schema.ts#pageRequest": "c129ce2d7ccb"
   }
