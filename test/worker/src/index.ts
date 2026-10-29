@@ -93,8 +93,20 @@ export class FlakyRepos extends EvolvingRepos {
     this.ctx.storage.sql.exec("INSERT INTO test_clone (fail) VALUES (?)", fail ? 1 : 0);
   }
   protected override afterClone(owns: (key: string) => boolean): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_clone (fail INTEGER NOT NULL)");
     if (this.ctx.storage.sql.exec("SELECT fail FROM test_clone WHERE fail = 1").toArray().length) throw new Error("test: clone refused");
     super.afterClone(owns);
+  }
+  /** While set, this object refuses to be activated (the flag is copied with the rest). */
+  async failActivations(fail: boolean): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_activate (fail INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_activate");
+    this.ctx.storage.sql.exec("INSERT INTO test_activate (fail) VALUES (?)", fail ? 1 : 0);
+  }
+  override async shardedActivate(name: string, bits: string, epoch: number): Promise<boolean> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_activate (fail INTEGER NOT NULL)");
+    if (this.ctx.storage.sql.exec("SELECT fail FROM test_activate WHERE fail = 1").toArray().length) throw new Error("test: activation failed");
+    return super.shardedActivate(name, bits, epoch);
   }
 }
 
@@ -234,6 +246,11 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
   if (body.op === "upgrade") {
     const ns = namespace(env, body.cls) as unknown as DurableObjectNamespace<EvolvingRepos>;
     await ns.get(ns.idFromName(shardObjectName(body.name, ""))).upgrade().catch(() => {});
+    return null;
+  }
+  if (body.op === "failActivations") {
+    const ns = env.FLAKY;
+    await ns.get(ns.idFromName(shardObjectName(body.name, body.args[1] as string))).failActivations(body.args[0] as boolean);
     return null;
   }
   if (body.op === "failClones") {

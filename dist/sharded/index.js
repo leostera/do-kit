@@ -83,6 +83,8 @@ const COPY_PAGE_ROWS = 1000;
  */
 const DELETE_BATCH_ROWS = 250;
 const DELETE_PAUSE_MS = 25;
+/** How soon the alarm tries again after activating a sibling or cleaning up failed. */
+const ALARM_RETRY_MS = 1000;
 /**
  * Extend like DurableObject. Methods called through the client take the keys they act on first
  * (all owned by this shard), may take payloads aligned with the keys second, and read and write
@@ -606,13 +608,42 @@ export class ShardedObject extends DurableObject {
         if (now.activate?.epoch === pending.epoch && now.activate.bits === pending.bits)
             this.saveMeta({ ...now, activate: null });
     }
+    /**
+     * Activates a new sibling and clears what splits gave away. It never throws: the runtime
+     * retries a failing alarm only a few times, and the sibling is activated by nothing else, so
+     * a failure here reschedules the alarm itself for as long as there is work left.
+     */
     async alarm() {
         const meta = this.meta;
         // A verbatim copy not claimed yet carries the source's alarm: it is not this object's.
         if (!meta || this.isUnclaimedCopy())
             return;
-        if (meta.activate)
-            await this.activateSibling();
+        let failed = false;
+        if (meta.activate) {
+            try {
+                await this.activateSibling();
+            }
+            catch (error) {
+                failed = true;
+                console.error(JSON.stringify({ event: "split-activate-failed", node: this.nodeLabel(), sibling: meta.activate.bits, error: String(error) }));
+            }
+        }
+        try {
+            this.cleanupBatch();
+        }
+        catch (error) {
+            failed = true;
+            console.error(JSON.stringify({ event: "split-cleanup-failed", node: this.nodeLabel(), error: String(error) }));
+        }
+        const now = this.meta;
+        if (now.activate || failed)
+            await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
+        else if (now.cleanup.length > 0 || now.foreign)
+            await this.ctx.storage.setAlarm(Date.now() + DELETE_PAUSE_MS);
+    }
+    /** Deletes one batch of rows this object gave away: the base table's first, then the subclass's. */
+    cleanupBatch() {
+        const meta = this.meta;
         const range = meta.cleanup[0];
         if (range) {
             const deleted = this.sql.exec("DELETE FROM sharded_rows WHERE key IN (SELECT key FROM sharded_rows WHERE hash >= ? AND hash <= ? LIMIT ?)", range[0], range[1], DELETE_BATCH_ROWS).rowsWritten;
@@ -625,10 +656,6 @@ export class ShardedObject extends DurableObject {
             if (deleted === 0)
                 this.saveMeta({ ...this.meta, foreign: false });
         }
-        if (this.meta.activate)
-            await this.ctx.storage.setAlarm(Date.now() + 1000);
-        else if (this.meta.cleanup.length > 0 || this.meta.foreign)
-            await this.ctx.storage.setAlarm(Date.now() + DELETE_PAUSE_MS);
     }
     // ---- The sibling's side of a split ----
     /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */

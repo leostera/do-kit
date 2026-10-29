@@ -229,7 +229,14 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private tables;
     private node;
     private activateSibling;
+    /**
+     * Activates a new sibling and clears what splits gave away. It never throws: the runtime
+     * retries a failing alarm only a few times, and the sibling is activated by nothing else, so
+     * a failure here reschedules the alarm itself for as long as there is work left.
+     */
     alarm(): Promise<void>;
+    /** Deletes one batch of rows this object gave away: the base table's first, then the subclass's. */
+    private cleanupBatch;
     /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */
     shardedRestore(snapshot: DurableObjectSnapshot): Promise<void>;
     /**

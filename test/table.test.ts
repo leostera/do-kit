@@ -217,3 +217,21 @@ test("a split succeeds after an abandoned attempt left a copy with an older sche
   expect(rows.length).toBe(40);
   expect(rows.find((r) => r.row.name === "r0")!.row.stars).toBe(5);
 }, 60_000);
+
+test("a new shard is activated once it can be, however long activation kept failing", async () => {
+  const name = `activate-${Date.now()}`;
+  for (let i = 0; i < 40; i++) await table("flaky", name, "put", { name: `r${i}`, id: `id${i}`, createdAt: i, lastPushAt: null, deleted: false, meta: null });
+  // The copy inherits the flag: the new shard refuses to start serving.
+  await table("flaky", name, "failActivations", true, "");
+  expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(true);
+  // Long enough for the runtime to give up retrying a failing alarm.
+  await Bun.sleep(Number(process.env.ACTIVATE_FAIL_MS ?? 20_000));
+  expect((await post<{ state: string }>("/describe", { cls: "flaky", name, bits: "1" })).state).toBe("copy");
+  await table("flaky", name, "failActivations", false, "1");
+  for (let i = 0; i < 50; i++) {
+    if ((await post<{ state: string }>("/describe", { cls: "flaky", name, bits: "1" })).state === "shard") break;
+    await Bun.sleep(100);
+  }
+  expect((await post<{ state: string }>("/describe", { cls: "flaky", name, bits: "1" })).state).toBe("shard");
+  expect((await table<unknown[]>("flaky", name, "all", {})).length).toBe(40);
+}, 120_000);
