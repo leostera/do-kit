@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "sources": {
+    "src/client.ts#SplittableClient": "f418dc8f6b98",
+    "src/index.ts#SplittableObject": "0ffe14deba2a"
+  }
+}
