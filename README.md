@@ -174,10 +174,11 @@ protected override splitPolicy: SplitPolicy = {
   initialDepth: 0,     // presplit an empty object, for uniformly distributed keys
   copy: "auto",        // "native" snapshots, "logical" row copy, or auto-detect
   splitTimeoutMs: 60_000,
+  holdWaitMs: 2_000,   // a write to the half being copied waits this long, then the client backs off
 };
 ```
 
-The default threshold is about half of what one object handles on the edge, which shards headroom for real work and for the split itself. Tune it with your own workload.
+The default threshold is about half of what one object handles on the edge, which leaves headroom for real work and for the split itself. Tune it with your own workload.
 
 ## Writing a subclass
 
@@ -186,6 +187,8 @@ The default threshold is about half of what one object handles on the edge, whic
 - A split copies **every table**, yours too. Two hooks decide what happens to your rows for keys a shard no longer owns:
   - `afterClone(owns)` runs in the new object as it claims the copy, inside that transaction. Drop work it must not repeat here, such as its share of an outbox the original keeps delivering.
   - `cleanupForeign(owns, limit)` runs in paced batches from the alarm, on both shards after a split, until it returns 0. Delete up to `limit` rows for keys you no longer own and return how many you deleted. The default deletes nothing, so an original that delivers an outbox keeps its rows.
+- **Write your own tables only inside `update` or `transact(keys, fn)`.** Both wait while a split copies any of `keys`, check that the shard still owns them, and run in one transaction. A write that skips them can land after the copy and be lost. List every key whose rows you touch.
+- `ownedRowsPage(afterKey, limit)` pages this shard's rows in key order, a bounded number at a time, skipping keys it gave away.
 - `owns(key)` says whether a key is this shard's now. Until cleanup finishes, filter bulk queries over your own tables (listings, counts, uniqueness checks) with it.
 - `beforeHandOut()` runs before the copy, while writes to the moving half wait. Use it to finish work tied to rows that are about to move.
 - If you override `alarm`, call `await super.alarm()`, which activates new shards and runs the background cleanup.

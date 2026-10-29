@@ -54,6 +54,10 @@ export function shardObjectName(name, bits) {
 /** Thrown inside a method when its keys left this shard; the dispatcher answers "moved". */
 class Moved extends Error {
 }
+/** A write waited on a split for `holdWaitMs`: nothing was applied, the client retries later. */
+class NotReady extends Error {
+}
+const HOLD_WAIT_MS = 2_000;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS sharded_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sharded_rows (key TEXT PRIMARY KEY, hash TEXT NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
@@ -115,8 +119,7 @@ export class ShardedObject extends DurableObject {
      * it waits; once the copy serves, it answers "moved".
      */
     async update(keys, decide) {
-        for (let hold = this.holding(keys); hold; hold = this.holding(keys))
-            await hold;
+        await this.waitForHold(keys);
         // No await from here on: the check and the transaction see the same split state.
         this.assertOwner(keys);
         return this.ctx.storage.transactionSync(() => {
@@ -135,6 +138,30 @@ export class ShardedObject extends DurableObject {
             }
             return result;
         });
+    }
+    /**
+     * Runs `fn` in one transaction, fenced like `update`: it waits while any of `keys` is being
+     * copied by a split, and runs only if this shard still owns them all. Write the subclass's own
+     * tables here, never outside: a write that skips the fence can land after the copy and be lost.
+     * List every key whose rows `fn` touches. `fn` must be synchronous.
+     */
+    transact(keys, fn) {
+        return this.update(keys, () => ({ writes: new Map(), result: fn() }));
+    }
+    /**
+     * Up to `limit` of this shard's rows (of `read`/`update`) with keys after `afterKey`, in key
+     * order: bounded paging over one shard. Rows of keys it no longer owns are skipped, so a page
+     * is right while cleanup is still running.
+     */
+    ownedRowsPage(afterKey, limit) {
+        this.assertOwner([]);
+        if (!Number.isInteger(limit) || limit < 1)
+            throw new Error("ownedRowsPage limit must be a positive integer");
+        const [lo, hi] = hashRange(this.meta.bits);
+        const out = [];
+        for (const r of this.sql.exec("SELECT key, value FROM sharded_rows WHERE key > ? AND hash >= ? AND hash <= ? ORDER BY key LIMIT ?", afterKey ?? "", lo, hi, limit))
+            out.push([r.key, JSON.parse(r.value)]);
+        return out;
     }
     /**
      * Runs before this shard copies its storage for a split, while writes to the half that moves
@@ -193,6 +220,20 @@ export class ShardedObject extends DurableObject {
             if (!ownsHash(meta.bits, keyHash(key)))
                 throw new Moved();
     }
+    /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
+    async waitForHold(keys) {
+        const deadline = Date.now() + (this.splitPolicy.holdWaitMs ?? HOLD_WAIT_MS);
+        for (let hold = this.holding(keys); hold; hold = this.holding(keys)) {
+            const left = deadline - Date.now();
+            if (left <= 0)
+                throw new NotReady();
+            let timer;
+            const released = await Promise.race([hold.then(() => true), new Promise((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
+            clearTimeout(timer);
+            if (!released)
+                throw new NotReady();
+        }
+    }
     /** What an update of these keys waits for, if any. */
     holding(keys) {
         const hold = this.hold;
@@ -222,6 +263,8 @@ export class ShardedObject extends DurableObject {
         catch (error) {
             if (error instanceof Moved)
                 return this.moved(bits);
+            if (error instanceof NotReady)
+                return { notReady: bits };
             throw error;
         }
     }
