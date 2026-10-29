@@ -148,7 +148,7 @@ export class ShardedObject extends DurableObject {
     quietUntil = Date.now();
     /** The split in progress here: writes to `right` wait for `released`. */
     hold = null;
-    counters = { since: Date.now(), calls: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
+    counters = { since: Date.now(), calls: 0, ok: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
     /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
     receiving = null;
     /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
@@ -369,7 +369,9 @@ export class ShardedObject extends DurableObject {
         this.countCall(keys.length);
         const fn = this.routedMethod(method);
         try {
-            return { ok: await fn.call(this, keys, payloads, ...args) };
+            const ok = await fn.call(this, keys, payloads, ...args);
+            this.counters.ok++;
+            return { ok };
         }
         catch (error) {
             if (error instanceof Moved)
@@ -387,7 +389,9 @@ export class ShardedObject extends DurableObject {
         this.counters.calls++;
         const fn = this.routedMethod(method);
         try {
-            return { ok: await fn.call(this, ...args) };
+            const ok = await fn.call(this, ...args);
+            this.counters.ok++;
+            return { ok };
         }
         catch (error) {
             if (error instanceof Moved)

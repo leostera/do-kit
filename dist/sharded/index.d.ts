@@ -116,8 +116,17 @@ export interface SplitRecord {
 export interface CallCounters {
     /** When counting started: when this object was last started. */
     readonly since: number;
-    /** Routed calls and scans this object served (whatever they then answered). */
+    /**
+     * Routed calls and scans that reached a method here: `ok` of them returned, the rest answered
+     * "moved" or "not ready" from inside it (a write released by a split as "moved", or held past
+     * `holdWaitMs`) or threw.
+     */
     readonly calls: number;
+    readonly ok: number;
+    /**
+     * Every "moved", "not ready" and "stale" answer, whether given on arrival (the caller's map is
+     * out of date; not in `calls`) or from inside a method (in `calls`).
+     */
     readonly moved: number;
     readonly notReady: number;
     readonly stale: number;
