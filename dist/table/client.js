@@ -14,9 +14,11 @@ export class TableClient {
     name;
     client;
     primaryKey;
+    indexes;
     constructor(namespace, name, schema, options = {}) {
         this.name = name;
         this.primaryKey = schema.primaryKey;
+        this.indexes = schema.indexes ?? {};
         this.client = sharded(namespace, name, options);
     }
     async get(key) {
@@ -50,7 +52,8 @@ export class TableClient {
      * filter ran out of budget) and still have a cursor.
      */
     async list(query = {}) {
-        const fingerprint = queryFingerprint(pageRequest(query, null));
+        const request0 = pageRequest(query, null);
+        const fingerprint = queryFingerprint(request0, request0.index === null ? [] : (this.indexes[request0.index] ?? []));
         const after = query.cursor ? decodeCursor(query.cursor, fingerprint) : null;
         const request = pageRequest(query, after);
         const rows = [];

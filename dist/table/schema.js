@@ -139,9 +139,13 @@ export function encodeIndexKey(values) {
         hex += byte.toString(16).padStart(2, "0");
     return hex;
 }
-/** A short fingerprint of what a cursor belongs to: the index, direction and conditions. */
-export function queryFingerprint(request) {
-    const text = JSON.stringify([request.index, request.direction, request.where]);
+/**
+ * A short fingerprint of what a cursor belongs to: the index (its name and columns, so a cursor
+ * from before an index was redefined is refused, not resumed at a meaningless position), the
+ * direction and the conditions.
+ */
+export function queryFingerprint(request, columns) {
+    const text = JSON.stringify([request.index, columns, request.direction, request.where]);
     let h = 0x811c9dc5;
     for (let i = 0; i < text.length; i++)
         h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);

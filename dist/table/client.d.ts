@@ -9,6 +9,7 @@ export declare class TableClient<Row extends RowShape> {
     readonly name: string;
     private readonly client;
     private readonly primaryKey;
+    private readonly indexes;
     constructor(namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>, name: string, schema: TableSchema<Row>, options?: ShardedClientOptions);
     get(key: string): Promise<Versioned<Row> | null>;
     /** Rows of these keys, in order (null: absent). */

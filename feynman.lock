@@ -28,7 +28,7 @@
     "src/sharded/index.ts#ShardedObject.split": "c2d0a5190344",
     "src/sharded/index.ts#ShardedObject.update": "e757c263164b",
     "src/sharded/index.ts#ShardedObject.waitForHold": "c0b08642f55c",
-    "src/table/client.ts#TableClient.list": "a2730a9e6b15",
+    "src/table/client.ts#TableClient.list": "d35008e23e6d",
     "src/table/client.ts#mergePages": "2edd6fab6b9c",
     "src/table/client.ts#perShardLimit": "4fb242e403e9",
     "src/table/index.ts#ShardedTable.cleanupForeign": "46ce9716e350",
