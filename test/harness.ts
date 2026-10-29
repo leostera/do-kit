@@ -1,4 +1,6 @@
-// Starts the test Worker under cf dev (vite) for a test file, and talks to it over HTTP.
+// Starts the test Worker under cf dev (vite) for a test file, and talks to it over HTTP. With
+// TEST_URL set, talks to that deployed Worker instead (where splits use real storage snapshots),
+// sending TEST_TOKEN as a bearer token and TEST_ACCESS_TOKEN, if set, to pass Cloudflare Access.
 import type { NodeDescription } from "../src/index.ts";
 import { afterAll, beforeAll } from "bun:test";
 import { join } from "node:path";
@@ -9,6 +11,10 @@ let base = "";
 export function useWorker(): void {
   let stop = async () => {};
   beforeAll(async () => {
+    if (process.env.TEST_URL) {
+      base = process.env.TEST_URL.replace(/\/$/, "");
+      return;
+    }
     const probe = Bun.serve({ port: 0, fetch: () => new Response() });
     const port = probe.port!;
     probe.stop(true);
@@ -35,8 +41,16 @@ export function useWorker(): void {
 /** The test Worker's URL. */
 export const workerUrl = (): string => base;
 
+/** Headers for the test Worker: its token and an Access token, when it is deployed. */
+export function requestHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (process.env.TEST_TOKEN) headers.authorization = `Bearer ${process.env.TEST_TOKEN}`;
+  if (process.env.TEST_ACCESS_TOKEN) headers["cf-access-token"] = process.env.TEST_ACCESS_TOKEN;
+  return headers;
+}
+
 export async function post<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(base + path, { method: "POST", body: JSON.stringify(body) });
+  const response = await fetch(base + path, { method: "POST", body: JSON.stringify(body), headers: requestHeaders() });
   if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`);
   return (await response.json()) as T;
 }

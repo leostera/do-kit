@@ -263,6 +263,19 @@ bun test             # integration tests under cf dev: concurrent writes and CAS
 bun run specs:check  # model-check the split protocol
 ```
 
+Locally, splits copy rows: workerd has no storage snapshots. To run the same tests against snapshots, deploy the test Worker under another name with a token, and point the tests at it:
+
+```sh
+cd test/worker
+echo "TEST_TOKEN=$(openssl rand -hex 32)" > /tmp/do-kit-test.vars   # not .dev.vars: cf dev would read it
+TEST_WORKER_NAME=do-kit-test-snapshots cf deploy --secrets-file /tmp/do-kit-test.vars
+cd ../..
+set -a; . /tmp/do-kit-test.vars; set +a
+TEST_URL=https://do-kit-test-snapshots.<your-subdomain>.workers.dev bun test --timeout 300000
+```
+
+Behind Cloudflare Access, also set `TEST_ACCESS_TOKEN` (`cloudflared access token -app=$TEST_URL`).
+
 The benchmark Worker and the scripts that produced the graphs above are in [`bench/`](bench/README.md).
 
 ## License

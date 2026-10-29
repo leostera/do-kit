@@ -14,6 +14,8 @@ interface Env {
   readonly EVOLVING: DurableObjectNamespace<EvolvingRepos>;
   readonly FLAKY: DurableObjectNamespace<FlakyRepos>;
   readonly OLD_ALARM: DurableObjectNamespace<OldAlarm>;
+  /** Set when deployed: every request carries it as a bearer token (the routes can delete data). */
+  readonly TEST_TOKEN?: string;
 }
 
 // ---- A sharded table: repositories, split by hand ----
@@ -317,6 +319,7 @@ class CounterBase extends ShardedObject<Env, number> {
   async wipe(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    await this.ctx.storage.sync(); // durable before the restart, which drops what is not
     this.ctx.abort("wiped");
   }
 
@@ -388,6 +391,7 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    if (env.TEST_TOKEN && request.headers.get("authorization") !== `Bearer ${env.TEST_TOKEN}`) return new Response("unauthorized", { status: 401 });
     const url = new URL(request.url);
     const body = (await request.json().catch(() => ({}))) as { cls: string; name: string; method: string; keys: string[]; payloads: unknown[] | null; bits: string; args?: unknown[] };
     const ns = namespace(env, body.cls);

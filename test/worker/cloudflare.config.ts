@@ -3,7 +3,8 @@
 import { bindings, defineConfig, exports } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
-const NAME = "do-kit-test";
+// Deployed (to run the tests against real storage snapshots), it takes another name.
+const NAME = process.env.TEST_WORKER_NAME ?? "do-kit-test";
 
 export default defineConfig(() => ({
   worker: {

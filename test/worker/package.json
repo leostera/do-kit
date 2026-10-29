@@ -1,0 +1,11 @@
+{
+  "name": "@leostera/do-kit-test-worker",
+  "private": true,
+  "type": "module",
+  "description": "The Worker the tests drive. Its dependencies are the repository root's; this file lets cf deploy it.",
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "beta",
+    "cf": "^1.0.0-beta.23",
+    "vite": "^8.3.5"
+  }
+}

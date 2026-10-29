@@ -4,9 +4,11 @@
 import { expect, test } from "bun:test";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
-import { call, describe, post, shards, useWorker, workerUrl } from "./harness.ts";
+import { call, describe, post, requestHeaders, shards, useWorker, workerUrl } from "./harness.ts";
 
 useWorker();
+/** Against a deployed Worker: splits copy with storage snapshots, and requests reach many isolates. */
+const deployed = Boolean(process.env.TEST_URL);
 
 let run = 0;
 const KEYS = Array.from({ length: 64 }, (_, i) => `key-${i}`);
@@ -234,7 +236,7 @@ test("ownedRowsPage includes the empty key", async () => {
 }, 60_000);
 
 test("callOneShard with no keys says so", async () => {
-  const response = await fetch(`${workerUrl()}/callOne`, { method: "POST", body: JSON.stringify({ cls: "m", name: `one-empty-${Date.now()}`, method: "get", keys: [], payloads: null }) });
+  const response = await fetch(`${workerUrl()}/callOne`, { method: "POST", headers: requestHeaders(), body: JSON.stringify({ cls: "m", name: `one-empty-${Date.now()}`, method: "get", keys: [], payloads: null }) });
   expect(response.status).toBe(500);
   expect(await response.text()).toContain("at least one key");
 }, 60_000);
@@ -280,7 +282,7 @@ test("a client recovers when an object's storage was deleted and its name is use
   expect(await post<boolean>("/split", { cls: "m", name, bits: "0" })).toBe(true);
   // The client learns the splits.
   expect(await call<number[]>("m", name, "get", KEYS)).toEqual(KEYS.map(() => 1));
-  expect((await post<string[]>("/splits", { cls: "m", name })).length).toBeGreaterThan(1);
+  if (!deployed) expect((await post<string[]>("/splits", { cls: "m", name })).length).toBeGreaterThan(1);
   // Every shard's storage is deleted (an account removed), then the name is used again.
   for (const bits of ["", "1", "01"]) await post("/wipe", { cls: "m", name, bits });
   await call("m", name, "add", ["a", "b"], [5, 7]);
@@ -326,7 +328,8 @@ test("a sharded object that overrides alarm() is refused, pointing at onAlarm", 
   await expect(call("oldAlarm", `old-${Date.now()}`, "get", ["a"])).rejects.toThrow("onAlarm");
 }, 60_000);
 
-test("an isolate keeps the splits of the objects it used last, up to a bound", async () => {
+// Reads one isolate's map between requests: only under cf dev, where they all reach one isolate.
+test.skipIf(deployed)("an isolate keeps the splits of the objects it used last, up to a bound", async () => {
   const name = `bounded-${Date.now()}`;
   await call("m", name, "add", KEYS, KEYS.map(() => 1));
   expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
@@ -377,7 +380,7 @@ test("a shard keeps a record of its splits, and counts what it answered", async 
   const root = await describe("m", name, "");
   expect(root.splits).toHaveLength(1);
   const [record] = root.splits;
-  expect(record).toMatchObject({ outcome: "split", copy: "logical", rows: KEYS.length, rightRows: KEYS.filter((k) => firstBit(k) === 1).length, error: null });
+  expect(record).toMatchObject({ outcome: "split", copy: deployed ? "native" : "logical", rows: KEYS.length, rightRows: KEYS.filter((k) => firstBit(k) === 1).length, error: null });
   expect(record!.ms).toBeGreaterThanOrEqual(500);
   // The slow hand-out is where the time went; locally the copy is logical.
   expect(record!.steps.handOut).toBeGreaterThanOrEqual(500);
