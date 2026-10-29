@@ -166,7 +166,7 @@ export class ShardedObject extends DurableObject {
             throw new Error("ownedRowsPage limit must be a positive integer");
         const [lo, hi] = hashRange(this.meta.bits);
         const out = [];
-        for (const r of this.sql.exec("SELECT key, value FROM sharded_rows WHERE key > ? AND hash >= ? AND hash <= ? ORDER BY key LIMIT ?", afterKey ?? "", lo, hi, limit))
+        for (const r of this.sql.exec("SELECT key, value FROM sharded_rows WHERE (? IS NULL OR key > ?) AND hash >= ? AND hash <= ? ORDER BY key LIMIT ?", afterKey, afterKey, lo, hi, limit))
             out.push([r.key, JSON.parse(r.value)]);
         return out;
     }

@@ -225,3 +225,10 @@ test("a logical copy loses no row while the background cleanup of an earlier spl
   const lost = keys.filter((_, i) => got[i] !== value);
   expect(lost).toEqual([]);
 }, 120_000);
+
+test("ownedRowsPage includes the empty key", async () => {
+  const name = `paged-empty-${Date.now()}`;
+  await call("m", name, "add", ["", "a", "b"], [1, 1, 1]);
+  const shards = await post<string[][]>("/scan", { cls: "m", name, method: "pagedKeys", args: [2] });
+  expect(shards.flat().sort()).toEqual(["", "a", "b"]);
+}, 60_000);
