@@ -1,7 +1,7 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/design/sharded-table.md.
 import { keyHash, ShardedObject } from "../sharded/index.js";
-import { encodeIndexKey, pageRequest, type ColumnType, type Condition, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
+import { encodeIndexKey, encodeValue, pageRequest, type ColumnType, type Condition, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
 
 export * from "./schema.js";
 export { table, TableClient } from "./client.js";
@@ -290,29 +290,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   }
 
   private encode(column: string, value: unknown): SqlValue {
-    const type = this.table.columns[column as keyof Row & string];
-    if (value === null || value === undefined) {
-      if (column === this.table.primaryKey) throw new Error("the primary key cannot be null");
-      return null;
-    }
-    switch (type) {
-      case "text":
-        if (typeof value !== "string") throw new Error(`${column}: expected text`);
-        return value;
-      case "integer":
-        if (typeof value !== "number" || !Number.isInteger(value)) throw new Error(`${column}: expected an integer`);
-        return value;
-      case "real":
-        if (typeof value !== "number") throw new Error(`${column}: expected a number`);
-        return value;
-      case "boolean":
-        if (typeof value !== "boolean") throw new Error(`${column}: expected a boolean`);
-        return value ? 1 : 0;
-      case "json":
-        return JSON.stringify(value);
-      default:
-        throw new Error(`no column ${column}`);
-    }
+    return encodeValue(this.table, column, value);
   }
 
   private decode(stored: Record<string, SqlValue>): Row {

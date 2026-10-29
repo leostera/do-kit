@@ -27,6 +27,44 @@ export function defineTable(schema) {
     }
     return schema;
 }
+/**
+ * A column's value as SQLite stores it, checked against the column's type: `boolean` as 0/1,
+ * `json` as text. NaN is refused: SQLite would store it as null.
+ */
+export function encodeValue(schema, column, value) {
+    const type = schema.columns[column];
+    if (!type)
+        throw new Error(`no column ${column}`);
+    if (value === null || value === undefined) {
+        if (column === schema.primaryKey)
+            throw new Error("the primary key cannot be null");
+        return null;
+    }
+    switch (type) {
+        case "text":
+            if (typeof value !== "string")
+                throw new Error(`${column}: expected text`);
+            return value;
+        case "integer":
+            if (typeof value !== "number" || !Number.isInteger(value))
+                throw new Error(`${column}: expected an integer`);
+            return value;
+        case "real":
+            if (typeof value !== "number" || Number.isNaN(value))
+                throw new Error(`${column}: expected a number (not NaN)`);
+            return value;
+        case "boolean":
+            if (typeof value !== "boolean")
+                throw new Error(`${column}: expected a boolean`);
+            return value ? 1 : 0;
+        case "json": {
+            const text = JSON.stringify(value);
+            if (text === undefined)
+                throw new Error(`${column}: not representable as JSON`);
+            return text;
+        }
+    }
+}
 export const MAX_LIMIT = 1_000;
 export const MAX_BUDGET = 10_000;
 /** The request for a query, with defaults and bounds applied. */

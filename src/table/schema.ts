@@ -37,6 +37,38 @@ export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): Tab
   return schema;
 }
 
+/**
+ * A column's value as SQLite stores it, checked against the column's type: `boolean` as 0/1,
+ * `json` as text. NaN is refused: SQLite would store it as null.
+ */
+export function encodeValue<Row extends RowShape>(schema: TableSchema<Row>, column: string, value: unknown): SqlValue {
+  const type = schema.columns[column as keyof Row & string];
+  if (!type) throw new Error(`no column ${column}`);
+  if (value === null || value === undefined) {
+    if (column === schema.primaryKey) throw new Error("the primary key cannot be null");
+    return null;
+  }
+  switch (type) {
+    case "text":
+      if (typeof value !== "string") throw new Error(`${column}: expected text`);
+      return value;
+    case "integer":
+      if (typeof value !== "number" || !Number.isInteger(value)) throw new Error(`${column}: expected an integer`);
+      return value;
+    case "real":
+      if (typeof value !== "number" || Number.isNaN(value)) throw new Error(`${column}: expected a number (not NaN)`);
+      return value;
+    case "boolean":
+      if (typeof value !== "boolean") throw new Error(`${column}: expected a boolean`);
+      return value ? 1 : 0;
+    case "json": {
+      const text = JSON.stringify(value);
+      if (text === undefined) throw new Error(`${column}: not representable as JSON`);
+      return text;
+    }
+  }
+}
+
 /** A row and its version: 1 when written first, one more on every write. */
 export interface Versioned<Row> {
   readonly row: Row;
