@@ -2,9 +2,11 @@
 
 **Building blocks for Cloudflare Durable Objects.** Pick the layer you need:
 
-| Layer | Import | What it gives you |
+Everything is exported from `@leostera/do-kit`. Each layer also has its own path, if you want to import only that layer.
+
+| Layer | Also at | What it gives you |
 |---|---|---|
-| **Sharded object** | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, routing that follows splits. |
+| **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, routing that follows splits. |
 | Key-value, events, indexes, cached reads | coming | Built on sharded objects: a ready-made store, change feeds and watches, unique keys and secondary indexes across shards, and reads cached in every data center. |
 
 ## Sharded objects: Durable Objects that split themselves when they get busy
@@ -122,7 +124,7 @@ You need SQLite-backed Durable Objects, `nodejs_compat`, and, for snapshot split
 ## Quick start
 
 ```ts
-import { ShardedObject, sharded, type UpdateResult } from "@leostera/do-kit/sharded";
+import { ShardedObject, sharded, type UpdateResult } from "@leostera/do-kit";
 
 interface Env {
   COUNTERS: DurableObjectNamespace<Counter>;
