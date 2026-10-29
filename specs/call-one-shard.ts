@@ -1,14 +1,14 @@
-// A stale client may not know that a split happened. A leaf checks every key before invoking a
-// method, so callOneLeaf can discover a split and refuse the now-cross-leaf batch without having
+// A stale client may not know that a split happened. A shard checks every key before invoking a
+// method, so callOneShard can discover a split and refuse the now-cross-shard batch without having
 // applied any part of it.
 import { defineSpec, message } from "@leostera/feynman";
 
 type Key = "L" | "R";
 
 export default defineSpec(
-  "One-leaf calls",
+  "One-shard calls",
   {
-    description: "How callOneLeaf refuses a batch that spans leaves, even when the client learns about the split only after reaching the old owner.",
+    description: "How callOneShard refuses a batch that spans shards, even when the client learns about the split only after reaching the old owner.",
     messages: {
       Call: message<{ keys: Key[] }>({ name: "call" }),
       Moved: message<{ keys: Key[] }>({ name: "moved", tone: "refused" }),
@@ -26,14 +26,14 @@ export default defineSpec(
       initialState: () => ({ knowsSplit: false, rejected: false, callsSent: 0 }),
       display: {
         icon: "code",
-        status: (s) => (s.rejected ? "refused: spans leaves" : s.knowsSplit ? "knows the split" : "stale map"),
+        status: (s) => (s.rejected ? "refused: spans shards" : s.knowsSplit ? "knows the split" : "stale map"),
         mood: (s) => (s.rejected ? "warn" : "ok"),
       },
       actions: {
-        callOneLeaf: {
-          label: "Call one leaf",
-          description: "Requires every key to stay on one leaf.",
-          sources: ["src/client.ts:95-116"],
+        callOneShard: {
+          label: "Call one shard",
+          description: "Requires every key to stay on one shard.",
+          sources: ["src/sharded/client.ts:95-116"],
           sends: [Call],
           run(s, _inputs, ctx) {
             s.callsSent++;
@@ -45,7 +45,7 @@ export default defineSpec(
       transitions: {
         [Moved]: {
           description: "Learns the split, then rejects the batch before retrying any key.",
-          sources: ["src/client.ts:91-116", "src/client.ts:124-126"],
+          sources: ["src/sharded/client.ts:91-116", "src/sharded/client.ts:124-126"],
           run(s, msg) {
             s.knowsSplit = true;
             if (msg.keys.includes("L") && msg.keys.includes("R")) s.rejected = true;
@@ -62,13 +62,13 @@ export default defineSpec(
       initialState: () => ({ applied: 0 }),
       display: {
         icon: "database",
-        status: (s) => `left leaf; ${s.applied} applied`,
+        status: (s) => `left shard; ${s.applied} applied`,
         mood: () => "ok",
       },
       transitions: {
         [Call]: {
-          description: "Detects that the batch no longer belongs entirely to this leaf and answers moved before invoking the method.",
-          sources: ["src/index.ts#SplittableObject.splittableCall"],
+          description: "Detects that the batch no longer belongs entirely to this shard and answers moved before invoking the method.",
+          sources: ["src/sharded/index.ts#ShardedObject.shardedCall"],
           sends: [Moved],
           run(_s, msg, ctx) {
             ctx.reply(Moved, msg);
@@ -84,7 +84,7 @@ export default defineSpec(
 
     spec.defineProperties({
       rejectedBatchHasNoEffects: {
-        description: "A callOneLeaf request that spans the split is rejected without applying either key.",
+        description: "A callOneShard request that spans the split is rejected without applying either key.",
         always: (w) => !w.the(Client).state.rejected || w.the(Original).state.applied === 0,
       },
       learnsFromMoved: {
@@ -94,10 +94,10 @@ export default defineSpec(
     });
 
     spec.defineScenario({
-      name: "Refuse a cross-leaf update",
+      name: "Refuse a cross-shard update",
       description: "The stale client sends both keys to the original; it answers moved without running the method, and the client refuses before retrying either key.",
       run(s) {
-        s.act(s.the(Client), "callOneLeaf");
+        s.act(s.the(Client), "callOneShard");
         s.settle();
       },
     });

@@ -1,5 +1,5 @@
 {
-  "name": "@leostera/splittable-object-bench-worker",
+  "name": "@leostera/do-kit-bench-worker",
   "private": true,
   "type": "module",
   "scripts": {

@@ -1,7 +1,7 @@
 import { bindings, defineConfig, exports } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
-const NAME = process.env.BENCH_WORKER_NAME ?? "splittable-object-bench";
+const NAME = process.env.BENCH_WORKER_NAME ?? "do-kit-bench";
 
 export default defineConfig(() => ({
   worker: {

@@ -1,5 +1,5 @@
 // A snapshot leaves the original's old rows in place until background cleanup runs. Scans must
-// expose only rows in each leaf's owned hash range, not every row still physically stored there.
+// expose only rows in each shard's owned hash range, not every row still physically stored there.
 import { defineSpec, message } from "@leostera/feynman";
 
 type Key = "L" | "R";
@@ -15,8 +15,8 @@ export default defineSpec(
   },
   (spec) => {
     const { Scan, Rows } = spec.messages;
-    const callers = spec.defineZone({ name: "Workers", description: "collect one result from each leaf" });
-    const objects = spec.defineZone({ name: "Durable Objects", description: "return rows in each leaf's owned range" });
+    const callers = spec.defineZone({ name: "Workers", description: "collect one result from each shard" });
+    const objects = spec.defineZone({ name: "Durable Objects", description: "return rows in each shard's owned range" });
 
     const Client = spec.defineActor({
       name: "Client",
@@ -25,15 +25,15 @@ export default defineSpec(
       initialState: () => ({ started: false, pending: 0, seen: { L: 0, R: 0 } as Record<Key, number> }),
       display: {
         icon: "code",
-        status: (s) => (s.pending ? `waiting for ${s.pending} leaf result(s)` : s.started ? "scan complete" : "idle"),
+        status: (s) => (s.pending ? `waiting for ${s.pending} shard result(s)` : s.started ? "scan complete" : "idle"),
         mood: (s) => (s.pending ? "busy" : "ok"),
       },
       actions: {
         scan: {
-          label: "Scan all leaves",
-          description: "Asks both leaves for their owned rows.",
+          label: "Scan all shards",
+          description: "Asks both shards for their owned rows.",
           when: (s) => !s.started,
-          sources: ["src/client.ts:142-160"],
+          sources: ["src/sharded/client.ts:142-160"],
           sends: [Scan],
           run(s, _inputs, ctx) {
             s.started = true;
@@ -46,8 +46,8 @@ export default defineSpec(
       },
       transitions: {
         [Rows]: {
-          description: "Adds this leaf's rows to the scan result.",
-          sources: ["src/client.ts:142-160"],
+          description: "Adds this shard's rows to the scan result.",
+          sources: ["src/sharded/client.ts:142-160"],
           run(s, msg) {
             for (const key of msg.keys) s.seen[key]++;
             s.pending--;
@@ -58,13 +58,13 @@ export default defineSpec(
 
     const Original = spec.defineActor({
       name: "Original",
-      description: "The left leaf still physically stores the right rows until cleanup, but no longer owns them.",
+      description: "The left shard still physically stores the right rows until cleanup, but no longer owns them.",
       zone: objects,
       singleton: true,
       initialState: () => ({ stored: { L: true, R: true } }),
       display: {
         icon: "database",
-        status: (s) => `left leaf; ${s.stored.R ? "old right rows await cleanup" : "clean"}`,
+        status: (s) => `left shard; ${s.stored.R ? "old right rows await cleanup" : "clean"}`,
         mood: (s) => (s.stored.R ? "info" : "ok"),
         rows: (s) => [
           { group: "stored rows", label: "L", detail: "owned", mood: "info" },
@@ -74,7 +74,7 @@ export default defineSpec(
       transitions: {
         [Scan]: {
           description: "Returns only keys in its left-half hash range, even before old rows are deleted.",
-          sources: ["src/index.ts#SplittableObject.splittableScan", "src/index.ts#SplittableObject.allRows"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedScan", "src/sharded/index.ts#ShardedObject.allRows"],
           sends: [Rows],
           run(_s, _msg, ctx) {
             ctx.reply(Rows, { keys: ["L"] });
@@ -86,7 +86,7 @@ export default defineSpec(
           label: "Run cleanup",
           description: "Deletes the old right-half rows from the original after ownership has moved: the built-in rows, then, through cleanupForeign, the subclass's. Until then, reads filter by ownership (allRows, owns).",
           when: (s) => s.stored.R,
-          sources: ["src/index.ts#SplittableObject.alarm", "src/index.ts#SplittableObject.cleanupForeign", "src/index.ts#SplittableObject.owns"],
+          sources: ["src/sharded/index.ts#ShardedObject.alarm", "src/sharded/index.ts#ShardedObject.cleanupForeign", "src/sharded/index.ts#ShardedObject.owns"],
           run(s) {
             s.stored.R = false;
           },
@@ -96,20 +96,20 @@ export default defineSpec(
 
     const Sibling = spec.defineActor({
       name: "Sibling",
-      description: "The right leaf owns the rows copied from the original.",
+      description: "The right shard owns the rows copied from the original.",
       zone: objects,
       singleton: true,
       initialState: () => ({ stored: true }),
       display: {
         icon: "database",
-        status: () => "right leaf",
+        status: () => "right shard",
         mood: () => "ok",
         rows: () => [{ group: "stored rows", label: "R", detail: "owned", mood: "info" }],
       },
       transitions: {
         [Scan]: {
           description: "Returns the keys in its right-half hash range.",
-          sources: ["src/index.ts#SplittableObject.splittableScan", "src/index.ts#SplittableObject.allRows"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedScan", "src/sharded/index.ts#ShardedObject.allRows"],
           sends: [Rows],
           run(s, _msg, ctx) {
             ctx.reply(Rows, { keys: s.stored ? ["R"] : [] });
@@ -119,7 +119,7 @@ export default defineSpec(
     });
 
     spec.defineFinalState({
-      description: "The scan has no leaf responses in flight; incomplete scans are outside this visibility model.",
+      description: "The scan has no shard responses in flight; incomplete scans are outside this visibility model.",
       when: (w) => w.quiet,
     });
 

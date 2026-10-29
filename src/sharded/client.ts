@@ -1,10 +1,10 @@
-// The client side of splittable objects: routes keys to leaves through the splits it
+// The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { hashBit, keyHash, leafObjectName, nodeName, type CallAnswer, type SplittableObject } from "./index.js";
+import { hashBit, keyHash, shardObjectName, nodeName, type CallAnswer, type ShardedObject } from "./index.js";
 
-/** One leaf's answer: the keys it was given (in the caller's order) and what it returned. */
-export interface LeafResult<R> {
+/** One shard's answer: the keys it was given (in the caller's order) and what it returned. */
+export interface ShardResult<R> {
   readonly keys: readonly string[];
   /** Positions of `keys` in the caller's list. */
   readonly positions: readonly number[];
@@ -13,16 +13,16 @@ export interface LeafResult<R> {
 
 type AnyMethod = (...args: never[]) => unknown;
 /** Methods callable with keys: `(keys, payloads, ...args)`. */
-type KeyMethods<T> = { [K in keyof T]: K extends `splittable${string}` ? never : T[K] extends (keys: readonly string[], payloads: never, ...args: never[]) => unknown ? K : never }[keyof T] & string;
-type ScanMethods<T> = { [K in keyof T]: K extends `splittable${string}` ? never : T[K] extends AnyMethod ? K : never }[keyof T] & string;
+type KeyMethods<T> = { [K in keyof T]: K extends `sharded${string}` ? never : T[K] extends (keys: readonly string[], payloads: never, ...args: never[]) => unknown ? K : never }[keyof T] & string;
+type ScanMethods<T> = { [K in keyof T]: K extends `sharded${string}` ? never : T[K] extends AnyMethod ? K : never }[keyof T] & string;
 type Rest<F> = F extends (keys: never, payloads: never, ...args: infer A) => unknown ? A : never;
 type Payload<F> = F extends (keys: never, payloads: infer P, ...args: never[]) => unknown ? (P extends readonly (infer E)[] | null ? E : never) : never;
 type Result<F> = F extends (...args: never[]) => infer R ? Awaited<R> : never;
 
-/** Keys that had to go to one leaf belong to several (nothing was applied). */
-export class SpansLeaves extends Error {}
+/** Keys that had to go to one shard belong to several (nothing was applied). */
+export class SpansShards extends Error {}
 
-const CACHE_ORIGIN = "https://splittable-object.invalid/";
+const CACHE_ORIGIN = "https://do-kit.invalid/";
 /**
  * Splits known per object (keyed by its root's Durable Object ID, unique per namespace and
  * name), shared by every client in this isolate.
@@ -32,25 +32,25 @@ const loadedFromCache = new Set<string>();
 
 /** A hop limit: deeper than any maxDepth, so a loop is a bug, not a slow call. */
 const MAX_HOPS = 64;
-/** How long a call waits for a new leaf to start serving (it is activated just after a split). */
+/** How long a call waits for a new shard to start serving (it is activated just after a split). */
 const NOT_READY_WAIT_MS = 30_000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Waits a little longer each time a leaf is not ready; throws once that has gone on too long. */
+/** Waits a little longer each time a shard is not ready; throws once that has gone on too long. */
 class Backoff {
   private wait = 5;
   private waited = 0;
   constructor(private readonly what: string) {}
   async next(): Promise<void> {
-    if (this.waited > NOT_READY_WAIT_MS) throw new Error(`${this.what}: a new leaf did not start serving`);
+    if (this.waited > NOT_READY_WAIT_MS) throw new Error(`${this.what}: a new shard did not start serving`);
     await sleep(this.wait);
     this.waited += this.wait;
     this.wait = Math.min(this.wait * 2, 250);
   }
 }
 
-export class SplittableClient<T extends Rpc.DurableObjectBranded> {
+export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private readonly namespace: DurableObjectNamespace<T>;
   private readonly name: string;
   /** What known splits are filed under: two classes may share a name, never a root ID. */
@@ -69,63 +69,63 @@ export class SplittableClient<T extends Rpc.DurableObjectBranded> {
   }
 
   /** The deepest known node owning a hash. */
-  private leafFor(hash: string): string {
+  private shardFor(hash: string): string {
     let bits = "";
     while (this.splits.has(bits)) bits += hashBit(hash, bits.length);
     return bits;
   }
 
-  private stub(bits: string): DurableObjectStub<SplittableObject<never, unknown>> {
-    const ns = this.namespace as unknown as DurableObjectNamespace<SplittableObject<never, unknown>>;
-    return ns.get(ns.idFromName(leafObjectName(this.name, bits)));
+  private stub(bits: string): DurableObjectStub<ShardedObject<never, unknown>> {
+    const ns = this.namespace as unknown as DurableObjectNamespace<ShardedObject<never, unknown>>;
+    return ns.get(ns.idFromName(shardObjectName(this.name, bits)));
   }
 
   /**
-   * Calls `method(keys, payloads, ...args)` on every leaf owning some of the keys, with its share
-   * of them (and of `payloads`, aligned with `keys`). One result per leaf.
+   * Calls `method(keys, payloads, ...args)` on every shard owning some of the keys, with its share
+   * of them (and of `payloads`, aligned with `keys`). One result per shard.
    */
-  async call<M extends KeyMethods<T>>(keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, ...args: Rest<T[M]>): Promise<LeafResult<Result<T[M]>>[]> {
+  async call<M extends KeyMethods<T>>(keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, ...args: Rest<T[M]>): Promise<ShardResult<Result<T[M]>>[]> {
     return this.route(false, keys, method, payloads, args);
   }
 
   /**
-   * Like `call`, for keys that must be handled together by one leaf (an all-or-nothing update):
-   * throws SpansLeaves, before anything is applied, if they belong to more than one.
+   * Like `call`, for keys that must be handled together by one shard (an all-or-nothing update):
+   * throws SpansShards, before anything is applied, if they belong to more than one.
    */
-  async callOneLeaf<M extends KeyMethods<T>>(keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, ...args: Rest<T[M]>): Promise<Result<T[M]>> {
+  async callOneShard<M extends KeyMethods<T>>(keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, ...args: Rest<T[M]>): Promise<Result<T[M]>> {
     const [only] = await this.route(true, keys, method, payloads, args);
     return only!.result;
   }
 
-  private async route<M extends KeyMethods<T>>(oneLeaf: boolean, keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, args: Rest<T[M]>): Promise<LeafResult<Result<T[M]>>[]> {
+  private async route<M extends KeyMethods<T>>(oneShard: boolean, keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, args: Rest<T[M]>): Promise<ShardResult<Result<T[M]>>[]> {
     await this.loadCache();
     const hashes = keys.map(keyHash);
-    const out: LeafResult<Result<T[M]>>[] = [];
+    const out: ShardResult<Result<T[M]>>[] = [];
     let pending = keys.map((_, i) => i);
-    const backoff = new Backoff(`splittable ${this.name}`);
+    const backoff = new Backoff(`sharded ${this.name}`);
     for (let hop = 0; pending.length > 0; hop++) {
-      if (hop > MAX_HOPS) throw new Error(`splittable ${this.name}: routing did not settle`);
+      if (hop > MAX_HOPS) throw new Error(`sharded ${this.name}: routing did not settle`);
       let waiting = false;
       const groups = new Map<string, number[]>();
       for (const i of pending) {
-        const bits = this.leafFor(hashes[i]!);
+        const bits = this.shardFor(hashes[i]!);
         let group = groups.get(bits);
         if (!group) groups.set(bits, (group = []));
         group.push(i);
       }
-      if (oneLeaf && groups.size > 1) throw new SpansLeaves(`keys of ${this.name} belong to ${groups.size} leaves`);
+      if (oneShard && groups.size > 1) throw new SpansShards(`keys of ${this.name} belong to ${groups.size} shards`);
       const retry: number[] = [];
       await Promise.all(
         [...groups].map(async ([bits, positions]) => {
           const groupKeys = positions.map((i) => keys[i]!);
           const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
-          const answer = (await this.stub(bits).splittableCall(this.name, bits, method, groupKeys, groupPayloads, args)) as CallAnswer<Result<T[M]>>;
+          const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args)) as CallAnswer<Result<T[M]>>;
           if ("ok" in answer) out.push({ keys: groupKeys, positions, result: answer.ok });
           else if ("moved" in answer) {
             this.learn(answer.moved);
             retry.push(...positions);
           } else {
-            waiting = true; // not serving yet: the same leaf, a little later
+            waiting = true; // not serving yet: the same shard, a little later
             retry.push(...positions);
           }
         }),
@@ -139,18 +139,18 @@ export class SplittableClient<T extends Rpc.DurableObjectBranded> {
     return out;
   }
 
-  /** Calls `method(...args)` on every leaf. */
+  /** Calls `method(...args)` on every shard. */
   async scan<M extends ScanMethods<T>>(method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<Result<T[M]>[]> {
     await this.loadCache();
     const out: Result<T[M]>[] = [];
-    const backoff = new Backoff(`splittable ${this.name}`);
+    const backoff = new Backoff(`sharded ${this.name}`);
     const visit = async (bits: string, depth: number): Promise<void> => {
-      if (depth > MAX_HOPS) throw new Error(`splittable ${this.name}: scan did not settle`);
+      if (depth > MAX_HOPS) throw new Error(`sharded ${this.name}: scan did not settle`);
       if (this.splits.has(bits)) {
         await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
         return;
       }
-      const answer = (await this.stub(bits).splittableScan(this.name, bits, method, args)) as CallAnswer<Result<T[M]>>;
+      const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args)) as CallAnswer<Result<T[M]>>;
       if ("ok" in answer) out.push(answer.ok);
       else if ("moved" in answer) {
         this.learn(answer.moved);
@@ -198,6 +198,6 @@ export class SplittableClient<T extends Rpc.DurableObjectBranded> {
   }
 }
 
-export function splittable<T extends Rpc.DurableObjectBranded>(namespace: DurableObjectNamespace<T>, name: string): SplittableClient<T> {
-  return new SplittableClient(namespace, name);
+export function sharded<T extends Rpc.DurableObjectBranded>(namespace: DurableObjectNamespace<T>, name: string): ShardedClient<T> {
+  return new ShardedClient(namespace, name);
 }

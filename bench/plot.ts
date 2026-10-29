@@ -41,8 +41,8 @@ const outDir = join(import.meta.dir, "..", "docs", "bench");
 await mkdir(outDir, { recursive: true });
 
 const COLORS: Record<Target | "two-copy", string> = { single: "#667085", split: "#e4572e", presplit: "#f79009", legacy: "#2e86ab", "two-copy": "#7a5af8" };
-const SPLIT_NAMES = { split: "splittable-object: move one half (snapshot)", "two-copy": "freeze, snapshot into two new objects", legacy: "v0.1: copy rows to two new objects" };
-const NAMES: Record<Target, string> = { single: "one Durable Object", split: "splittable-object, splitting by load", presplit: "splittable-object, 16 leaves from the start", legacy: "splittable-object v0.1 (row copy)" };
+const SPLIT_NAMES = { split: "sharded object: move one half (snapshot)", "two-copy": "freeze, snapshot into two new objects", legacy: "v0.1: copy rows to two new objects" };
+const NAMES: Record<Target, string> = { single: "one Durable Object", split: "sharded object, splitting by load", presplit: "sharded object, 16 shards from the start", legacy: "v0.1 (row copy)" };
 const W = 1200;
 const PLOT_H = 380;
 const L = 96;
@@ -229,8 +229,8 @@ if (splits.length) {
   // When the new owner serves with all of its data: ours once the copy is claimed (deleting the
   // half it gave away continues in the background); two-copy at the end of its freeze; the row
   // copy once the last row has moved (its children serve sooner, by asking the parent per key).
-  graphs["split-time"] = panels("Time to split", "Until the new owner serves with all of its data, under 8 concurrent writers. Each panel has its own scale.", groups((s) => (s.target === "split" ? s.servingMs : s.doneMs), seconds), legend, "Measured on Cloudflare's network, 1 KiB rows. splittable-object deletes the half each side gave away afterwards, in the background.");
-  graphs["split-latency"] = panels("Slowest write during a split", "Maximum write latency from 1 s before the split until 1 s after it settles. Each panel has its own scale.", groups((s) => s.writeLatencyMs.max, millis), legend, "With a snapshot, the slowest write is one that waited for the copy: with splittable-object only writes to the moving half wait.");
+  graphs["split-time"] = panels("Time to split", "Until the new owner serves with all of its data, under 8 concurrent writers. Each panel has its own scale.", groups((s) => (s.target === "split" ? s.servingMs : s.doneMs), seconds), legend, "Measured on Cloudflare's network, 1 KiB rows. The sharded object deletes the half each side gave away afterwards, in the background.");
+  graphs["split-latency"] = panels("Slowest write during a split", "Maximum write latency from 1 s before the split until 1 s after it settles. Each panel has its own scale.", groups((s) => s.writeLatencyMs.max, millis), legend, "With a snapshot, the slowest write is one that waited for the copy: with the sharded object only writes to the moving half wait.");
   graphs["split-p95"] = panels("Write latency p95 during a split", "From 1 s before the split until 1 s after it settles, background cleanup included. Each panel has its own scale.", groups((s) => s.writeLatencyMs.p95, millis), legend, "The row copy keeps the busy object answering per-key fetches for minutes; the snapshot designs do not.");
 }
 
@@ -333,16 +333,16 @@ if (singlePeak && leafPeak) {
     (v) => `$${v.toFixed(2)}`,
     [
       bar("one Durable Object · update", 1, 0, singlePeak),
-      bar("splittable-object · update", 1, 1, leafPeak),
+      bar("sharded object · update", 1, 1, leafPeak),
       bar("one Durable Object · new key", 1, 0, singlePeak),
-      bar("splittable-object · new key", 2, 1, leafPeak),
+      bar("sharded object · new key", 2, 1, leafPeak),
     ],
     "A new key also writes the hash index: one more row written. Updates leave it alone. Each write reads its row first. Duration is a fraction of a cent either way.",
   );
 }
 
 // One split, by data size: rows written for the copies and the deletes (1 KiB rows, one index each).
-// splittable-object: the snapshot restore (not billed as rows) and both sides deleting the half they
+// the sharded object: the snapshot restore (not billed as rows) and both sides deleting the half they
 // gave away: R deletes × 2 rows. Freeze into two: each child deletes half (R × 2) and the parent
 // deletes everything (R × 2). v0.1 row copy: children insert R rows (× 2), mark R keys decided and
 // clear them (R × 2), and the parent deletes R rows (× 2).
