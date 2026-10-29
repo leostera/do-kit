@@ -361,7 +361,8 @@ export default {
     try {
       switch (url.pathname) {
         case "/call": {
-          const options = { notReadyWaitMs: (body as { notReadyWaitMs?: number }).notReadyWaitMs };
+          const wait = (body as { notReadyWaitMs?: number }).notReadyWaitMs;
+          const options = wait === undefined ? {} : { notReadyWaitMs: wait };
           const results = await sharded(ns, body.name, options).call(body.keys, body.method as "get", (body.payloads ?? null) as null);
           // Back in the caller's order.
           const out: unknown[] = new Array(body.keys.length);

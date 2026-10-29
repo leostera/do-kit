@@ -747,6 +747,22 @@ export default {
       if (!/^[a-zA-Z0-9_-]{1,80}$/.test(name)) return Response.json({ error: "objectName" }, { status: 400 });
       return Response.json(await env.SPLIT_JOBS.get(env.SPLIT_JOBS.idFromName(name)).poll());
     }
+    // The first calls to a new presplit object: each waits for the presplit, so this times it.
+    if (request.method === "POST" && path === "/first-calls") {
+      const body = (await request.json()) as { target?: string; calls?: number };
+      if (body.target !== "presplit" && body.target !== "presplit-4096") return Response.json({ error: "target" }, { status: 400 });
+      const calls = Math.min(Math.max(Math.floor(body.calls ?? 64), 1), 256);
+      const client = sharded(shardedNamespace(env, body.target), `first-${crypto.randomUUID()}`);
+      const started = Date.now();
+      const latencyMs = await Promise.all(
+        Array.from({ length: calls }, async (_, i) => {
+          const t = Date.now();
+          await client.call([`k-${i}`], "get", null);
+          return Date.now() - t;
+        }),
+      );
+      return Response.json({ calls, wallMs: Date.now() - started, latencyMs: latencyMs.sort((x, y) => x - y) });
+    }
     if (request.method !== "POST" || path !== "/measure") return new Response("Not found", { status: 404 });
     let input: ReturnType<typeof validate>;
     try {

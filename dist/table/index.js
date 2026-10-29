@@ -35,21 +35,24 @@ export class ShardedTable extends ShardedObject {
     }
     async tablePut(keys, payloads) {
         this.migrate();
-        return this.transact(keys, () => payloads.map(({ row, ifVersion }, i) => this.putRow(this.checkKey(keys[i], row), { ifVersion })));
+        return this.transact(keys, () => payloads.map(({ row, ifVersion }, i) => this.putRow(this.checkKey(keys[i], row), ifVersion === undefined ? {} : { ifVersion })));
     }
     async tablePatch(keys, payloads) {
         this.migrate();
-        return this.transact(keys, () => payloads.map(({ changes, ifVersion }, i) => this.patchRow(keys[i], changes, { ifVersion })));
+        return this.transact(keys, () => payloads.map(({ changes, ifVersion }, i) => this.patchRow(keys[i], changes, ifVersion === undefined ? {} : { ifVersion })));
     }
     async tableDelete(keys, payloads) {
         this.migrate();
-        return this.transact(keys, () => keys.map((key, i) => this.deleteRow(key, { ifVersion: payloads?.[i]?.ifVersion })));
+        return this.transact(keys, () => keys.map((key, i) => {
+            const ifVersion = payloads?.[i]?.ifVersion;
+            return this.deleteRow(key, ifVersion === undefined ? {} : { ifVersion });
+        }));
     }
     /** One shard's part of a listing page. */
     async tablePage(request) {
         this.migrate();
         this.assertOwns([]);
-        const checked = pageRequest({ index: request.index ?? undefined, direction: request.direction, where: request.where, limit: request.limit, budget: request.budget }, request.after);
+        const checked = pageRequest({ ...(request.index == null ? {} : { index: request.index }), direction: request.direction, where: request.where, limit: request.limit, budget: request.budget }, request.after);
         return this.page(checked);
     }
     /** Rows this shard owns. */

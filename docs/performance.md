@@ -174,3 +174,14 @@ See [`bench/README.md`](../bench/README.md).
 - Two fixes went in while measuring: pages first scanned rows instead of seeking (10,000 rows listed at a third of the speed of 2,000), and every shard returned a full page (16 shards moved 800 rows to list 50).
 - An index stored by sort order (range-partitioned) would let a page touch one or two index shards. That is the next layer.
 
+## Presplitting
+
+With `initialDepth`, the first calls to a new object wait while it creates its shards. Measured with 64 concurrent first calls to a fresh name (`POST /first-calls` on the bench Worker), 5 runs each:
+
+| Shards | Before | Now |
+|---|---|---|
+| 16 (`initialDepth: 4`) | 3.8–5.4 s until the last call returned | 1.4–3.2 s |
+| 4,096 (`initialDepth: 12`) | 22.8–25.6 s | 9.0–14.9 s |
+
+Before, the root created one shard per level in turn, and each new shard did the same on its first call: up to 10 object creations one after another for 16 shards. Now an object creates every shard up to 6 levels below it at once, at its final bits (at most 63 calls per round), so 16 shards take one round and 4,096 take two.
+

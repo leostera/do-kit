@@ -223,7 +223,7 @@ protected override splitPolicy: SplitPolicy = {
   windowSeconds: 5,
   maxDepth: 12,        // at most 2^12 shards
   keysPerCall: 25,     // a call weighs 1 + keys / keysPerCall
-  initialDepth: 0,     // presplit an empty object, for uniformly distributed keys
+  initialDepth: 0,     // presplit an empty object on its first call, for uniformly distributed keys (16 shards: about 1.5–3 s)
   copy: "auto",        // "native" snapshots, "logical" row copy, or auto-detect
   splitTimeoutMs: 60_000,
   holdWaitMs: 2_000,   // a write to the half being copied waits this long, then the client backs off and retries until the split ends
