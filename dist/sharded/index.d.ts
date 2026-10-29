@@ -121,6 +121,8 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private quietUntil;
     /** The split in progress here: writes to `right` wait for `released`. */
     private hold;
+    /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
+    private receiving;
     /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
     private presplitting;
     /** This shard had rows when it could have presplit: it splits by load only. */
@@ -282,13 +284,19 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      * The logical copy's tables and indexes: replaces this object's with them. What is here is
      * not a serving shard's (an unused object, or the copy of an abandoned attempt, maybe made
      * under an older schema), so it all goes: the copy must have the source's schema exactly.
+     * From here on this object takes the batches of attempt `epoch` only.
      */
-    shardedReceiveSchema(_name: string, _bits: string, objects: readonly {
+    shardedReceiveSchema(_name: string, _bits: string, epoch: number, objects: readonly {
         readonly name: string;
         readonly sql: string;
     }[]): Promise<void>;
-    /** One batch of the logical copy: rows of one table. The first batch wipes every table. */
-    shardedReceive(_name: string, _bits: string, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void>;
+    /**
+     * One batch of the logical copy, from attempt `epoch`: rows of one table. The first batch wipes
+     * every table. A batch can arrive late, after its attempt was abandoned (and another began, or
+     * even finished): it would put back rows as they were then, so only the batches of the attempt
+     * whose schema this object took are written, and never on a serving shard.
+     */
+    shardedReceive(_name: string, _bits: string, epoch: number, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void>;
     /** The logical copy is complete: it holds the source's meta, from this split. */
     shardedReceiveDone(name: string, bits: string, epoch: number): Promise<boolean>;
     /** Storage copied verbatim from a splitting object and not claimed yet: it is not this object's. */

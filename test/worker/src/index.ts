@@ -3,7 +3,7 @@
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
 import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
-import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
+import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 
 interface Env {
@@ -374,6 +374,13 @@ export default {
           // Clients of many other objects, each used once: the isolate keeps at most MAX_KNOWN_OBJECTS.
           for (let i = 0; i <= MAX_KNOWN_OBJECTS; i++) sharded(ns, `${body.name}-other-${i}`).knownSplits();
           return Response.json(MAX_KNOWN_OBJECTS);
+        }
+        case "/lateBatch": {
+          // A batch of a logical copy that arrives late, setting `keys[0]` to `payloads[0]`.
+          const b = body as unknown as { bits: string; keys: string[]; payloads: unknown[]; epoch: number };
+          const stub = ns.get(ns.idFromName(shardObjectName(body.name, b.bits))) as unknown as { shardedReceive(...a: unknown[]): Promise<void> };
+          await stub.shardedReceive(body.name, b.bits, b.epoch, false, "sharded_rows", ["key", "hash", "value"], [[b.keys[0], keyHash(b.keys[0]!), JSON.stringify(b.payloads[0])]]);
+          return Response.json(null);
         }
         case "/splits":
           return Response.json(sharded(ns, body.name).knownSplits());

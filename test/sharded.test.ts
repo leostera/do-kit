@@ -337,3 +337,14 @@ test("an isolate keeps the splits of the objects it used last, up to a bound", a
   // Forgetting costs hops, never answers.
   expect(await call<number[]>("m", name, "get", KEYS)).toEqual(KEYS.map(() => 1));
 }, 60_000);
+
+test("a serving shard refuses a late batch of a split's copy", async () => {
+  const name = `late-batch-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  const key = KEYS.find((k) => firstBit(k) === 1)!; // now on the new shard "1"
+  await call("m", name, "add", [key], [1]); // serving, at 2
+  // A batch of the copy, from an attempt that timed out, arrives now with the value it copied then.
+  await expect(post("/lateBatch", { cls: "m", name, bits: "1", keys: [key], payloads: [1], epoch: 1 })).rejects.toThrow();
+  expect(await call<number[]>("m", name, "get", [key])).toEqual([2]);
+}, 60_000);
