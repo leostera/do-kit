@@ -189,6 +189,12 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<CallAnswer<unknown>>;
     /** A call to every shard: `method(...args)`, with no keys. */
     shardedScan(name: string, bits: string, method: string, args: readonly unknown[]): Promise<CallAnswer<unknown>>;
+    /**
+     * The subclass method a routed call or scan names. Never one of this base class's own (its
+     * reads and writes, the split protocol, the alarm) nor a runtime handler: a call must not reach
+     * them with arguments it shaped for something else.
+     */
+    private routedMethod;
     /** Every row this shard owns, for scans (a subclass's scan method may use it). */
     protected allRows(): Map<string, V>;
     /** "moved" for a call addressed to `bits`: this shard went deeper, so `bits` and more split. */

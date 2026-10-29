@@ -245,6 +245,16 @@ test("a call whose payloads do not line up with its keys is refused before reach
   expect(await call<(number | null)[]>("m", name, "get", ["a", "b"])).toEqual([null, null]);
 }, 60_000);
 
+test("a routed call or scan cannot reach the base class's own methods", async () => {
+  const name = `reserved-${Date.now()}`;
+  await call("m", name, "add", ["a"], [1]);
+  for (const method of ["saveMeta", "update", "alarm", "split", "constructor", "toString"]) {
+    await expect(call("m", name, method, ["a"])).rejects.toThrow(`no method ${method}`);
+    await expect(post("/scan", { cls: "m", name, method })).rejects.toThrow(`no method ${method}`);
+  }
+  expect(await call<number[]>("m", name, "get", ["a"])).toEqual([1]);
+}, 60_000);
+
 test("a split policy that cannot work is refused, saying why", async () => {
   const ok = { callsPerSecond: 400, windowSeconds: 5, maxDepth: 12 };
   expect(await post("/checkPolicy", { policy: ok })).toBeNull();

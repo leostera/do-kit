@@ -411,8 +411,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (answer) return answer;
     for (const key of keys) if (!ownsHash(bits, keyHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
     this.countCall(keys.length);
-    const fn = (this as unknown as Record<string, unknown>)[method];
-    if (typeof fn !== "function" || method.startsWith("sharded")) throw new Error(`no method ${method}`);
+    const fn = this.routedMethod(method);
     try {
       return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args) };
     } catch (error) {
@@ -426,14 +425,24 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   async shardedScan(name: string, bits: string, method: string, args: readonly unknown[]): Promise<CallAnswer<unknown>> {
     const answer = await this.arriveSettled(name, bits);
     if (answer) return answer;
-    const fn = (this as unknown as Record<string, unknown>)[method];
-    if (typeof fn !== "function" || method.startsWith("sharded")) throw new Error(`no method ${method}`);
+    const fn = this.routedMethod(method);
     try {
       return { ok: await (fn as (...a: unknown[]) => Promise<unknown>).call(this, ...args) };
     } catch (error) {
       if (error instanceof Moved) return this.moved(bits);
       throw error;
     }
+  }
+
+  /**
+   * The subclass method a routed call or scan names. Never one of this base class's own (its
+   * reads and writes, the split protocol, the alarm) nor a runtime handler: a call must not reach
+   * them with arguments it shaped for something else.
+   */
+  private routedMethod(method: string): (...args: unknown[]) => unknown {
+    const fn = (this as unknown as Record<string, unknown>)[method];
+    if (typeof fn !== "function" || method.startsWith("sharded") || RESERVED_METHODS.has(method)) throw new Error(`no method ${method}`);
+    return fn as (...args: unknown[]) => unknown;
   }
 
   /** Every row this shard owns, for scans (a subclass's scan method may use it). */
@@ -893,3 +902,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null };
   }
 }
+
+/** Names a routed call may not reach: the base class's own methods, and the runtime's handlers. */
+const RESERVED_METHODS: ReadonlySet<string> = new Set([
+  ...Object.getOwnPropertyNames(ShardedObject.prototype),
+  ...Object.getOwnPropertyNames(Object.prototype),
+  "fetch",
+  "alarm",
+  "webSocketMessage",
+  "webSocketClose",
+  "webSocketError",
+]);
