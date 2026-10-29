@@ -272,3 +272,22 @@ test("a split policy that cannot work is refused, saying why", async () => {
   ];
   for (const [change, field] of bad) expect(await post<string>("/checkPolicy", { policy: { ...ok, ...change } })).toContain(`splitPolicy.${field}`);
 }, 60_000);
+
+test("a client recovers when an object's storage was deleted and its name is used again", async () => {
+  const name = `wiped-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "0" })).toBe(true);
+  // The client learns the splits.
+  expect(await call<number[]>("m", name, "get", KEYS)).toEqual(KEYS.map(() => 1));
+  expect((await post<string[]>("/splits", { cls: "m", name })).length).toBeGreaterThan(1);
+  // Every shard's storage is deleted (an account removed), then the name is used again.
+  for (const bits of ["", "1", "01"]) await post("/wipe", { cls: "m", name, bits });
+  await call("m", name, "add", ["a", "b"], [5, 7]);
+  expect(await call<(number | null)[]>("m", name, "get", ["a", "b", KEYS[0]!])).toEqual([5, 7, null]);
+  // A scan starts over from the root too, straight after the next deletion.
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  expect((await post<[string, number][][]>("/scan", { cls: "m", name, method: "entries" })).length).toBe(2);
+  for (const bits of ["", "1"]) await post("/wipe", { cls: "m", name, bits });
+  expect(await post<[string, number][][]>("/scan", { cls: "m", name, method: "entries" })).toEqual([[]]);
+}, 120_000);

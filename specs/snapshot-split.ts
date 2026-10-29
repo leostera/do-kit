@@ -106,10 +106,13 @@ export default defineSpec(
           },
         },
         [NotReady]: {
-          description: "The new owner is not serving yet; tries again shortly.",
+          description: "The new owner is not serving yet; tries again shortly, or, once it has waited a while, forgets the split.",
           sources: ["src/sharded/client.ts#ShardedClient.route", "src/sharded/client.ts#Backoff.next"],
-          starts: ["retry"],
-          run: (_s, _msg, ctx) => ctx.start("retry"),
+          starts: ["retry", "forget"],
+          run(_s, _msg, ctx) {
+            ctx.start("retry");
+            ctx.start("forget");
+          },
         },
         retry: {
           description: "Sends the waiting call again.",
@@ -117,10 +120,24 @@ export default defineSpec(
           after: "a few milliseconds",
           sends: [Write, Read],
           run(s, ctx) {
+            ctx.cancel("forget");
             if (!s.pending) return;
             const target = s.pending.key === "R" && s.knowsSplit ? ctx.the(Sibling) : ctx.the(Original);
             if (s.pending.op === "write") ctx.send(target, Write, { key: s.pending.key });
             else ctx.send(target, Read, { key: s.pending.key });
+          },
+        },
+        forget: {
+          description: "Has waited too long on a shard that is not ready: forgets the split, which may be from storage that is gone, and sends the call to the root.",
+          sources: ["src/sharded/client.ts#ShardedClient.route", "src/sharded/client.ts#ShardedClient.forget"],
+          after: "a second of waiting",
+          sends: [Write, Read],
+          run(s, ctx) {
+            ctx.cancel("retry");
+            s.knowsSplit = false;
+            if (!s.pending) return;
+            if (s.pending.op === "write") ctx.send(ctx.the(Original), Write, { key: s.pending.key });
+            else ctx.send(ctx.the(Original), Read, { key: s.pending.key });
           },
         },
       },

@@ -205,6 +205,13 @@ class CounterBase extends ShardedObject<Env, number> {
     return this.update(keys, () => ({ writes: new Map(keys.map((k) => [k, null])), result: keys.length }));
   }
 
+  /** Deletes this object's storage and restarts it, as if it had never been used. */
+  async wipe(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    this.ctx.abort("wiped");
+  }
+
   async entries(): Promise<[string, number][]> {
     return [...this.allRows()];
   }
@@ -297,6 +304,9 @@ export default {
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedDescribe());
         case "/table":
           return Response.json((await tableOp(env, body as never)) ?? null);
+        case "/wipe":
+          await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).wipe().catch(() => {});
+          return Response.json(null);
         case "/splits":
           return Response.json(sharded(ns, body.name).knownSplits());
       }

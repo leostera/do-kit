@@ -379,8 +379,11 @@ export class ShardedObject extends DurableObject {
     /** Whether this object serves `bits`, initialising the root on its first call. */
     arrive(name, bits) {
         if (!this.meta) {
+            // The root starts with the first call and splits only after it: a caller that knows splits
+            // of an unused root learned them from storage that is gone. Another object may be a
+            // sibling whose copy has not arrived.
             if (bits !== "")
-                return { notReady: bits }; // a sibling whose copy has not arrived
+                return hostBits(bits) === "" ? { stale: bits } : { notReady: bits };
             this.saveMeta({ name, bits: "", state: "shard", epoch: 0, splitting: null, activate: null, cleanup: [], parent: null, splitAt: 0 });
         }
         const meta = this.meta;
@@ -401,7 +404,9 @@ export class ShardedObject extends DurableObject {
             return null;
         if (meta.bits.startsWith(bits))
             return this.moved(bits);
-        throw new Error(`${nodeName(name, bits)} is not split, ${nodeName(meta.name, meta.bits)} is the shard`);
+        // Splits are final: a caller that knows this shard split, when it has not, learned that from
+        // storage that is gone.
+        return { stale: bits };
     }
     async presplit() {
         const meta = this.meta;

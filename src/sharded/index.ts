@@ -85,7 +85,12 @@ export function checkSplitPolicy(policy: SplitPolicy): SplitPolicy {
 }
 
 /** What a node answers a routed call: `moved` names a split shard (its ancestors split too). */
-export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly notReady: string };
+/**
+ * What a node answers a routed call: `moved` names a split shard (its ancestors split too);
+ * `stale` says the caller's map of splits is deeper than this object, so it outlived the storage
+ * it was learned from (deleted, then the name used again): the caller forgets it.
+ */
+export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly notReady: string } | { readonly stale: string };
 
 /** An object's state, for tests and operators. */
 export interface NodeDescription {
@@ -477,7 +482,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** Whether this object serves `bits`, initialising the root on its first call. */
   private arrive(name: string, bits: string): CallAnswer<never> | null {
     if (!this.meta) {
-      if (bits !== "") return { notReady: bits }; // a sibling whose copy has not arrived
+      // The root starts with the first call and splits only after it: a caller that knows splits
+      // of an unused root learned them from storage that is gone. Another object may be a
+      // sibling whose copy has not arrived.
+      if (bits !== "") return hostBits(bits) === "" ? { stale: bits } : { notReady: bits };
       this.saveMeta({ name, bits: "", state: "shard", epoch: 0, splitting: null, activate: null, cleanup: [], parent: null, splitAt: 0 });
     }
     const meta = this.meta!;
@@ -492,7 +500,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     }
     if (meta.bits === bits) return null;
     if (meta.bits.startsWith(bits)) return this.moved(bits);
-    throw new Error(`${nodeName(name, bits)} is not split, ${nodeName(meta.name, meta.bits)} is the shard`);
+    // Splits are final: a caller that knows this shard split, when it has not, learned that from
+    // storage that is gone.
+    return { stale: bits };
   }
 
   private async presplit(): Promise<void> {
