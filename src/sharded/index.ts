@@ -223,7 +223,8 @@ interface Meta {
  * (all owned by this shard), may take payloads aligned with the keys second, and read and write
  * only with `read` and one `update`.
  *
- * Subclasses that define `alarm` must call `super.alarm()`.
+ * Subclasses never define `alarm` (the constructor refuses): they override `onAlarm` and schedule
+ * it with `scheduleAlarm`.
  */
 export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableObject<Env> {
   protected splitPolicy: SplitPolicy = DEFAULT_SPLIT_POLICY;
@@ -249,6 +250,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // The alarm is the base class's: it runs splits' work, and a subclass's code after it would
+    // also run in a split's copy, on work that is the original's. Subclasses use onAlarm.
+    if ((this as { alarm: unknown }).alarm !== ShardedObject.prototype.alarm) {
+      throw new Error(`${new.target.name} overrides alarm(): a sharded object's alarm belongs to the base class. Override onAlarm() and schedule it with scheduleAlarm() instead.`);
+    }
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
     this.meta = this.loadMeta();
@@ -496,7 +502,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // A split interrupted by a restart: abandoned (its copy is never activated).
     if (meta.splitting !== null && !this.hold) {
       this.saveMeta({ ...meta, splitting: null });
-      if (meta.activate || meta.cleanup.length > 0 || meta.foreign) void this.ctx.storage.setAlarm(Date.now());
+      if (meta.activate || meta.cleanup.length > 0 || meta.foreign) void this.armAlarm(Date.now());
     }
     if (meta.bits === bits) return null;
     if (meta.bits.startsWith(bits)) return this.moved(bits);
@@ -587,7 +593,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), copy: method, ms: Date.now() - started }));
       this.hold = null;
       release();
-      await this.ctx.storage.setAlarm(Date.now());
+      await this.armAlarm(Date.now());
       await this.activateSibling().catch(() => {}); // the alarm retries
       return true;
     } catch (error) {
@@ -739,10 +745,49 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (now.activate?.epoch === pending.epoch && now.activate.bits === pending.bits) this.saveMeta({ ...now, activate: null });
   }
 
+  // ---- Alarms ----
+
   /**
-   * Activates a new sibling and clears what splits gave away. It never throws: the runtime
-   * retries a failing alarm only a few times, and the sibling is activated by nothing else, so
-   * a failure here reschedules the alarm itself for as long as there is work left.
+   * Runs on a serving shard once the time given to `scheduleAlarm` has come (it may run a little
+   * later, and the shard may have split since: check what is due). Never in a split's copy before
+   * it serves. If it throws, it runs again a second later. The default does nothing.
+   */
+  protected async onAlarm(): Promise<void> {}
+
+  /**
+   * Asks for `onAlarm` at `at` (or earlier, if an earlier time is already asked for). Use it, not
+   * `ctx.storage.setAlarm`: the alarm is shared with splits, and this never postpones their work
+   * nor loses the time asked for. A split's new shard keeps the time too.
+   */
+  protected async scheduleAlarm(at: number | Date): Promise<void> {
+    const time = typeof at === "number" ? at : at.getTime();
+    const wake = this.loadWake();
+    if (wake === null || time < wake) this.saveWake(time);
+    if (this.meta?.state === "shard" || !this.meta) await this.armAlarm(time);
+  }
+
+  /** Sets the alarm for `time` unless it is set for earlier already. */
+  private async armAlarm(time: number): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || time < current) await this.ctx.storage.setAlarm(time);
+  }
+
+  /** When the subclass asked for `onAlarm`, if it did. */
+  private loadWake(): number | null {
+    const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_meta WHERE key = 'wake'").toArray()[0];
+    return row ? Number(row.value) : null;
+  }
+
+  private saveWake(time: number | null): void {
+    if (time === null) this.sql.exec("DELETE FROM sharded_meta WHERE key = 'wake'");
+    else this.sql.exec("INSERT INTO sharded_meta (key, value) VALUES ('wake', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(time));
+  }
+
+  /**
+   * Activates a new sibling, clears what splits gave away, and runs `onAlarm` when it is due. It
+   * never throws: the runtime retries a failing alarm only a few times, and the sibling is
+   * activated by nothing else, so a failure here reschedules the alarm itself for as long as there
+   * is work left. Subclasses cannot override it (the constructor refuses): see `onAlarm`.
    */
   override async alarm(): Promise<void> {
     const meta = this.meta;
@@ -763,9 +808,25 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       failed = true;
       console.error(JSON.stringify({ event: "split-cleanup-failed", node: this.nodeLabel(), error: String(error) }));
     }
+    // The subclass's turn, on a serving shard only: a copy's is armed when it is activated.
+    const serving = this.meta!.state === "shard";
+    const wake = this.loadWake();
+    if (serving && wake !== null && wake <= Date.now()) {
+      this.saveWake(null);
+      try {
+        await this.onAlarm();
+      } catch (error) {
+        console.error(JSON.stringify({ event: "on-alarm-failed", node: this.nodeLabel(), error: String(error) }));
+        await this.scheduleAlarm(Date.now() + ALARM_RETRY_MS);
+      }
+    }
     const now = this.meta!;
-    if (now.activate || failed) await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
-    else if (now.cleanup.length > 0 || now.foreign) await this.ctx.storage.setAlarm(Date.now() + DELETE_PAUSE_MS);
+    const times: number[] = [];
+    if (now.activate || failed) times.push(Date.now() + ALARM_RETRY_MS);
+    else if (now.cleanup.length > 0 || now.foreign) times.push(Date.now() + DELETE_PAUSE_MS);
+    const next = this.loadWake();
+    if (serving && next !== null) times.push(next);
+    if (times.length > 0) await this.armAlarm(Math.min(...times));
   }
 
   /** Deletes one batch of rows this object gave away: the base table's first, then the subclass's. */
@@ -872,7 +933,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       this.afterClone((key) => ownsHash(bits, keyHash(key)));
       this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, parent, splitAt: Date.now() });
     });
-    await this.ctx.storage.setAlarm(Date.now());
+    await this.armAlarm(Date.now());
     return true;
   }
 
@@ -891,7 +952,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (!meta || meta.name !== name) return false;
     if (meta.bits !== bits) return meta.state === "shard" && meta.splitting === null && meta.bits.startsWith(bits); // serving, and split since
     if (meta.epoch !== epoch) return false;
-    if (meta.state === "copy") this.saveMeta({ ...meta, state: "shard" });
+    if (meta.state === "copy") {
+      this.saveMeta({ ...meta, state: "shard" });
+      // The subclass's alarm, copied from the original, was held until now.
+      const wake = this.loadWake();
+      if (wake !== null) await this.armAlarm(wake);
+    }
     return true;
   }
 

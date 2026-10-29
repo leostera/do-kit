@@ -291,3 +291,37 @@ test("a client recovers when an object's storage was deleted and its name is use
   for (const bits of ["", "1"]) await post("/wipe", { cls: "m", name, bits });
   expect(await post<[string, number][][]>("/scan", { cls: "m", name, method: "entries" })).toEqual([[]]);
 }, 120_000);
+
+test("work a shard schedules for later is done when due, though a split comes in between", async () => {
+  const name = `alarm-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  const key = KEYS.find((k) => firstBit(k) === 0)!; // stays on the original
+  await call("m", name, "scheduleWork", [key], [1500]);
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  await Bun.sleep(3000);
+  expect((await post<string[][]>("/scan", { cls: "m", name, method: "workFired" })).flat()).toEqual([key]);
+}, 60_000);
+
+test("work a shard schedules much later does not hold back a split's cleanup", async () => {
+  const name = `alarm-late-${Date.now()}`;
+  const many = Array.from({ length: 1500 }, (_, i) => `row-${i}`);
+  for (let i = 0; i < many.length; i += 500) await call("m", name, "add", many.slice(i, i + 500), many.slice(i, i + 500).map(() => 1));
+  // Recurring work: every onAlarm asks for the next turn a minute later.
+  await call("m", name, "scheduleWork", ["__recurring"], [0]);
+  await Bun.sleep(200);
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  // And calls keep scheduling work a minute out, on both shards, while they clean up.
+  const left = many.find((k) => firstBit(k) === 0)!;
+  const right = many.find((k) => firstBit(k) === 1)!;
+  for (let i = 0; i < 50; i++) {
+    await Promise.all([call("m", name, "scheduleWork", [left], [60_000]), call("m", name, "scheduleWork", [right], [60_000])]);
+    const [l, r] = await Promise.all([describe("m", name, "0"), describe("m", name, "1")]);
+    if (l.storedRows === l.rows && r.storedRows === r.rows) return;
+    await Bun.sleep(100);
+  }
+  throw new Error("cleanup waited for the subclass's alarm");
+}, 60_000);
+
+test("a sharded object that overrides alarm() is refused, pointing at onAlarm", async () => {
+  await expect(call("oldAlarm", `old-${Date.now()}`, "get", ["a"])).rejects.toThrow("onAlarm");
+}, 60_000);
