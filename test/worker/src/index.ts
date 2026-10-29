@@ -12,6 +12,7 @@ interface Env {
   readonly REPOS: DurableObjectNamespace<Repos>;
   readonly EVOLVING: DurableObjectNamespace<EvolvingRepos>;
   readonly FLAKY: DurableObjectNamespace<FlakyRepos>;
+  readonly OLD_ALARM: DurableObjectNamespace<OldAlarm>;
 }
 
 // ---- A sharded table: repositories, split by hand ----
@@ -97,6 +98,23 @@ export class FlakyRepos extends EvolvingRepos {
     if (this.ctx.storage.sql.exec("SELECT fail FROM test_clone WHERE fail = 1").toArray().length) throw new Error("test: clone refused");
     super.afterClone(owns);
   }
+  /** Asks for onAlarm in `ms`. */
+  async wakeIn(ms: number): Promise<void> {
+    await this.scheduleAlarm(Date.now() + ms);
+  }
+  /** Fires this object's alarm now, as a snapshot's copied alarm would. */
+  async alarmNow(): Promise<void> {
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+  protected override async onAlarm(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarm_ran (id TEXT NOT NULL)");
+    this.ctx.storage.sql.exec("INSERT INTO test_alarm_ran (id) VALUES (?)", this.ctx.id.toString());
+  }
+  /** The objects whose onAlarm wrote to this object's storage (it is copied with the rest). */
+  async alarmRan(): Promise<{ self: string; ran: string[] }> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarm_ran (id TEXT NOT NULL)");
+    return { self: this.ctx.id.toString(), ran: this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM test_alarm_ran").toArray().map((r) => r.id) };
+  }
   /** While set, this object refuses to be activated (the flag is copied with the rest). */
   async failActivations(fail: boolean): Promise<void> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_activate (fail INTEGER NOT NULL)");
@@ -107,6 +125,19 @@ export class FlakyRepos extends EvolvingRepos {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_activate (fail INTEGER NOT NULL)");
     if (this.ctx.storage.sql.exec("SELECT fail FROM test_activate WHERE fail = 1").toArray().length) throw new Error("test: activation failed");
     return super.shardedActivate(name, bits, epoch);
+  }
+}
+
+/** Overrides alarm() the way the docs once said to: refused. */
+export class OldAlarm extends ShardedObject<Env, number> {
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
+    return this.env.OLD_ALARM as never;
+  }
+  async get(keys: readonly string[], _payloads: null): Promise<null[]> {
+    return keys.map(() => null);
+  }
+  override async alarm(): Promise<void> {
+    await super.alarm();
   }
 }
 
@@ -205,6 +236,32 @@ class CounterBase extends ShardedObject<Env, number> {
     return this.update(keys, () => ({ writes: new Map(keys.map((k) => [k, null])), result: keys.length }));
   }
 
+  /** Schedules work on this key's shard, due in `delayMs` (a stand-in for an outbox retry). */
+  async scheduleWork(keys: readonly string[], payloads: readonly number[]): Promise<null[]> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS work (key TEXT PRIMARY KEY, due INTEGER NOT NULL, fired INTEGER)");
+    const due = Date.now() + payloads[0]!;
+    await this.transact(keys, () => this.ctx.storage.sql.exec("INSERT OR REPLACE INTO work (key, due, fired) VALUES (?, ?, NULL)", keys[0]!, due));
+    await this.scheduleAlarm(due);
+    return keys.map(() => null);
+  }
+
+  protected override async onAlarm(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS work (key TEXT PRIMARY KEY, due INTEGER NOT NULL, fired INTEGER)");
+    // Both shards of a split hold the work table: each does the work of its own keys.
+    for (const { key } of this.ctx.storage.sql.exec<{ key: string }>("SELECT key FROM work WHERE fired IS NULL AND due <= ?", Date.now()).toArray()) {
+      if (this.owns(key)) this.ctx.storage.sql.exec("UPDATE work SET fired = ? WHERE key = ?", Date.now(), key);
+    }
+    // A shard with recurring work asks for its next turn much later; that must not hold back splits.
+    const recurring = this.ctx.storage.sql.exec("SELECT 1 FROM work WHERE key = '__recurring'").toArray().length > 0;
+    if (recurring) await this.scheduleAlarm(Date.now() + 60_000);
+  }
+
+  /** Work this shard has done. */
+  async workFired(): Promise<string[]> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS work (key TEXT PRIMARY KEY, due INTEGER NOT NULL, fired INTEGER)");
+    return this.ctx.storage.sql.exec<{ key: string }>("SELECT key FROM work WHERE fired IS NOT NULL").toArray().map((r) => r.key);
+  }
+
   /** Deletes this object's storage and restarts it, as if it had never been used. */
   async wipe(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
@@ -239,7 +296,7 @@ export class PresplitCounters extends CounterBase {
 }
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.REPOS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : env.COUNTERS) as never;
+  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.REPOS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
 }
 
 /** POST /table {cls, name, op, args}: one call of the table client. */
@@ -259,6 +316,11 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     const ns = env.FLAKY;
     await ns.get(ns.idFromName(shardObjectName(body.name, body.args[1] as string))).failActivations(body.args[0] as boolean);
     return null;
+  }
+  if (body.op === "wakeIn" || body.op === "alarmNow" || body.op === "alarmRan") {
+    const ns = env.FLAKY;
+    const stub = ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+    return stub[body.op]!(body.args[0]);
   }
   if (body.op === "failClones") {
     const ns = env.FLAKY;

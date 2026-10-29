@@ -18,6 +18,7 @@ export default defineConfig(() => ({
       REPOS: bindings.durableObject({ worker: NAME, exportName: "Repos" }),
       EVOLVING: bindings.durableObject({ worker: NAME, exportName: "EvolvingRepos" }),
       FLAKY: bindings.durableObject({ worker: NAME, exportName: "FlakyRepos" }),
+      OLD_ALARM: bindings.durableObject({ worker: NAME, exportName: "OldAlarm" }),
     },
     exports: {
       Counters: exports.durableObject({ storage: "sqlite" }),
@@ -26,6 +27,7 @@ export default defineConfig(() => ({
       Repos: exports.durableObject({ storage: "sqlite" }),
       EvolvingRepos: exports.durableObject({ storage: "sqlite" }),
       FlakyRepos: exports.durableObject({ storage: "sqlite" }),
+      OldAlarm: exports.durableObject({ storage: "sqlite" }),
     },
   },
 }));

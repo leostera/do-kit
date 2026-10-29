@@ -105,7 +105,8 @@ export declare function shardObjectName(name: string, bits: string): string;
  * (all owned by this shard), may take payloads aligned with the keys second, and read and write
  * only with `read` and one `update`.
  *
- * Subclasses that define `alarm` must call `super.alarm()`.
+ * Subclasses never define `alarm` (the constructor refuses): they override `onAlarm` and schedule
+ * it with `scheduleAlarm`.
  */
 export declare abstract class ShardedObject<Env = unknown, V = unknown> extends DurableObject<Env> {
     protected splitPolicy: SplitPolicy;
@@ -250,9 +251,27 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private node;
     private activateSibling;
     /**
-     * Activates a new sibling and clears what splits gave away. It never throws: the runtime
-     * retries a failing alarm only a few times, and the sibling is activated by nothing else, so
-     * a failure here reschedules the alarm itself for as long as there is work left.
+     * Runs on a serving shard once the time given to `scheduleAlarm` has come (it may run a little
+     * later, and the shard may have split since: check what is due). Never in a split's copy before
+     * it serves. If it throws, it runs again a second later. The default does nothing.
+     */
+    protected onAlarm(): Promise<void>;
+    /**
+     * Asks for `onAlarm` at `at` (or earlier, if an earlier time is already asked for). Use it, not
+     * `ctx.storage.setAlarm`: the alarm is shared with splits, and this never postpones their work
+     * nor loses the time asked for. A split's new shard keeps the time too.
+     */
+    protected scheduleAlarm(at: number | Date): Promise<void>;
+    /** Sets the alarm for `time` unless it is set for earlier already. */
+    private armAlarm;
+    /** When the subclass asked for `onAlarm`, if it did. */
+    private loadWake;
+    private saveWake;
+    /**
+     * Activates a new sibling, clears what splits gave away, and runs `onAlarm` when it is due. It
+     * never throws: the runtime retries a failing alarm only a few times, and the sibling is
+     * activated by nothing else, so a failure here reschedules the alarm itself for as long as there
+     * is work left. Subclasses cannot override it (the constructor refuses): see `onAlarm`.
      */
     alarm(): Promise<void>;
     /** Deletes one batch of rows this object gave away: the base table's first, then the subclass's. */

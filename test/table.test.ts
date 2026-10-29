@@ -235,3 +235,21 @@ test("a new shard is activated once it can be, however long activation kept fail
   expect((await post<{ state: string }>("/describe", { cls: "flaky", name, bits: "1" })).state).toBe("shard");
   expect((await table<unknown[]>("flaky", name, "all", {})).length).toBe(40);
 }, 120_000);
+
+test("a split's copy that is not claimed never runs the subclass's alarm, even when an alarm fires in it", async () => {
+  const name = `copy-alarm-${Date.now()}`;
+  for (let i = 0; i < 20; i++) await table("flaky", name, "put", { name: `r${i}`, id: `id${i}`, createdAt: i, lastPushAt: null, deleted: false, meta: null });
+  await table("flaky", name, "wakeIn", 60_000, ""); // the original has work scheduled, copied with it
+  await table("flaky", name, "failClones", true);
+  expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(false);
+  // The abandoned copy holds the original's storage. An alarm fires there (a snapshot carries it).
+  await table("flaky", name, "alarmNow", null, "1");
+  await Bun.sleep(1000);
+  const copy = await table<{ self: string; ran: string[] }>("flaky", name, "alarmRan", null, "1");
+  expect(copy.ran).not.toContain(copy.self);
+  // The original's onAlarm runs when its time comes.
+  await table("flaky", name, "wakeIn", 0, "");
+  await Bun.sleep(1000);
+  const original = await table<{ self: string; ran: string[] }>("flaky", name, "alarmRan", null, "");
+  expect(original.ran).toContain(original.self);
+}, 60_000);
