@@ -379,6 +379,12 @@ test("a shard keeps a record of its splits, and counts what it answered", async 
   const [record] = root.splits;
   expect(record).toMatchObject({ outcome: "split", copy: "logical", rows: KEYS.length, rightRows: KEYS.filter((k) => firstBit(k) === 1).length, error: null });
   expect(record!.ms).toBeGreaterThanOrEqual(500);
+  // The slow hand-out is where the time went; locally the copy is logical.
+  expect(record!.steps.handOut).toBeGreaterThanOrEqual(500);
+  expect(record!.steps).toMatchObject({ snapshot: 0, restore: 0, restoreInside: 0 });
+  expect(record!.steps.warm).toBeGreaterThanOrEqual(0); // before the hold, so not in ms
+  expect(record!.steps.claimAttempts).toBeGreaterThanOrEqual(1);
+  expect(record!.ms).toBeGreaterThanOrEqual(record!.steps.handOut + record!.steps.copyRows + record!.steps.claim);
   expect(record!.held).toBeGreaterThanOrEqual(1);
   expect(record!.notReady).toBe(record!.held); // holdWaitMs 0: every held write is answered "not ready"
   expect(root.counters.notReady).toBeGreaterThanOrEqual(record!.notReady);
