@@ -45,6 +45,8 @@ export function checkSplitPolicy(policy) {
         fail("holdWaitMs must be zero or more");
     return policy;
 }
+/** How many split attempts a shard remembers. */
+const SPLIT_HISTORY = 8;
 /** The first 64 bits of the key's SHA-256, as 16 hex digits: what ownership is decided on. */
 export function keyHash(key) {
     return createHash("sha256").update(key).digest("hex").slice(0, 16);
@@ -144,6 +146,7 @@ export class ShardedObject extends DurableObject {
     quietUntil = Date.now();
     /** The split in progress here: writes to `right` wait for `released`. */
     hold = null;
+    counters = { since: Date.now(), calls: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
     /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
     receiving = null;
     /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
@@ -295,17 +298,51 @@ export class ShardedObject extends DurableObject {
     }
     /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
     async waitForHold(keys) {
-        const deadline = Date.now() + (this.policy.holdWaitMs ?? HOLD_WAIT_MS);
+        if (!this.holding(keys))
+            return;
+        const start = Date.now();
+        const deadline = start + (this.policy.holdWaitMs ?? HOLD_WAIT_MS);
+        const counted = new Set();
+        // Counted on every split this write waits on (one, unless a split follows another).
+        const waited = (gaveUp) => {
+            const ms = Date.now() - start;
+            this.counters.heldMsMax = Math.max(this.counters.heldMsMax, ms);
+            for (const split of counted) {
+                split.heldMsMax = Math.max(split.heldMsMax, ms);
+                if (gaveUp && split === this.hold)
+                    split.notReady++;
+            }
+        };
+        this.counters.held++;
         for (let hold = this.holding(keys); hold; hold = this.holding(keys)) {
+            if (this.hold && !counted.has(this.hold)) {
+                counted.add(this.hold);
+                this.hold.held++;
+            }
             const left = deadline - Date.now();
-            if (left <= 0)
+            if (left <= 0) {
+                waited(true);
                 throw new NotReady(this.hold?.deadline ?? Date.now());
+            }
             let timer;
             const released = await Promise.race([hold.then(() => true), new Promise((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
             clearTimeout(timer);
-            if (!released)
+            if (!released) {
+                waited(true);
                 throw new NotReady(this.hold?.deadline ?? Date.now());
+            }
         }
+        waited(false);
+    }
+    /** Counts an answer other than "ok". */
+    answered(answer) {
+        if ("moved" in answer)
+            this.counters.moved++;
+        else if ("notReady" in answer)
+            this.counters.notReady++;
+        else if ("stale" in answer)
+            this.counters.stale++;
+        return answer;
     }
     /** What an update of these keys waits for, if any. */
     holding(keys) {
@@ -322,7 +359,8 @@ export class ShardedObject extends DurableObject {
     async shardedCall(name, bits, method, keys, payloads, args) {
         const answer = await this.arriveSettled(name, bits);
         if (answer)
-            return answer;
+            return this.answered(answer);
+        this.counters.calls++;
         for (const key of keys)
             if (!ownsHash(bits, keyHash(key)))
                 throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
@@ -333,9 +371,9 @@ export class ShardedObject extends DurableObject {
         }
         catch (error) {
             if (error instanceof Moved)
-                return this.moved(bits);
+                return this.answered(this.moved(bits));
             if (error instanceof NotReady)
-                return { notReady: bits, until: error.until };
+                return this.answered({ notReady: bits, until: error.until });
             throw error;
         }
     }
@@ -343,14 +381,15 @@ export class ShardedObject extends DurableObject {
     async shardedScan(name, bits, method, args) {
         const answer = await this.arriveSettled(name, bits);
         if (answer)
-            return answer;
+            return this.answered(answer);
+        this.counters.calls++;
         const fn = this.routedMethod(method);
         try {
             return { ok: await fn.call(this, ...args) };
         }
         catch (error) {
             if (error instanceof Moved)
-                return this.moved(bits);
+                return this.answered(this.moved(bits));
             throw error;
         }
     }
@@ -491,19 +530,27 @@ export class ShardedObject extends DurableObject {
         let release;
         const started = Date.now();
         const timeout = this.policy.splitTimeoutMs ?? 60_000;
-        const hold = { epoch, right, released: new Promise((resolve) => (release = resolve)), deadline: started + timeout };
+        const hold = { epoch, right, released: new Promise((resolve) => (release = resolve)), deadline: started + timeout, held: 0, notReady: 0, heldMsMax: 0 };
         this.hold = hold;
+        const [lo, hi] = hashRange(meta.bits);
+        const [rightLo] = hashRange(right);
+        const counted = this.sql.exec("SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM sharded_rows WHERE hash >= ? AND hash <= ?", rightLo, lo, hi).one();
+        let copy = null;
+        const record = (outcome, error) => [
+            ...(this.meta?.splits ?? []),
+            { at: started, ms: Date.now() - started, outcome, copy, rows: counted.rows, rightRows: counted.rightRows, held: hold.held, notReady: hold.notReady, heldMsMax: hold.heldMsMax, error },
+        ].slice(-SPLIT_HISTORY);
         let timer;
         try {
             this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });
             const live = () => this.hold === hold && Date.now() - started < timeout;
-            const copied = this.copyAndClaim(right, epoch, live);
+            const copied = this.copyAndClaim(right, epoch, live, (method) => (copy = method));
             copied.catch(() => { }); // after a timeout nobody waits for it
             const expired = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`split did not finish in ${timeout} ms`)), timeout)));
             const method = await Promise.race([copied, expired]);
             // The copy is claimed: from this transaction on, the right half is the sibling's.
             const now = this.meta;
-            this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, activate: { bits: right, epoch }, cleanup: [...now.cleanup, hashRange(right)], foreign: true, parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started } });
+            this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, activate: { bits: right, epoch }, cleanup: [...now.cleanup, hashRange(right)], foreign: true, parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started }, splits: record("split", null) });
             this.calls.clear();
             this.quietUntil = Date.now();
             console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), copy: method, ms: Date.now() - started }));
@@ -516,7 +563,7 @@ export class ShardedObject extends DurableObject {
         catch (error) {
             const now = this.meta;
             if (now)
-                this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, lastSplitError: String(error).slice(0, 500) });
+                this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, lastSplitError: String(error).slice(0, 500), splits: record("abandoned", String(error).slice(0, 500)) });
             this.quietUntil = Date.now();
             console.error(JSON.stringify({ event: "split-abandoned", node: nodeName(meta.name, meta.bits), error: String(error), ms: Date.now() - started }));
             return false;
@@ -530,9 +577,10 @@ export class ShardedObject extends DurableObject {
         }
     }
     /** Copies this object's storage to the right sibling, then claims the copy there. */
-    async copyAndClaim(right, epoch, live) {
+    async copyAndClaim(right, epoch, live, copied) {
         await this.beforeHandOut();
         const method = await this.copyTo(right, epoch, live);
+        copied(method);
         const meta = this.meta;
         let lastError = null;
         for (let wait = 10; live(); wait = Math.min(wait * 2, 500)) {
@@ -952,7 +1000,7 @@ export class ShardedObject extends DurableObject {
             rows = this.sql.exec("SELECT COUNT(*) AS n FROM sharded_rows WHERE hash >= ? AND hash <= ?", lo, hi).one().n;
         }
         const state = !meta ? "new" : this.hold ? "splitting" : meta.state === "copy" || this.isUnclaimedCopy() ? "copy" : "shard";
-        return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null };
+        return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null, splits: meta?.splits ?? [], counters: { ...this.counters } };
     }
 }
 /** Names a routed call may not reach: the base class's own methods, and the runtime's handlers. */

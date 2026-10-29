@@ -1,4 +1,5 @@
 // Starts the test Worker under cf dev (vite) for a test file, and talks to it over HTTP.
+import type { NodeDescription } from "../src/index.ts";
 import { afterAll, beforeAll } from "bun:test";
 import { join } from "node:path";
 
@@ -41,7 +42,7 @@ export async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const call = <T>(cls: string, name: string, method: string, keys: string[], payloads: unknown[] | null = null) => post<T>("/call", { cls, name, method, keys, payloads });
-export const describe = (cls: string, name: string, bits: string) => post<{ bits: string; state: string; rows: number; storedRows: number }>("/describe", { cls, name, bits });
+export const describe = (cls: string, name: string, bits: string) => post<NodeDescription>("/describe", { cls, name, bits });
 
 /** Shards reachable from the root, by asking objects (not the client's map). */
 export async function shards(cls: string, name: string, bits = ""): Promise<string[]> {

@@ -244,7 +244,11 @@ The default threshold is about half of what one object handles on the edge, whic
 - `owns(key)` says whether a key is this shard's now. Until cleanup finishes, filter bulk queries over your own tables (listings, counts, uniqueness checks) with it.
 - `beforeHandOut()` runs before the copy, while writes to the moving half wait. Use it to finish work tied to rows that are about to move.
 - **Alarms: override `onAlarm()` and schedule it with `scheduleAlarm(at)`, never `alarm` or `ctx.storage.setAlarm`.** The alarm also activates new shards and runs the background cleanup. `scheduleAlarm` keeps the earliest time asked for, so your work never postpones a split's and a split never loses yours. `onAlarm` runs only on a serving shard, never in a split's copy before it serves. A split's new shard keeps the scheduled time, so check in `onAlarm` which due work is yours with `owns(key)`. Overriding `alarm` throws when the object starts.
-- `shardedDescribe()` reports a shard's bits, rows, call rate, last split and, if it gave one up, why.
+- `shardedDescribe()` reports a shard's bits, rows and call rate, plus two things for attributing errors under load:
+  - `splits`: its last 8 split attempts, each with when it started, how long it took, the copy method, the rows it owned and how many moved, the writes it held, how many of those were answered "not ready", the longest wait, and why it was abandoned, if it was. A new shard starts with an empty record.
+  - `counters`: since the object last started, the calls it served and the "moved", "not ready" and "stale" answers it gave, plus the writes held by splits and the longest hold. Calls the runtime sheds as overloaded never reach the object, so compare `calls` with what you sent.
+
+  Reach any shard with `env.NS.get(env.NS.idFromName(shardObjectName(name, bits))).shardedDescribe()`.
 
 ## Development
 

@@ -362,3 +362,30 @@ test("a write held by a slow split waits for it, however short the client's own 
   expect(await split).toBe(true);
   expect(await call<number[]>("m", name, "get", [key])).toEqual([2]);
 }, 60_000);
+
+test("a shard keeps a record of its splits, and counts what it answered", async () => {
+  const name = `records-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  const key = KEYS.find((k) => firstBit(k) === 1)!; // in the half that moves
+  await post("/slowHandOut", { cls: "m", name, bits: "", ms: 500 });
+  const split = post<boolean>("/split", { cls: "m", name, bits: "" });
+  await Bun.sleep(100);
+  // Held, and with holdWaitMs 0 answered "not ready" at once; the client retries until the split is done.
+  await post<number[]>("/call", { cls: "m", name, method: "add", keys: [key], payloads: [1] });
+  expect(await split).toBe(true);
+
+  const root = await describe("m", name, "");
+  expect(root.splits).toHaveLength(1);
+  const [record] = root.splits;
+  expect(record).toMatchObject({ outcome: "split", copy: "logical", rows: KEYS.length, rightRows: KEYS.filter((k) => firstBit(k) === 1).length, error: null });
+  expect(record!.ms).toBeGreaterThanOrEqual(500);
+  expect(record!.held).toBeGreaterThanOrEqual(1);
+  expect(record!.notReady).toBe(record!.held); // holdWaitMs 0: every held write is answered "not ready"
+  expect(root.counters.notReady).toBeGreaterThanOrEqual(record!.notReady);
+  expect(root.counters.held).toBe(record!.held);
+  expect(root.counters.calls).toBeGreaterThanOrEqual(2);
+
+  const sibling = await describe("m", name, "1");
+  expect(sibling.splits).toEqual([]); // a new shard starts its own record
+}, 60_000);
+
