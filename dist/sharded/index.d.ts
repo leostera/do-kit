@@ -214,8 +214,17 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      * The logical copy, where snapshots are unavailable: every table, as a snapshot would carry
      * them, in byte-bounded batches. Writes to the half that moves are held meanwhile; rows of the
      * other half may change under the copy, which is fine: the copy drops them.
+     *
+     * Each table is paged by a key that a row keeps while it lives (its rowid, or its primary key
+     * in a WITHOUT ROWID table), never by offset: the half that stays, and the cleanup of earlier
+     * splits, delete rows during the copy, and an offset would then skip rows of the half that moves.
      */
     private copyRows;
+    /**
+     * The columns that page a table in a stable order: its rowid (under a name no column shadows),
+     * or the primary key of a WITHOUT ROWID table. Returned quoted, ready for SQL.
+     */
+    private pageOrder;
     /** This object's tables, the subclass's too (not SQLite's or the runtime's). */
     private tables;
     private node;
