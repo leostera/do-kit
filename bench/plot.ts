@@ -31,8 +31,6 @@ interface Chart {
   subtitle: string;
   xLabel: string;
   yLabel: string;
-  xLog?: boolean;
-  yLog?: boolean;
   xTicks: number[];
   xFormat?: (x: number) => string;
   series: Series[];
@@ -54,7 +52,7 @@ const LEGEND_ROW = 28;
 
 function niceMax(v: number): number {
   const p = 10 ** Math.floor(Math.log10(v));
-  return [1, 2, 2.5, 5, 10].map((m) => m * p).find((n) => n >= v)!;
+  return [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map((m) => m * p).find((n) => n >= v)!;
 }
 
 function fmt(v: number): string {
@@ -64,21 +62,20 @@ function fmt(v: number): string {
 }
 
 function chart(input: Chart): string {
-  const c = { ...input, series: input.series.filter((s) => s.points.length > 0) };
+  const ticks = new Set(input.xTicks);
+  const c = { ...input, series: input.series.map((s) => ({ ...s, points: s.points.filter(([x]) => ticks.has(x)) })).filter((s) => s.points.length > 0) };
   const all = c.series.flatMap((s) => s.points);
-  const xs = all.map(([x]) => x);
   const ys = all.map(([, y]) => y);
-  const xMin = Math.min(...c.xTicks, ...xs);
-  const xMax = Math.max(...c.xTicks, ...xs);
-  const yMin = c.yLog ? 10 ** Math.floor(Math.log10(Math.min(...ys.filter((y) => y > 0)))) : 0;
-  const yMax = c.yLog ? 10 ** Math.ceil(Math.log10(Math.max(...ys) * 1.05)) : niceMax(Math.max(1, ...ys) * 1.08);
+  const yMax = niceMax(Math.max(1, ...ys) * 1.08);
   const pw = W - L - R;
   const ph = PLOT_H;
   const perRow = 2;
   const H = T + ph + 84 + Math.ceil(c.series.length / perRow) * LEGEND_ROW + 12;
-  const sx = (x: number) => L + (c.xLog ? Math.log2(x / xMin) / Math.log2(xMax / xMin) : (x - xMin) / (xMax - xMin)) * pw;
-  const sy = (y: number) => T + ph - (c.yLog ? Math.log10(Math.max(y, yMin) / yMin) / Math.log10(yMax / yMin) : y / yMax) * ph;
-  const yTicks = c.yLog ? Array.from({ length: Math.log10(yMax / yMin) + 1 }, (_, i) => yMin * 10 ** i) : Array.from({ length: 6 }, (_, i) => (yMax * i) / 5);
+  // Evenly spaced categories on x (the measured levels), linear on y from zero.
+  const inset = 60;
+  const sx = (x: number) => L + inset + (c.xTicks.length > 1 ? c.xTicks.indexOf(x) / (c.xTicks.length - 1) : 0.5) * (pw - 2 * inset);
+  const sy = (y: number) => T + ph - (y / yMax) * ph;
+  const yTicks = Array.from({ length: 6 }, (_, i) => (yMax * i) / 5);
   const grid = yTicks.map((v) => `<line x1="${L}" x2="${L + pw}" y1="${sy(v)}" y2="${sy(v)}" class="grid"/><text x="${L - 12}" y="${sy(v) + 5}" text-anchor="end" class="tick">${fmt(v)}</text>`).join("");
   const xAxis = c.xTicks.map((v) => `<line x1="${sx(v)}" x2="${sx(v)}" y1="${T + ph}" y2="${T + ph + 6}" class="axisline"/><text x="${sx(v)}" y="${T + ph + 26}" text-anchor="middle" class="tick">${(c.xFormat ?? String)(v)}</text>`).join("");
   const lines = c.series
@@ -104,6 +101,7 @@ ${legend}
 
 const uniform = results.points.filter((p) => p.distribution === "uniform");
 const payload = uniform[0]?.payloadBytes ?? 1024;
+// Every measured level, evenly spaced: 1, 16 and 64 get as much room as 256 to 2,048.
 const levels = [...new Set(uniform.map((p) => p.concurrency))].sort((a, b) => a - b);
 const targets = (["single", "split", "presplit", "legacy"] as const).filter((t) => uniform.some((p) => p.target === t));
 const sel = (target: Target, operation: "read" | "write", value: (p: Point) => number): [number, number][] => uniform.filter((p) => p.target === target && p.operation === operation).map((p) => [p.concurrency, value(p)]);
@@ -116,7 +114,6 @@ graphs.throughput = chart({
   subtitle: `Successful one-key operations per second. ${runNote}`,
   xLabel: "Concurrent in-flight operations",
   yLabel: "operations / s",
-  xLog: true,
   xTicks: levels,
   series: targets.flatMap((t) => [
     { label: `${NAMES[t]} · write`, color: COLORS[t], points: sel(t, "write", (p) => p.operationsPerSecond) },
@@ -127,11 +124,9 @@ graphs.throughput = chart({
 for (const pct of ["p50", "p95", "p99", "max"] as const) {
   graphs[`latency-${pct}`] = chart({
     title: `Write latency ${pct} vs concurrency`,
-    subtitle: `Client-side latency of one-key writes (log scale). ${runNote}`,
+    subtitle: `Client-side latency of one-key writes. ${runNote}`,
     xLabel: "Concurrent in-flight operations",
     yLabel: `${pct} latency (ms)`,
-    xLog: true,
-    yLog: true,
     xTicks: levels,
     series: targets.map((t) => ({ label: NAMES[t], color: COLORS[t], points: sel(t, "write", (p) => Math.max(1, p.latencyMs[pct])) })),
   });
@@ -142,7 +137,6 @@ graphs.errors = chart({
   subtitle: `Calls that failed in 10 s (an overloaded object refuses them). ${runNote}`,
   xLabel: "Concurrent in-flight operations",
   yLabel: "failed calls",
-  xLog: true,
   xTicks: levels,
   series: targets.flatMap((t) => [
     { label: `${NAMES[t]} · write`, color: COLORS[t], points: sel(t, "write", (p) => p.errors) },
@@ -155,7 +149,6 @@ graphs.bandwidth = chart({
   subtitle: `Value bytes moved per second. ${runNote}`,
   xLabel: "Concurrent in-flight operations",
   yLabel: "MiB / s",
-  xLog: true,
   xTicks: levels,
   series: targets.flatMap((t) => [
     { label: `${NAMES[t]} · write`, color: COLORS[t], points: sel(t, "write", (p) => p.mebibytesPerSecond) },
@@ -170,7 +163,6 @@ graphs.capacity = chart({
   subtitle: "Leaves the measured write load split into, × the 10 GB limit of one SQLite-backed Durable Object",
   xLabel: "Concurrent in-flight writes",
   yLabel: "storage ceiling (GB)",
-  xLog: true,
   xTicks: levels,
   series: [
     { label: "one Durable Object", color: COLORS.single, points: levels.map((c) => [c, 10]) },
@@ -179,60 +171,67 @@ graphs.capacity = chart({
   ],
 });
 
+interface PanelBar { label: string; color: string; value: number | null; text: string }
+/**
+ * One panel per group (a data size), each on its own linear scale, so a 235 s bar does not flatten
+ * a 2 s one; every bar carries its value.
+ */
+function panels(title: string, subtitle: string, groups: { title: string; bars: PanelBar[] }[], legend: { label: string; color: string }[], note: string): string {
+  const top = 100;
+  const ph = 300;
+  const gap = 36;
+  const pw = (W - L - R - gap * (groups.length - 1)) / groups.length;
+  const h = top + ph + 70 + Math.ceil(legend.length / 2) * LEGEND_ROW + 40;
+  const body = groups
+    .map((g, gi) => {
+      const x0 = L + gi * (pw + gap);
+      const max = Math.max(...g.bars.map((b) => b.value ?? 0)) * 1.18 || 1;
+      const bw = (pw - 24) / g.bars.length;
+      const bars = g.bars
+        .map((b, bi) => {
+          const x = x0 + 12 + bi * bw;
+          if (b.value === null) return `<text x="${x + bw / 2}" y="${top + ph - 12}" text-anchor="middle" class="na">${b.text}</text>`;
+          const bh = (b.value / max) * ph;
+          return `<rect x="${(x + 6).toFixed(1)}" y="${(top + ph - bh).toFixed(1)}" width="${(bw - 12).toFixed(1)}" height="${bh.toFixed(1)}" rx="3" fill="${b.color}"/><text x="${x + bw / 2}" y="${top + ph - bh - 8}" text-anchor="middle" class="value">${b.text}</text>`;
+        })
+        .join("");
+      return `<line x1="${x0}" x2="${x0 + pw}" y1="${top + ph}" y2="${top + ph}" class="axisline"/>${bars}<text x="${x0 + pw / 2}" y="${top + ph + 30}" text-anchor="middle" class="label">${g.title}</text>`;
+    })
+    .join("");
+  const legendSvg = legend.map((l, i) => `<g transform="translate(${L + (i % 2) * ((W - L - R) / 2)},${top + ph + 72 + Math.floor(i / 2) * LEGEND_ROW})"><rect width="18" height="18" y="-13" rx="3" fill="${l.color}"/><text x="28" y="2" class="legend">${l.label}</text></g>`).join("");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${h}" viewBox="0 0 ${W} ${h}">
+<style>text{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;fill:#101828}.title{font-size:26px;font-weight:700}.sub{font-size:15px;fill:#475467}.label{font-size:15px;font-weight:600;fill:#344054}.legend{font-size:15px}.value{font-size:14px;font-weight:600;fill:#344054}.na{font-size:13px;fill:#98a2b3}.note{font-size:13px;fill:#667085}.axisline{stroke:#344054}</style>
+<rect width="${W}" height="${h}" fill="#fff"/>
+<text x="${L}" y="40" class="title">${title}</text><text x="${L}" y="66" class="sub">${subtitle}</text>
+${body}${legendSvg}<text x="${L}" y="${h - 16}" class="note">${note}</text>
+</svg>
+`;
+}
+
+const seconds = (ms: number) => (ms >= 10_000 ? `${Math.round(ms / 1000)} s` : `${(ms / 1000).toFixed(1)} s`);
+const millis = (ms: number) => (ms >= 1000 ? seconds(ms) : `${Math.round(ms)} ms`);
 const splits = results.splits ?? [];
 if (splits.length) {
   const sizes = [...new Set(splits.map((s) => s.bytes / 1048576))].sort((a, b) => a - b);
-  const mib = (s: SplitRun) => s.bytes / 1048576;
-  const of = (t: SplitRun["target"], v: (s: SplitRun) => number): [number, number][] => splits.filter((s) => s.target === t).map((s) => [mib(s), v(s)]);
   const sizeFmt = (v: number) => (v >= 1024 ? `${v / 1024} GiB` : `${v} MiB`);
-  // When the new owner serves with all its data: ours once the copy is claimed (deleting the
+  const designs = ["split", "two-copy", "legacy"] as const;
+  const legend = designs.map((d) => ({ label: SPLIT_NAMES[d], color: COLORS[d] }));
+  // What did not finish, by design and size (from the runs that produced no result).
+  const missing: Record<string, string> = { "two-copy:1024": "failed", "legacy:1024": "not done in 2 h" };
+  const groups = (value: (s: SplitRun) => number, text: (v: number) => string) =>
+    sizes.map((mib) => ({
+      title: sizeFmt(mib),
+      bars: designs.map((d) => {
+        const run = splits.find((s) => s.target === d && s.bytes / 1048576 === mib);
+        return run ? { label: d, color: COLORS[d], value: value(run), text: text(value(run)) } : { label: d, color: COLORS[d], value: null, text: missing[`${d}:${mib}`] ?? "—" };
+      }),
+    }));
+  // When the new owner serves with all of its data: ours once the copy is claimed (deleting the
   // half it gave away continues in the background); two-copy at the end of its freeze; the row
   // copy once the last row has moved (its children serve sooner, by asking the parent per key).
-  graphs["split-time"] = chart({
-    title: "Time to split vs data size",
-    subtitle: "Until the new owner serves with all of its data, under 8 concurrent writers (log scale)",
-    xLabel: "Data in the object when it splits",
-    yLabel: "seconds",
-    xLog: true,
-    yLog: true,
-    xTicks: sizes,
-    xFormat: sizeFmt,
-    series: [
-      { label: SPLIT_NAMES.split, color: COLORS.split, points: of("split", (s) => s.servingMs / 1000) },
-      { label: SPLIT_NAMES["two-copy"], color: COLORS["two-copy"], points: of("two-copy", (s) => s.doneMs / 1000) },
-      { label: SPLIT_NAMES.legacy, color: COLORS.legacy, points: of("legacy", (s) => s.doneMs / 1000) },
-    ],
-  });
-  graphs["split-latency"] = chart({
-    title: "Slowest write during a split",
-    subtitle: "Maximum write latency from 1 s before the split until 1 s after it settles (log scale)",
-    xLabel: "Data in the object when it splits",
-    yLabel: "milliseconds",
-    xLog: true,
-    yLog: true,
-    xTicks: sizes,
-    xFormat: sizeFmt,
-    series: [
-      { label: SPLIT_NAMES.split, color: COLORS.split, points: of("split", (s) => Math.max(1, s.writeLatencyMs.max)) },
-      { label: SPLIT_NAMES["two-copy"], color: COLORS["two-copy"], points: of("two-copy", (s) => Math.max(1, s.writeLatencyMs.max)) },
-      { label: SPLIT_NAMES.legacy, color: COLORS.legacy, points: of("legacy", (s) => Math.max(1, s.writeLatencyMs.max)) },
-    ],
-  });
-  graphs["split-p95"] = chart({
-    title: "Write latency p95 during a split",
-    subtitle: "From 1 s before the split until 1 s after it settles, including background cleanup (log scale)",
-    xLabel: "Data in the object when it splits",
-    yLabel: "milliseconds",
-    xLog: true,
-    yLog: true,
-    xTicks: sizes,
-    xFormat: sizeFmt,
-    series: [
-      { label: SPLIT_NAMES.split, color: COLORS.split, points: of("split", (s) => Math.max(1, s.writeLatencyMs.p95)) },
-      { label: SPLIT_NAMES["two-copy"], color: COLORS["two-copy"], points: of("two-copy", (s) => Math.max(1, s.writeLatencyMs.p95)) },
-      { label: SPLIT_NAMES.legacy, color: COLORS.legacy, points: of("legacy", (s) => Math.max(1, s.writeLatencyMs.p95)) },
-    ],
-  });
+  graphs["split-time"] = panels("Time to split", "Until the new owner serves with all of its data, under 8 concurrent writers. Each panel has its own scale.", groups((s) => (s.target === "split" ? s.servingMs : s.doneMs), seconds), legend, "Measured on Cloudflare's network, 1 KiB rows. splittable-object deletes the half each side gave away afterwards, in the background.");
+  graphs["split-latency"] = panels("Slowest write during a split", "Maximum write latency from 1 s before the split until 1 s after it settles. Each panel has its own scale.", groups((s) => s.writeLatencyMs.max, millis), legend, "With a snapshot, the slowest write is one that waited for the copy: with splittable-object only writes to the moving half wait.");
+  graphs["split-p95"] = panels("Write latency p95 during a split", "From 1 s before the split until 1 s after it settles, background cleanup included. Each panel has its own scale.", groups((s) => s.writeLatencyMs.p95, millis), legend, "The row copy keeps the busy object answering per-key fetches for minutes; the snapshot designs do not.");
 }
 
 for (const [name, svg] of Object.entries(graphs)) await writeFile(join(outDir, `${name}.svg`), svg);
@@ -315,19 +314,17 @@ if (singlePeak && leafPeak) {
 // clear them (R × 2), and the parent deletes R rows (× 2).
 const splitSizes = [1, 16, 128, 1024, 10240];
 const rowsIn = (mib: number) => (mib * 1048576) / 1024;
-graphs["cost-split"] = chart({
-  title: "Estimated cost of one split",
-  subtitle: "Rows written to copy and clean up an object of 1 KiB rows, at $1.00 per million rows (log scale)",
-  xLabel: "Data in the object when it splits",
-  yLabel: "US dollars",
-  xLog: true,
-  yLog: true,
-  xTicks: splitSizes,
-  xFormat: (v) => (v >= 1024 ? `${v / 1024} GiB` : `${v} MiB`),
-  series: [
-    { label: SPLIT_NAMES.split, color: COLORS.split, points: splitSizes.map((m) => [m, 2 * rowsIn(m) * PRICE.rowWritten]) },
-    { label: SPLIT_NAMES["two-copy"], color: COLORS["two-copy"], points: splitSizes.map((m) => [m, 4 * rowsIn(m) * PRICE.rowWritten]) },
-    { label: SPLIT_NAMES.legacy, color: COLORS.legacy, points: splitSizes.map((m) => [m, 6 * rowsIn(m) * PRICE.rowWritten]) },
-  ],
-});
+graphs["cost-split"] = panels(
+  "Estimated cost of one split",
+  "Rows written to copy and clean up an object of 1 KiB rows, at $1.00 per million rows. Each panel has its own scale.",
+  splitSizes.map((m) => ({
+    title: m >= 1024 ? `${m / 1024} GiB` : `${m} MiB`,
+    bars: ([["split", 2], ["two-copy", 4], ["legacy", 6]] as const).map(([d, perRow]) => {
+      const v = perRow * rowsIn(m) * PRICE.rowWritten;
+      return { label: d, color: COLORS[d], value: v, text: v < 0.01 ? `$${v.toFixed(3)}` : v < 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(v < 10 ? 2 : 0)}` };
+    }),
+  })),
+  (["split", "two-copy", "legacy"] as const).map((d) => ({ label: SPLIT_NAMES[d], color: COLORS[d] })),
+  "Estimates from the published prices and the rows each design writes; a snapshot restore is not billed as rows written.",
+);
 for (const name of ["cost-writes", "cost-split"]) if (graphs[name]) await writeFile(join(outDir, `${name}.svg`), graphs[name]);
