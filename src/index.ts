@@ -74,6 +74,8 @@ export interface NodeDescription {
   readonly callsPerSecond: number;
   /** How this object's last split copied its right half, and how long until the copy was claimed. */
   readonly lastSplit: { readonly copy: "native" | "logical"; readonly ms: number } | null;
+  /** Why the last abandoned split attempt was abandoned. */
+  readonly lastSplitError: string | null;
 }
 
 /** The writes of an update (null deletes) and what the method returns. */
@@ -130,6 +132,8 @@ CREATE INDEX IF NOT EXISTS splittable_rows_by_hash ON splittable_rows (hash, key
 
 /** Bytes of rows per logical-copy call, well under the RPC limit; a call always carries one row. */
 const COPY_BATCH_BYTES = 4 * 1024 * 1024;
+/** The reason a sibling restarts with after scheduling a restore (its caller may see it). */
+const RESTORE_ABORT = "splittable: restart on the snapshot";
 /** Rows read per page of the logical copy. */
 const COPY_PAGE_ROWS = 1000;
 /**
@@ -163,6 +167,8 @@ interface Meta {
   parent: string | null;
   splitAt: number;
   lastSplit?: { copy: "native" | "logical"; ms: number };
+  /** Why the last abandoned split attempt was abandoned. */
+  lastSplitError?: string;
 }
 
 /**
@@ -448,7 +454,7 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
       return true;
     } catch (error) {
       const now = this.meta;
-      if (now?.splitting === epoch) this.saveMeta({ ...now, splitting: null });
+      if (now) this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, lastSplitError: String(error).slice(0, 500) });
       this.quietUntil = Date.now();
       console.error(JSON.stringify({ event: "split-abandoned", node: nodeName(meta.name, meta.bits), error: String(error), ms: Date.now() - started }));
       return false;
@@ -466,11 +472,18 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
     await this.beforeHandOut();
     const method = await this.copyTo(right, epoch, live);
     const meta = this.meta!;
+    let lastError: unknown = null;
     for (let wait = 10; live(); wait = Math.min(wait * 2, 500)) {
-      if (await this.node(right).splittableClaim(meta.name, right, meta.bits, epoch)) return method;
+      try {
+        // A fresh stub each time: the sibling restarts to apply the restore, which breaks the old one.
+        if (await this.node(right).splittableClaim(meta.name, right, meta.bits, epoch)) return method;
+      } catch (error) {
+        // The sibling restarting (or still starting on the copy). Claiming is idempotent.
+        lastError = error;
+      }
       await new Promise((resolve) => setTimeout(resolve, wait));
     }
-    throw new Error("split timed out claiming its copy");
+    throw new Error(`split timed out claiming its copy${lastError ? `: ${String(lastError)}` : ""}`);
   }
 
   private async copyTo(right: string, epoch: number, live: () => boolean): Promise<"native" | "logical"> {
@@ -483,7 +496,13 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
         if (mode === "native") throw error; // auto: no snapshots here (local development)
       }
       if (snapshot) {
-        await this.node(right).splittableRestore(snapshot);
+        try {
+          await this.node(right).splittableRestore(snapshot);
+        } catch (error) {
+          // The sibling restarts right after replying; under load the restart can overtake the
+          // reply. Claiming tells whether the restore took.
+          if (!String(error).includes(RESTORE_ABORT)) throw error;
+        }
         return "native";
       }
     } else if (mode === "native") {
@@ -578,7 +597,7 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
         setTimeout(() => {
           resolve();
           try {
-            this.ctx.abort("apply snapshot restore");
+            this.ctx.abort(RESTORE_ABORT);
           } catch {
             // aborting throws in the caller too
           }
@@ -676,6 +695,6 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
       rows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM splittable_rows WHERE hash >= ? AND hash <= ?", lo, hi).one().n;
     }
     const state = !meta ? "new" : this.hold ? "splitting" : meta.state === "copy" || this.isUnclaimedCopy() ? "copy" : "leaf";
-    return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null };
+    return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null };
   }
 }

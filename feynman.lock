@@ -8,16 +8,16 @@
     "src/index.ts#SplittableObject.activateSibling": "5cdc072bab86",
     "src/index.ts#SplittableObject.alarm": "0a505e9b4567",
     "src/index.ts#SplittableObject.arrive": "8dfd40cfb01c",
-    "src/index.ts#SplittableObject.copyAndClaim": "cb2b0ff325d7",
-    "src/index.ts#SplittableObject.copyTo": "edf0eb7de8db",
+    "src/index.ts#SplittableObject.copyAndClaim": "deb69a777471",
+    "src/index.ts#SplittableObject.copyTo": "160b317a3043",
     "src/index.ts#SplittableObject.holding": "14c3bc79d313",
     "src/index.ts#SplittableObject.read": "4d7aa8b7f865",
-    "src/index.ts#SplittableObject.split": "8cb3c9e1113e",
+    "src/index.ts#SplittableObject.split": "0b9ef9fd9c9c",
     "src/index.ts#SplittableObject.splittableActivate": "c65312c3c789",
     "src/index.ts#SplittableObject.splittableCall": "fae2e5c318ea",
     "src/index.ts#SplittableObject.splittableClaim": "adc2ea329373",
     "src/index.ts#SplittableObject.splittableReceive": "1f47a785e9f1",
-    "src/index.ts#SplittableObject.splittableRestore": "b107aeae19c0",
+    "src/index.ts#SplittableObject.splittableRestore": "51e8a6ae8bec",
     "src/index.ts#SplittableObject.update": "f21b34242766"
   }
 }
