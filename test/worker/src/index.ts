@@ -166,6 +166,11 @@ class CounterBase extends ShardedObject<Env, number> {
     return this.update(keys, () => ({ writes: new Map(keys.map((k, i) => [k, payloads[i] as number])), result: keys.length }));
   }
 
+  /** Deletes these keys. */
+  async remove(keys: readonly string[], _payloads: null): Promise<number> {
+    return this.update(keys, () => ({ writes: new Map(keys.map((k) => [k, null])), result: keys.length }));
+  }
+
   async entries(): Promise<[string, number][]> {
     return [...this.allRows()];
   }

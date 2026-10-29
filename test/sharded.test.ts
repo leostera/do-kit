@@ -3,6 +3,7 @@
 // per key; load splits a node by itself; the client finds shards its map does not know yet.
 import { expect, test } from "bun:test";
 import fc from "fast-check";
+import { createHash } from "node:crypto";
 import { call, describe, post, shards, useWorker } from "./harness.ts";
 
 useWorker();
@@ -182,3 +183,45 @@ test("ownedRowsPage pages each shard in key order, skipping keys it gave away", 
   expect(shards.flat().sort()).toEqual([...KEYS].sort());
 }, 60_000);
 
+
+/** Bit 0 of a key's routing hash: which half of the root it belongs to. */
+const firstBit = (key: string) => (Number.parseInt(createHash("sha256").update(key).digest("hex")[0]!, 16) >> 3) & 1;
+
+test("a logical copy loses no row of the moving half while the half that stays deletes rows", async () => {
+  const name = `copy-under-deletes-${Date.now()}`;
+  // Enough rows, and large enough, for the copy to take several pages.
+  const keys = Array.from({ length: 4000 }, (_, i) => `k-${String(i).padStart(5, "0")}`);
+  const value = "x".repeat(2048);
+  for (let i = 0; i < keys.length; i += 250) await call("m", name, "put", keys.slice(i, i + 250), keys.slice(i, i + 250).map(() => value));
+  const stays = keys.filter((k) => firstBit(k) === 0).sort();
+  const moves = keys.filter((k) => firstBit(k) === 1);
+  // Delete rows of the half that stays, lowest keys first, while the copy runs: every delete
+  // before the copy's position shifts the rows after it.
+  let splitting = true;
+  const split = post<boolean>("/split", { cls: "m", name, bits: "" }).finally(() => (splitting = false));
+  const deleted: string[] = [];
+  for (let i = 0; splitting && i < stays.length; i += 20) {
+    const batch = stays.slice(i, i + 20);
+    await call("m", name, "remove", batch);
+    deleted.push(...batch);
+  }
+  expect(await split).toBe(true);
+  expect(deleted.length).toBeGreaterThan(0);
+  const got = await call<(string | null)[]>("m", name, "get", moves);
+  const lost = moves.filter((_, i) => got[i] !== value);
+  expect(lost).toEqual([]);
+}, 120_000);
+
+test("a logical copy loses no row while the background cleanup of an earlier split deletes rows", async () => {
+  const name = `copy-under-cleanup-${Date.now()}`;
+  const keys = Array.from({ length: 6000 }, (_, i) => `k-${String(i).padStart(5, "0")}`);
+  const value = "y".repeat(2048);
+  for (let i = 0; i < keys.length; i += 250) await call("m", name, "put", keys.slice(i, i + 250), keys.slice(i, i + 250).map(() => value));
+  // The first split leaves the root deleting the half it gave away, in paced batches; the second
+  // split copies the root's storage while those deletes go on.
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "0" })).toBe(true);
+  const got = await call<(string | null)[]>("m", name, "get", keys);
+  const lost = keys.filter((_, i) => got[i] !== value);
+  expect(lost).toEqual([]);
+}, 120_000);

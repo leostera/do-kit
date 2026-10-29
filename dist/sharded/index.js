@@ -40,6 +40,13 @@ function hashRange(bits) {
     const hi = BigInt(`0b0${bits}${"1".repeat(64 - bits.length)}`);
     return [lo.toString(16).padStart(16, "0"), hi.toString(16).padStart(16, "0")];
 }
+/** An SQL identifier, quoted (a subclass may name its tables anything). */
+function quoteIdentifier(name) {
+    return `"${name.replace(/"/g, '""')}"`;
+}
+function unquoteIdentifier(quoted) {
+    return quoted.slice(1, -1).replace(/""/g, '"');
+}
 export function nodeName(name, bits) {
     return `${name}#${bits}`;
 }
@@ -509,6 +516,10 @@ export class ShardedObject extends DurableObject {
      * The logical copy, where snapshots are unavailable: every table, as a snapshot would carry
      * them, in byte-bounded batches. Writes to the half that moves are held meanwhile; rows of the
      * other half may change under the copy, which is fine: the copy drops them.
+     *
+     * Each table is paged by a key that a row keeps while it lives (its rowid, or its primary key
+     * in a WITHOUT ROWID table), never by offset: the half that stays, and the cleanup of earlier
+     * splits, delete rows during the copy, and an offset would then skip rows of the half that moves.
      */
     async copyRows(right, epoch, live) {
         const meta = this.meta;
@@ -522,14 +533,22 @@ export class ShardedObject extends DurableObject {
         await target.shardedReceiveSchema(meta.name, right, schema);
         let first = true;
         for (const table of this.tables()) {
-            for (let offset = 0;;) {
+            const order = this.pageOrder(table, schema.find((o) => o.name === table)?.sql ?? "");
+            const columns = order.columns.join(", ");
+            const select = `SELECT ${order.rowid ? `${columns}, ` : ""}* FROM ${quoteIdentifier(table)}`;
+            let after = null;
+            for (;;) {
                 if (!live())
                     throw new Error("split timed out copying rows");
-                const cursor = this.sql.exec(`SELECT * FROM "${table}" LIMIT ? OFFSET ?`, COPY_PAGE_ROWS, offset);
+                const where = after ? ` WHERE (${columns}) > (${after.map(() => "?").join(", ")})` : "";
+                const cursor = this.sql.exec(`${select}${where} ORDER BY ${columns} LIMIT ?`, ...(after ?? []), COPY_PAGE_ROWS);
+                const names = cursor.columnNames;
+                const keyAt = order.rowid ? [0] : order.columns.map((c) => names.indexOf(unquoteIdentifier(c)));
                 const rows = [];
                 let bytes = 0;
                 for (const row of cursor.raw()) {
-                    rows.push(row);
+                    after = keyAt.map((i) => row[i]);
+                    rows.push(order.rowid ? row.slice(1) : row);
                     for (const value of row)
                         bytes += value instanceof ArrayBuffer ? value.byteLength : String(value).length;
                     if (bytes >= COPY_BATCH_BYTES)
@@ -537,15 +556,32 @@ export class ShardedObject extends DurableObject {
                 }
                 if (rows.length === 0 && !first)
                     break;
-                await target.shardedReceive(meta.name, right, first, table, cursor.columnNames, rows);
+                await target.shardedReceive(meta.name, right, first, table, order.rowid ? names.slice(1) : names, rows);
                 first = false;
-                offset += rows.length;
                 if (rows.length === 0 || (rows.length < COPY_PAGE_ROWS && bytes < COPY_BATCH_BYTES))
                     break;
             }
         }
         if (!(await target.shardedReceiveDone(meta.name, right, epoch)))
             throw new Error("the copy did not take this split's meta");
+    }
+    /**
+     * The columns that page a table in a stable order: its rowid (under a name no column shadows),
+     * or the primary key of a WITHOUT ROWID table. Returned quoted, ready for SQL.
+     */
+    pageOrder(table, sql) {
+        const info = this.sql.exec(`PRAGMA table_info(${quoteIdentifier(table)})`).toArray();
+        if (/\bWITHOUT\s+ROWID\b/i.test(sql)) {
+            const key = info.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk);
+            if (key.length === 0)
+                throw new Error(`table ${table} has no primary key to copy it by`);
+            return { columns: key.map((c) => quoteIdentifier(c.name)), rowid: false };
+        }
+        const names = new Set(info.map((c) => c.name.toLowerCase()));
+        const alias = ["rowid", "_rowid_", "oid"].find((a) => !names.has(a));
+        if (!alias)
+            throw new Error(`table ${table} shadows every name of its rowid: it cannot be copied in order`);
+        return { columns: [alias], rowid: true };
     }
     /** This object's tables, the subclass's too (not SQLite's or the runtime's). */
     tables() {
@@ -636,7 +672,7 @@ export class ShardedObject extends DurableObject {
         this.ctx.storage.transactionSync(() => {
             if (first) {
                 for (const t of this.tables())
-                    this.sql.exec(`DELETE FROM "${t}"`);
+                    this.sql.exec(`DELETE FROM ${quoteIdentifier(t)}`);
                 this.meta = null;
             }
             if (rows.length === 0)
@@ -644,7 +680,7 @@ export class ShardedObject extends DurableObject {
             // shardedReceiveSchema created every table first.
             if (!this.tables().includes(table))
                 throw new Error(`table ${table} does not exist in the copy`);
-            const sql = `INSERT OR REPLACE INTO "${table}" (${columns.map((c) => `"${c}"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
+            const sql = `INSERT OR REPLACE INTO ${quoteIdentifier(table)} (${columns.map(quoteIdentifier).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
             for (const row of rows)
                 this.sql.exec(sql, ...row);
         });
