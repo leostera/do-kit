@@ -111,8 +111,11 @@ export declare function shardObjectName(name: string, bits: string): string;
  */
 export declare abstract class ShardedObject<Env = unknown, V = unknown> extends DurableObject<Env> {
     protected splitPolicy: SplitPolicy;
-    /** The namespace this class is bound to: to reach siblings. */
-    protected abstract nodes(): DurableObjectNamespace<ShardedObject<Env, V>>;
+    /**
+     * The binding of this class, to reach its other shards: `return this.env.COUNTERS`. Typed loosely
+     * because a binding's type names the subclass, which a base class cannot.
+     */
+    protected abstract nodes(): DurableObjectNamespace<any>;
     /** `splitPolicy`, checked once (a subclass sets it after the constructor here runs). */
     private get policy();
     private checkedPolicy;

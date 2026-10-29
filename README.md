@@ -7,7 +7,8 @@ Everything is exported from `@leostera/do-kit`. Each layer also has its own path
 | Layer | Also at | What it gives you |
 |---|---|---|
 | **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, routing that follows splits. |
-| Key-value, events, indexes, cached reads | coming | Built on sharded objects: a ready-made store, change feeds and watches, unique keys and secondary indexes across shards, and reads cached in every data center. |
+| **Sharded table** (`ShardedTable`) | `@leostera/do-kit/table` | Typed rows on a sharded object: indexes in every shard, conditional writes on a version per row, counts, and sorted listings across shards with a cursor that survives splits. With no indexes, a key-value store. |
+| Unique keys and lookups across shards, events, cached reads | coming | Unique constraints and secondary lookups across shards, change feeds and watches, and reads cached in every data center. |
 
 ## Sharded objects: Durable Objects that split themselves when they get busy
 
@@ -112,6 +113,56 @@ These are estimates from the [published prices](https://developers.cloudflare.co
 - **One hot key.** A key always lives on one shard, so the most popular key caps what a shard can serve. The split policy does not yet know this, and keeps splitting a shard that is hot because of one key.
 - **Cross-key transactions.** `update` is transactional within one shard, and `callOneShard` refuses (before applying anything) when keys span shards. Nothing spans shards.
 - **Small loads.** Below what one object can take, a plain Durable Object is simpler and as fast.
+
+## Sharded tables: rows, indexes and listings
+
+Most things built on a sharded object end up as a table: a registry, a control plane, records listed newest first. `ShardedTable` is that table. Declare the columns and indexes, and every shard keeps them for its own rows.
+
+```ts
+import { defineTable, ShardedTable, table } from "@leostera/do-kit";
+
+type Repo = { name: string; id: string; createdAt: number; lastPushAt: number | null; deleted: boolean };
+const repos = defineTable<Repo>({
+  primaryKey: "name", // also what routes a row to its shard
+  columns: { name: "text", id: "text", createdAt: "integer", lastPushAt: "integer", deleted: "boolean" },
+  indexes: { byCreated: ["createdAt"], byPush: ["lastPushAt"] },
+});
+
+export class Repos extends ShardedTable<Env, Repo> {
+  protected table = repos;
+  protected nodes() { return this.env.REPOS; }
+}
+
+// In a Worker
+const t = table(env.REPOS, "acct:namespace", repos);
+await t.put({ name: "foo", id: "r1", createdAt: Date.now(), lastPushAt: null, deleted: false }, { ifVersion: 0 }); // only if new
+const page = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "deleted", op: "=", value: false }], limit: 50 });
+const next = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "deleted", op: "=", value: false }], limit: 50, cursor: page.cursor });
+```
+
+- **Writes** (`put`, `patch`, `delete`, and batches) are conditional on a version per row: `ifVersion: 0` means "only if absent". Each is one transaction with its index entries, fenced against splits.
+- **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring case).
+- **Counts** are kept per hash prefix, so `count()` is cheap and exact at any depth up to 16.
+- **Schema changes:** add columns and indexes in the schema; each shard applies them the first time it runs the new code.
+- Custom transactional methods use `getRow`, `putRow`, `patchRow` and `deleteRow` inside `transact`.
+
+### What a table buys you, measured
+
+![Table writes vs concurrency](docs/bench/table-write-throughput.svg)
+
+10,000 rows of 1 KiB with two indexes, on 1 shard (one Durable Object running the same SQL) and on 4, 16 and 64 shards from the start:
+
+| 1,024 in flight | 1 shard | 4 shards | 16 shards | 64 shards |
+|---|---|---|---|---|
+| **Writes** | 1,011/s, median 838 ms | 1,815/s | 3,666/s | **4,391/s, median 108 ms** |
+| **Reads by key** | 1,488/s, median 705 ms | 2,942/s | 5,271/s | **5,180/s, median 130 ms** |
+| **List pages** (50 rows) | 362/s | 397/s | 219/s, shed load | 231/s, shed load |
+
+**Listings do not scale with shards.** Every page asks every shard for its share, so each shard serves every page: listing throughput stays near what one object serves (about 370–400 pages/s here), and a page waits for its slowest shard. At 64 in flight, a page's median is 231 ms on 1 shard, 165 ms on 4, 210 ms on 16 and 805 ms on 64. Keep list-heavy tables to 16 shards or fewer. Listings that must scale further need an index stored by sort order rather than by key, which is the next layer.
+
+![Table listings vs concurrency](docs/bench/table-list-throughput.svg)
+
+More in [docs/performance.md](docs/performance.md#sharded-tables) and the design in [docs/design/sharded-table.md](docs/design/sharded-table.md).
 
 ## Install
 
