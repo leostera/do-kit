@@ -309,9 +309,7 @@ export class ShardedObject extends DurableObject {
             if (!ownsHash(bits, keyHash(key)))
                 throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
         this.countCall(keys.length);
-        const fn = this[method];
-        if (typeof fn !== "function" || method.startsWith("sharded"))
-            throw new Error(`no method ${method}`);
+        const fn = this.routedMethod(method);
         try {
             return { ok: await fn.call(this, keys, payloads, ...args) };
         }
@@ -328,9 +326,7 @@ export class ShardedObject extends DurableObject {
         const answer = await this.arriveSettled(name, bits);
         if (answer)
             return answer;
-        const fn = this[method];
-        if (typeof fn !== "function" || method.startsWith("sharded"))
-            throw new Error(`no method ${method}`);
+        const fn = this.routedMethod(method);
         try {
             return { ok: await fn.call(this, ...args) };
         }
@@ -339,6 +335,17 @@ export class ShardedObject extends DurableObject {
                 return this.moved(bits);
             throw error;
         }
+    }
+    /**
+     * The subclass method a routed call or scan names. Never one of this base class's own (its
+     * reads and writes, the split protocol, the alarm) nor a runtime handler: a call must not reach
+     * them with arguments it shaped for something else.
+     */
+    routedMethod(method) {
+        const fn = this[method];
+        if (typeof fn !== "function" || method.startsWith("sharded") || RESERVED_METHODS.has(method))
+            throw new Error(`no method ${method}`);
+        return fn;
     }
     /** Every row this shard owns, for scans (a subclass's scan method may use it). */
     allRows() {
@@ -828,4 +835,14 @@ export class ShardedObject extends DurableObject {
         return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null };
     }
 }
+/** Names a routed call may not reach: the base class's own methods, and the runtime's handlers. */
+const RESERVED_METHODS = new Set([
+    ...Object.getOwnPropertyNames(ShardedObject.prototype),
+    ...Object.getOwnPropertyNames(Object.prototype),
+    "fetch",
+    "alarm",
+    "webSocketMessage",
+    "webSocketClose",
+    "webSocketError",
+]);
 //# sourceMappingURL=index.js.map
