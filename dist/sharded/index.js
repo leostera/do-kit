@@ -74,6 +74,14 @@ function hashRange(bits) {
 function quoteIdentifier(name) {
     return `"${name.replace(/"/g, '""')}"`;
 }
+/**
+ * Tables that are SQLite's (sqlite_), the runtime's (_cf_) or local development's (__miniflare_),
+ * never a subclass's. By prefix, not LIKE: in LIKE, "_" matches any character, and "_cf_%" also
+ * matched a subclass's table such as "scf_notes", which a split then failed to copy.
+ */
+function isInternalTable(name) {
+    return name.startsWith("sqlite_") || name.startsWith("_cf_") || name.startsWith("__miniflare_");
+}
 function unquoteIdentifier(quoted) {
     return quoted.slice(1, -1).replace(/""/g, '"');
 }
@@ -690,9 +698,9 @@ export class ShardedObject extends DurableObject {
         // Tables and indexes first, as a snapshot would carry them: the copy may not have created a
         // subclass's yet (a sharded table creates its own on first use).
         const schema = this.sql
-            .exec("SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY type DESC, name")
+            .exec("SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') ORDER BY type DESC, name")
             .toArray()
-            .filter((o) => o.sql !== null);
+            .filter((o) => o.sql !== null && !isInternalTable(o.name));
         await target.shardedReceiveSchema(meta.name, right, epoch, schema);
         let first = true;
         for (const table of this.tables()) {
@@ -749,9 +757,10 @@ export class ShardedObject extends DurableObject {
     /** This object's tables, the subclass's too (not SQLite's or the runtime's). */
     tables() {
         return this.sql
-            .exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name")
+            .exec("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .toArray()
-            .map((t) => t.name);
+            .map((t) => t.name)
+            .filter((name) => !isInternalTable(name));
     }
     node(bits) {
         const nodes = this.nodes();

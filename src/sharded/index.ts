@@ -227,6 +227,15 @@ function quoteIdentifier(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
+/**
+ * Tables that are SQLite's (sqlite_), the runtime's (_cf_) or local development's (__miniflare_),
+ * never a subclass's. By prefix, not LIKE: in LIKE, "_" matches any character, and "_cf_%" also
+ * matched a subclass's table such as "scf_notes", which a split then failed to copy.
+ */
+function isInternalTable(name: string): boolean {
+  return name.startsWith("sqlite_") || name.startsWith("_cf_") || name.startsWith("__miniflare_");
+}
+
 function unquoteIdentifier(quoted: string): string {
   return quoted.slice(1, -1).replace(/""/g, '"');
 }
@@ -859,9 +868,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // Tables and indexes first, as a snapshot would carry them: the copy may not have created a
     // subclass's yet (a sharded table creates its own on first use).
     const schema = this.sql
-      .exec<{ name: string; sql: string | null }>("SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY type DESC, name")
+      .exec<{ name: string; sql: string | null }>("SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') ORDER BY type DESC, name")
       .toArray()
-      .filter((o): o is { name: string; sql: string } => o.sql !== null);
+      .filter((o): o is { name: string; sql: string } => o.sql !== null && !isInternalTable(o.name));
     await target.shardedReceiveSchema(meta.name, right, epoch, schema);
     let first = true;
     for (const table of this.tables()) {
@@ -912,9 +921,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** This object's tables, the subclass's too (not SQLite's or the runtime's). */
   private tables(): string[] {
     return this.sql
-      .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name")
+      .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .toArray()
-      .map((t) => t.name);
+      .map((t) => t.name)
+      .filter((name) => !isInternalTable(name));
   }
 
   private node(bits: string): DurableObjectStub<ShardedObject<Env, V>> {

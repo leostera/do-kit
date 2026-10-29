@@ -258,7 +258,8 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       if (!have.has(name)) this.db.exec(`ALTER TABLE ${TABLE} ADD COLUMN ${this.q(name)} ${AFFINITY[type]}`);
     }
     const wanted = this.indexes();
-    const sqlIndexes = this.db.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name LIKE ?`, TABLE, `${INDEX_PREFIX}%`).toArray();
+    // Ours by exact prefix (LIKE would match any character for "_", and any case).
+    const sqlIndexes = this.db.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND substr(name, 1, ?) = ?`, TABLE, INDEX_PREFIX.length, INDEX_PREFIX).toArray();
     for (const { name } of sqlIndexes) if (!wanted.some((ix) => ix.sqlIndex === name)) this.db.exec(`DROP INDEX IF EXISTS "${name}"`);
     for (const { name } of existing) if (name.startsWith(KEY_COLUMN_PREFIX) && !wanted.some((ix) => ix.keyColumn === name)) this.db.exec(`ALTER TABLE ${TABLE} DROP COLUMN "${name}"`);
     for (const ix of wanted) {

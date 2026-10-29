@@ -397,3 +397,12 @@ test("a shard keeps a record of its splits, and counts what it answered", async 
   expect(sibling.splits).toEqual([]); // a new shard starts its own record
 }, 60_000);
 
+
+test("a split copies every subclass table, whatever its name", async () => {
+  const name = `names-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  await call("m", name, "note", KEYS, KEYS.map((k) => `note of ${k}`));
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  const notes = (await post<[string, string][][]>("/scan", { cls: "m", name, method: "notes" })).flat().sort();
+  expect(notes).toEqual(KEYS.map((k): [string, string] => [k, `note of ${k}`]).sort());
+}, 60_000);

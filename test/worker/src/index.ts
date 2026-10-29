@@ -280,6 +280,32 @@ class CounterBase extends ShardedObject<Env, number> {
     return this.ctx.storage.sql.exec<{ key: string }>("SELECT key FROM work WHERE fired IS NOT NULL").toArray().map((r) => r.key);
   }
 
+  /** Notes on keys, in a table whose name looks like a runtime's to a careless LIKE ("_cf_%"). */
+  async note(keys: readonly string[], payloads: readonly string[]): Promise<null[]> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS scf_notes (key TEXT PRIMARY KEY, note TEXT NOT NULL)");
+    await this.transact(keys, () => keys.forEach((k, i) => this.ctx.storage.sql.exec("INSERT OR REPLACE INTO scf_notes (key, note) VALUES (?, ?)", k, payloads[i]!)));
+    return keys.map(() => null);
+  }
+
+  /** The notes of the keys this shard owns. */
+  async notes(): Promise<[string, string][]> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS scf_notes (key TEXT PRIMARY KEY, note TEXT NOT NULL)");
+    return this.ctx.storage.sql
+      .exec<{ key: string; note: string }>("SELECT key, note FROM scf_notes")
+      .toArray()
+      .filter((r) => this.owns(r.key))
+      .map((r): [string, string] => [r.key, r.note]);
+  }
+
+  /** Keys this shard owns whose text matches. */
+  async search(query: string): Promise<string[]> {
+    return this.ctx.storage.sql
+      .exec<{ key: string }>("SELECT key FROM search WHERE search MATCH ?", query)
+      .toArray()
+      .map((r) => r.key)
+      .filter((k) => this.owns(k));
+  }
+
   /** Deletes this object's storage and restarts it, as if it had never been used. */
   async wipe(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
