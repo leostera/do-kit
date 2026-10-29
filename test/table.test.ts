@@ -12,6 +12,7 @@ type Page = { rows: Versioned[]; cursor: string | null };
 type Query = { index?: string; direction?: "asc" | "desc"; where?: { column: string; op: string; value?: unknown }[]; limit?: number; budget?: number; cursor?: string | null };
 
 const op = <T>(name: string, operation: string, ...args: unknown[]) => post<T>("/table", { cls: "table", name, op: operation, args });
+const table = <T>(cls: string, name: string, operation: string, ...args: unknown[]) => post<T>("/table", { cls, name, op: operation, args });
 const split = (name: string, bits: string) => post<boolean>("/split", { cls: "table", name, bits });
 
 /** Rows with repeated and missing sort values, and names whose UTF-16 and code-point orders differ. */
@@ -199,4 +200,20 @@ test("a new schema adds columns and swaps indexes on a live object", async () =>
   expect(after.some((n) => n.includes("_byStars_"))).toBe(true);
   const byStars = await evolve<Page>("list", { index: "byStars", direction: "desc", where: [{ column: "stars", op: "notNull" }] });
   expect(byStars.rows.map((r) => r.row.name)).toEqual([rows[1]!.name, rows[2]!.name]);
+}, 60_000);
+
+test("a split succeeds after an abandoned attempt left a copy with an older schema", async () => {
+  const name = `flaky-${Date.now()}`;
+  for (let i = 0; i < 40; i++) await table("flaky", name, "put", { name: `r${i}`, id: `id${i}`, createdAt: i, lastPushAt: null, deleted: false, meta: null });
+  // The first attempt copies the object, then cannot claim the copy, and is abandoned.
+  await table("flaky", name, "failClones", true);
+  expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(false);
+  // A deploy adds a column; the object migrates on its next write.
+  await table("flaky", name, "upgrade");
+  await table("flaky", name, "failClones", false);
+  await table("flaky", name, "put", { name: "r0", id: "id0", createdAt: 0, lastPushAt: null, deleted: false, meta: null, stars: 5 });
+  expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(true);
+  const rows = await table<{ row: { name: string; stars: number | null } }[]>("flaky", name, "all", {});
+  expect(rows.length).toBe(40);
+  expect(rows.find((r) => r.row.name === "r0")!.row.stars).toBe(5);
 }, 60_000);

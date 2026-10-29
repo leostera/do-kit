@@ -11,6 +11,7 @@ interface Env {
   readonly PRESPLIT_COUNTERS: DurableObjectNamespace<PresplitCounters>;
   readonly REPOS: DurableObjectNamespace<Repos>;
   readonly EVOLVING: DurableObjectNamespace<EvolvingRepos>;
+  readonly FLAKY: DurableObjectNamespace<FlakyRepos>;
 }
 
 // ---- A sharded table: repositories, split by hand ----
@@ -73,6 +74,27 @@ export class EvolvingRepos extends ShardedTable<Env, RepoV2> {
   }
   async indexNames(): Promise<string[]> {
     return this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sharded_table' AND name LIKE 'sharded_table_ix_%' ORDER BY name").toArray().map((r) => r.name);
+  }
+}
+
+/**
+ * EvolvingRepos whose split copies can be made to fail to claim (`failClones`), so a split is
+ * abandoned after its copy was made, and with a short split timeout.
+ */
+export class FlakyRepos extends EvolvingRepos {
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6, splitTimeoutMs: 1500 };
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.FLAKY as never;
+  }
+  /** While set, a copy of this object refuses to be claimed (the flag is copied with the rest). */
+  async failClones(fail: boolean): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_clone (fail INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_clone");
+    this.ctx.storage.sql.exec("INSERT INTO test_clone (fail) VALUES (?)", fail ? 1 : 0);
+  }
+  protected override afterClone(owns: (key: string) => boolean): void {
+    if (this.ctx.storage.sql.exec("SELECT fail FROM test_clone WHERE fail = 1").toArray().length) throw new Error("test: clone refused");
+    super.afterClone(owns);
   }
 }
 
@@ -198,20 +220,25 @@ export class PresplitCounters extends CounterBase {
 }
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.REPOS : cls === "evolving" ? env.EVOLVING : env.COUNTERS) as never;
+  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.REPOS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : env.COUNTERS) as never;
 }
 
 /** POST /table {cls, name, op, args}: one call of the table client. */
 async function tableOp(env: Env, body: { cls: string; name: string; op: string; args: unknown[] }): Promise<unknown> {
-  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" ? reposV2 : repos) as never) as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? reposV2 : repos) as never) as unknown as Record<string, (...a: unknown[]) => unknown>;
   if (body.op === "all") {
     const rows: unknown[] = [];
     for await (const row of (t.all as (q: ListQuery) => AsyncGenerator<unknown>).call(t, body.args[0] as ListQuery)) rows.push(row);
     return rows;
   }
   if (body.op === "upgrade") {
-    const ns = env.EVOLVING;
+    const ns = namespace(env, body.cls) as unknown as DurableObjectNamespace<EvolvingRepos>;
     await ns.get(ns.idFromName(shardObjectName(body.name, ""))).upgrade().catch(() => {});
+    return null;
+  }
+  if (body.op === "failClones") {
+    const ns = env.FLAKY;
+    await ns.get(ns.idFromName(shardObjectName(body.name, ""))).failClones(body.args[0] as boolean);
     return null;
   }
   if (body.op === "indexNames") {

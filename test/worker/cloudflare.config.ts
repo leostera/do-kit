@@ -17,6 +17,7 @@ export default defineConfig(() => ({
       PRESPLIT_COUNTERS: bindings.durableObject({ worker: NAME, exportName: "PresplitCounters" }),
       REPOS: bindings.durableObject({ worker: NAME, exportName: "Repos" }),
       EVOLVING: bindings.durableObject({ worker: NAME, exportName: "EvolvingRepos" }),
+      FLAKY: bindings.durableObject({ worker: NAME, exportName: "FlakyRepos" }),
     },
     exports: {
       Counters: exports.durableObject({ storage: "sqlite" }),
@@ -24,6 +25,7 @@ export default defineConfig(() => ({
       PresplitCounters: exports.durableObject({ storage: "sqlite" }),
       Repos: exports.durableObject({ storage: "sqlite" }),
       EvolvingRepos: exports.durableObject({ storage: "sqlite" }),
+      FlakyRepos: exports.durableObject({ storage: "sqlite" }),
     },
   },
 }));
