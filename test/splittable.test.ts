@@ -195,3 +195,20 @@ test("a split copies subclass tables, and the new leaf drops what it does not ow
   expect(right!.every((h) => h.owned)).toBe(true);
   expect(right!.length + left!.filter((h) => h.owned).length).toBe(KEYS.length);
 }, 60_000);
+
+test("after a split, cleanupForeign drops the rows each leaf no longer owns, on both leaves", async () => {
+  const name = `foreign-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  for (let i = 0; i < 100; i++) {
+    const leaves = await post<{ key: string; owned: boolean }[][]>("/scan", { cls: "m", name, method: "listing" });
+    if (leaves.every((rows) => rows.every((r) => r.owned))) {
+      // Each key is listed exactly once, by the leaf that owns it.
+      expect(leaves.flat().map((r) => r.key).sort()).toEqual([...KEYS].sort());
+      expect(leaves.every((rows) => rows.length > 0)).toBe(true);
+      return;
+    }
+    await Bun.sleep(100);
+  }
+  throw new Error("the old leaf kept rows it no longer owns");
+}, 60_000);

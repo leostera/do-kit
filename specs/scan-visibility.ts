@@ -84,9 +84,9 @@ export default defineSpec(
       actions: {
         cleanRightRows: {
           label: "Run cleanup",
-          description: "Deletes the old right-half rows from the original after ownership has moved.",
+          description: "Deletes the old right-half rows from the original after ownership has moved: the built-in rows, then, through cleanupForeign, the subclass's. Until then, reads filter by ownership (allRows, owns).",
           when: (s) => s.stored.R,
-          sources: ["src/index.ts#SplittableObject.alarm"],
+          sources: ["src/index.ts#SplittableObject.alarm", "src/index.ts#SplittableObject.cleanupForeign", "src/index.ts#SplittableObject.owns"],
           run(s) {
             s.stored.R = false;
           },

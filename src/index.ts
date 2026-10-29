@@ -14,7 +14,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { createHash } from "node:crypto";
 
-export { SpansLeaves, SplittableClient, splittable, type LeafResult } from "./client.ts";
+export { SpansLeaves, SplittableClient, splittable, type LeafResult } from "./client.js";
 
 declare global {
   /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
@@ -163,6 +163,8 @@ interface Meta {
   activate: { bits: string; epoch: number } | null;
   /** Hash ranges this object no longer owns, whose rows the alarm deletes. */
   cleanup: (readonly [string, string])[];
+  /** The subclass still has rows for keys it no longer owns: the alarm calls `cleanupForeign`. */
+  foreign?: boolean;
   /** The leaf this one split from and when (null for the root). */
   parent: string | null;
   splitAt: number;
@@ -253,6 +255,24 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
    * `read`/`update` are handled by the base class.
    */
   protected afterClone(_owns: (key: string) => boolean): void {}
+
+  /**
+   * Deletes up to `limit` rows of the subclass's own tables that belong to keys this leaf no
+   * longer owns, and returns how many it deleted. After a split, the alarm calls it on both
+   * leaves, in paced batches, until it returns 0, as it does for the rows of `read`/`update`.
+   * Until then a subclass that queries its tables in bulk (listings, counts) filters with
+   * `owns`. The default deletes nothing: an original that keeps delivering an outbox for keys
+   * that moved keeps those rows.
+   */
+  protected cleanupForeign(_owns: (key: string) => boolean, _limit: number): number {
+    return 0;
+  }
+
+  /** Whether `key` is this leaf's now. Keys of a split's moving half stay this leaf's until it commits. */
+  protected owns(key: string): boolean {
+    if (!this.meta) throw new Error("node has no name yet");
+    return ownsHash(this.meta.bits, keyHash(key));
+  }
 
   /** This leaf's name (`${name}#${bits}`), once it has one. */
   protected nodeLabel(): string {
@@ -361,7 +381,7 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
     // A split interrupted by a restart: abandoned (its copy is never activated).
     if (meta.splitting !== null && !this.hold) {
       this.saveMeta({ ...meta, splitting: null });
-      if (meta.activate || meta.cleanup.length > 0) void this.ctx.storage.setAlarm(Date.now());
+      if (meta.activate || meta.cleanup.length > 0 || meta.foreign) void this.ctx.storage.setAlarm(Date.now());
     }
     if (meta.bits === bits) return null;
     if (meta.bits.startsWith(bits)) return this.moved(bits);
@@ -443,7 +463,7 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
       const method = await Promise.race([copied, expired]);
       // The copy is claimed: from this transaction on, the right half is the sibling's.
       const now = this.meta!;
-      this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, activate: { bits: right, epoch }, cleanup: [...now.cleanup, hashRange(right)], parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started } });
+      this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, activate: { bits: right, epoch }, cleanup: [...now.cleanup, hashRange(right)], foreign: true, parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started } });
       this.calls.clear();
       this.quietUntil = Date.now();
       console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), copy: method, ms: Date.now() - started }));
@@ -575,9 +595,13 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
     if (range) {
       const deleted = this.sql.exec("DELETE FROM splittable_rows WHERE key IN (SELECT key FROM splittable_rows WHERE hash >= ? AND hash <= ? LIMIT ?)", range[0], range[1], DELETE_BATCH_ROWS).rowsWritten;
       if (deleted === 0) this.saveMeta({ ...this.meta!, cleanup: this.meta!.cleanup.slice(1) });
+    } else if (meta.foreign) {
+      const bits = meta.bits;
+      const deleted = this.ctx.storage.transactionSync(() => this.cleanupForeign((key) => ownsHash(bits, keyHash(key)), DELETE_BATCH_ROWS));
+      if (deleted === 0) this.saveMeta({ ...this.meta!, foreign: false });
     }
     if (this.meta!.activate) await this.ctx.storage.setAlarm(Date.now() + 1000);
-    else if (this.meta!.cleanup.length > 0) await this.ctx.storage.setAlarm(Date.now() + DELETE_PAUSE_MS);
+    else if (this.meta!.cleanup.length > 0 || this.meta!.foreign) await this.ctx.storage.setAlarm(Date.now() + DELETE_PAUSE_MS);
   }
 
   // ---- The sibling's side of a split ----
@@ -655,7 +679,7 @@ export abstract class SplittableObject<Env = unknown, V = unknown> extends Durab
     if (!this.isUnclaimedCopy() || meta.bits !== parent || meta.splitting !== epoch) return false; // not this copy
     this.ctx.storage.transactionSync(() => {
       this.afterClone((key) => ownsHash(bits, keyHash(key)));
-      this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), parent, splitAt: Date.now() });
+      this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, parent, splitAt: Date.now() });
     });
     await this.ctx.storage.setAlarm(Date.now());
     return true;
