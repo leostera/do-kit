@@ -72,10 +72,14 @@ export class ShardedClient {
      * throws SpansShards, before anything is applied, if they belong to more than one.
      */
     async callOneShard(keys, method, payloads, ...args) {
+        if (keys.length === 0)
+            throw new Error(`sharded ${this.name}: callOneShard needs at least one key to pick its shard`);
         const [only] = await this.route(true, keys, method, payloads, args);
         return only.result;
     }
     async route(oneShard, keys, method, payloads, args) {
+        if (payloads && payloads.length !== keys.length)
+            throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
         await this.loadCache();
         const hashes = keys.map(keyHash);
         const out = [];

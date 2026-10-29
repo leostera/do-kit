@@ -93,11 +93,13 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
    * throws SpansShards, before anything is applied, if they belong to more than one.
    */
   async callOneShard<M extends KeyMethods<T>>(keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, ...args: Rest<T[M]>): Promise<Result<T[M]>> {
+    if (keys.length === 0) throw new Error(`sharded ${this.name}: callOneShard needs at least one key to pick its shard`);
     const [only] = await this.route(true, keys, method, payloads, args);
     return only!.result;
   }
 
   private async route<M extends KeyMethods<T>>(oneShard: boolean, keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, args: Rest<T[M]>): Promise<ShardResult<Result<T[M]>>[]> {
+    if (payloads && payloads.length !== keys.length) throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
     await this.loadCache();
     const hashes = keys.map(keyHash);
     const out: ShardResult<Result<T[M]>>[] = [];

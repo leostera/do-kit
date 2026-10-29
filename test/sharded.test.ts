@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
-import { call, describe, post, shards, useWorker } from "./harness.ts";
+import { call, describe, post, shards, useWorker, workerUrl } from "./harness.ts";
 
 useWorker();
 
@@ -231,4 +231,16 @@ test("ownedRowsPage includes the empty key", async () => {
   await call("m", name, "add", ["", "a", "b"], [1, 1, 1]);
   const shards = await post<string[][]>("/scan", { cls: "m", name, method: "pagedKeys", args: [2] });
   expect(shards.flat().sort()).toEqual(["", "a", "b"]);
+}, 60_000);
+
+test("callOneShard with no keys says so", async () => {
+  const response = await fetch(`${workerUrl()}/callOne`, { method: "POST", body: JSON.stringify({ cls: "m", name: `one-empty-${Date.now()}`, method: "get", keys: [], payloads: null }) });
+  expect(response.status).toBe(500);
+  expect(await response.text()).toContain("at least one key");
+}, 60_000);
+
+test("a call whose payloads do not line up with its keys is refused before reaching a shard", async () => {
+  const name = `misaligned-${Date.now()}`;
+  await expect(call("m", name, "add", ["a", "b"], [1])).rejects.toThrow("payloads");
+  expect(await call<(number | null)[]>("m", name, "get", ["a", "b"])).toEqual([null, null]);
 }, 60_000);

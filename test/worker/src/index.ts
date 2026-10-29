@@ -263,6 +263,8 @@ export default {
           for (const shard of results) shard.positions.forEach((p, j) => (out[p] = (shard.result as unknown[])[j]));
           return Response.json(out);
         }
+        case "/callOne":
+          return Response.json(await sharded(ns, body.name).callOneShard(body.keys, body.method as "get", (body.payloads ?? null) as null));
         case "/scan":
           return Response.json(await (sharded(ns, body.name).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(body.method, ...((body.args as unknown[]) ?? [])));
         case "/split":

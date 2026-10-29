@@ -31,6 +31,9 @@ export function useWorker(): void {
   afterAll(() => stop());
 }
 
+/** The test Worker's URL. */
+export const workerUrl = (): string => base;
+
 export async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(base + path, { method: "POST", body: JSON.stringify(body) });
   if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`);
