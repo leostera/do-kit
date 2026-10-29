@@ -278,7 +278,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (!Number.isInteger(limit) || limit < 1) throw new Error("ownedRowsPage limit must be a positive integer");
     const [lo, hi] = hashRange(this.meta!.bits);
     const out: [string, V][] = [];
-    for (const r of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM sharded_rows WHERE key > ? AND hash >= ? AND hash <= ? ORDER BY key LIMIT ?", afterKey ?? "", lo, hi, limit)) out.push([r.key, JSON.parse(r.value) as V]);
+    for (const r of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM sharded_rows WHERE (? IS NULL OR key > ?) AND hash >= ? AND hash <= ? ORDER BY key LIMIT ?", afterKey, afterKey, lo, hi, limit)) out.push([r.key, JSON.parse(r.value) as V]);
     return out;
   }
 
