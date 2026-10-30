@@ -56,5 +56,8 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "durability": "5.1.0"
   }
 }
