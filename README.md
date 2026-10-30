@@ -23,17 +23,17 @@ A split moves that half with a single storage snapshot, so it takes seconds, not
 
 ![Throughput vs concurrency](docs/bench/throughput.svg)
 
-At 2,048 writes in flight, a single Durable Object is past its limit. It completes 1,435 writes/s and refuses 26,816 calls in 10 seconds. The same object split into 16 shards completes **9,960 writes/s and refuses none**. Reads tell the same story: 1,425 reads/s with 16,901 failed calls, against **8,182 reads/s with none**.
+At 2,048 writes in flight, a single Durable Object is past its limit. It completes 2,068 writes/s and refuses 23,263 calls in 10 seconds. The same object split into 16 shards completes **9,800 writes/s and refuses none**. Reads tell the same story: 1,611 reads/s with 31,785 failed calls, against **14,947 reads/s with none**.
 
 | 1 KiB values, uniform keys | One Durable Object | Sharded object, 16 shards |
 |---|---|---|
-| **Throughput**, 1,024 in flight | 1,499 writes/s | **5,207 writes/s** |
-| **Throughput**, 2,048 in flight | 1,435 writes/s, 26,816 calls refused in 10 s | **9,960 writes/s, none refused** |
-| **Reads**, 1,024 in flight | 1,653 reads/s, median 479 ms | **4,587 reads/s, median 106 ms** |
-| **Reads**, 2,048 in flight | 1,425 reads/s, 16,901 calls failed in 10 s | **8,182 reads/s, none failed** |
-| **Data written**, 2,048 in flight | 1.4 MiB/s | **9.7 MiB/s** |
-| **Median latency**, 1,024 in flight | 613 ms | **103 ms** |
-| **p99 latency**, 2,048 in flight | 1,822 ms | **765 ms** |
+| **Throughput**, 1,024 in flight | 2,064 writes/s | **5,527 writes/s** |
+| **Throughput**, 2,048 in flight | 2,068 writes/s, 23,263 calls refused in 10 s | **9,800 writes/s, none refused** |
+| **Reads**, 1,024 in flight | 1,753 reads/s, median 597 ms | **7,445 reads/s, median 79 ms** |
+| **Reads**, 2,048 in flight | 1,611 reads/s, 31,785 calls failed in 10 s | **14,947 reads/s, none failed** |
+| **Data written**, 2,048 in flight | 2.0 MiB/s | **9.6 MiB/s** |
+| **Median latency**, 1,024 in flight | 386 ms | **110 ms** |
+| **p99 latency**, 2,048 in flight | 1,357 ms | **705 ms** |
 | **Storage ceiling** | 10 GB | **160 GB** (10 GB per shard) |
 
 ![Write latency p99 vs concurrency](docs/bench/latency-p99.svg)
@@ -52,11 +52,11 @@ Ten configuration objects, a few far more popular than the rest (Zipf), read 95%
 
 | In flight | One Durable Object | Sharded object, splitting by load | Sharded object, 16 shards |
 |---|---|---|---|
-| 256 | 633/s, p99 1,165 ms | 745/s | 1,849/s, p99 977 ms |
-| 1,024 | 867/s, p99 1,999 ms | 2,894/s | 3,388/s, p99 963 ms |
-| 2,048 | 665/s, **43,951 calls failed** | 3,081/s, 11,175 calls failed | **3,803/s, none failed** |
+| 256 | 1,142/s, p99 939 ms | 1,668/s | 1,904/s, p99 632 ms |
+| 1,024 | 1,527/s, p99 1,392 ms | 2,388/s | 3,547/s, p99 881 ms |
+| 2,048 | 1,713/s, 27,650 calls failed | 4,656/s, 9,655 calls failed | 4,522/s, 10,516 calls failed |
 
-With only ten keys, splitting still spreads them over several objects. It cannot split a single key, though, and the most popular object takes about a third of all calls, so throughput levels off near 3,800/s: the most one object can serve of that one key. Splitting by load also kept splitting past the number of keys (to 25 shards for 10 keys), which cannot help. If one object is your bottleneck, look at the [control plane graphs](docs/performance.md#a-control-plane-a-handful-of-hot-objects).
+With only ten keys, splitting still spreads them over several objects. It cannot split a single key, though, and the most popular object takes about a third of all calls, so throughput levels off near 4,700/s: the most one object can serve of that one key. At 2,048 in flight, that object is overloaded and refuses calls even with 16 shards. Splitting by load also kept splitting past the number of keys (to 29 shards for 10 keys), which cannot help. If one object is your bottleneck, look at the [control plane graphs](docs/performance.md#a-control-plane-a-handful-of-hot-objects).
 
 ## Splits take seconds
 
@@ -68,12 +68,12 @@ When load splits an object, it pays for it once. Here an object seeded with 1 Mi
 
 | Data in the object | Sharded object | Freeze, snapshot into two new objects | v0.1: copy rows to two new objects |
 |---|---|---|---|
-| 1 MiB | 1.9 s | 1.5 s | 1.4 s |
-| 16 MiB | **2.0 s** | 3.0 s | 7.4 s |
-| 128 MiB | **5.7 s**, slowest write 5.4 s | 24.3 s, every write blocked for it | 235 s, write p95 2.4 s throughout |
-| 1 GiB | **26.7 s**, write p99 500 ms | the split failed | did not finish in 2 hours |
+| 1 MiB | 1.8 s | 1.2 s | 1.1 s |
+| 16 MiB | **1.7 s** | 2.1 s | 5.1 s |
+| 128 MiB | **3.4 s**, slowest write 3.0 s | 13.4 s, every write blocked for it | 267 s, write p95 2.2 s throughout |
+| 1 GiB | **16.9 s**, write p99 265 ms | the split failed (earlier version) | did not finish in 2 hours (earlier version) |
 
-The times are until the new object serves with all of its data. See [what was measured and how](docs/performance.md).
+The times are until the new object serves with all of its data. The two older designs were not run again at 1 GiB: those two cells are from an earlier version. See [what was measured and how](docs/performance.md).
 
 ## What it costs
 
@@ -158,11 +158,13 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 
 | 1,024 in flight | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
-| **Writes** | 1,011/s, median 838 ms | 1,815/s | 3,666/s | **4,391/s, median 108 ms** |
-| **Reads by key** | 1,488/s, median 705 ms | 2,942/s | 5,271/s | **5,180/s, median 130 ms** |
-| **List pages** (50 rows) | 362/s | 397/s | 219/s, shed load | 231/s, shed load |
+| **Writes** | 1,226/s, median 688 ms | 2,109/s | 5,125/s | **5,174/s, median 124 ms** |
+| **Reads by key** | 1,745/s, median 561 ms | 4,333/s | **5,555/s, median 127 ms** | not measured* |
+| **List pages** (50 rows) | 578/s | 564/s | 169/s, shed load | 369/s |
 
-**Listings do not scale with shards.** Every page asks every shard for its share, so each shard serves every page: listing throughput stays near what one object serves (about 370–400 pages/s here), and a page waits for its slowest shard. At 64 in flight, a page's median is 231 ms on 1 shard, 165 ms on 4, 210 ms on 16 and 805 ms on 64. Keep list-heavy tables to 16 shards or fewer. Listings that must scale further need an index stored by sort order rather than by key, which is the next layer.
+\* The 64-shard read runs at 256 and 1,024 in flight never answered: a Durable Object used up its CPU time until the runtime reset it. Other runs on 0.4.0 hit the same thing at times (in the 4,096-shard benchmark too), and the cause is not known yet.
+
+**Listings do not scale with shards.** Every page asks every shard for its share, so each shard serves every page: listing throughput stays near what one object serves (about 560–580 pages/s here), and a page waits for its slowest shard. At 64 in flight, a page's median is 61 ms on 1 shard, 126 ms on 4, 193 ms on 16 and 456 ms on 64. Keep list-heavy tables to 16 shards or fewer. Listings that must scale further need an index stored by sort order rather than by key, which is the next layer.
 
 ![Table listings vs concurrency](docs/bench/table-list-throughput.svg)
 

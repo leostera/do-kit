@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-cbde50f7b216",
+  "generatedAt": "2026-10-30T05:12:21.092Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1,
+      16,
+      64,
+      256,
+      1024,
+      2048
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [],
+  "splits": [
+    {
+      "target": "split",
+      "objectName": "bench-cbde50f7b216-splitbench-split-1",
+      "rows": 1024,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 1048576,
+      "seedMs": 337,
+      "copy": "native",
+      "copyMs": 1764,
+      "servingMs": 1772,
+      "doneMs": 1904,
+      "writes": 1858,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 13,
+        "p95": 18,
+        "p99": 52,
+        "max": 1151
+      }
+    },
+    {
+      "target": "two-copy",
+      "objectName": "bench-cbde50f7b216-splitbench-two-copy-1",
+      "rows": 1024,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 1048576,
+      "seedMs": 372,
+      "copy": "native",
+      "copyMs": 1161,
+      "servingMs": 1161,
+      "doneMs": 1161,
+      "writes": 1453,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 12,
+        "p95": 16,
+        "p99": 64,
+        "max": 1181
+      }
+    },
+    {
+      "target": "legacy",
+      "objectName": "bench-cbde50f7b216-splitbench-legacy-1",
+      "rows": 1024,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 1048576,
+      "seedMs": 438,
+      "copy": "rows",
+      "copyMs": 735,
+      "servingMs": 735,
+      "doneMs": 1113,
+      "writes": 1113,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 19,
+        "p95": 25,
+        "p99": 240,
+        "max": 310
+      }
+    },
+    {
+      "target": "split",
+      "objectName": "bench-cbde50f7b216-splitbench-split-16",
+      "rows": 16384,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 16777216,
+      "seedMs": 3081,
+      "copy": "native",
+      "copyMs": 1686,
+      "servingMs": 1700,
+      "doneMs": 4158,
+      "writes": 1594,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 16,
+        "p95": 62,
+        "p99": 242,
+        "max": 1314
+      }
+    },
+    {
+      "target": "two-copy",
+      "objectName": "bench-cbde50f7b216-splitbench-two-copy-16",
+      "rows": 16384,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 16777216,
+      "seedMs": 1417,
+      "copy": "native",
+      "copyMs": 2149,
+      "servingMs": 2149,
+      "doneMs": 2149,
+      "writes": 780,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 15,
+        "p95": 43,
+        "p99": 2162,
+        "max": 2171
+      }
+    },
+    {
+      "target": "legacy",
+      "objectName": "bench-cbde50f7b216-splitbench-legacy-16",
+      "rows": 16384,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 16777216,
+      "seedMs": 1918,
+      "copy": "rows",
+      "copyMs": 706,
+      "servingMs": 706,
+      "doneMs": 5109,
+      "writes": 1970,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 16,
+        "p95": 127,
+        "p99": 284,
+        "max": 744
+      }
+    },
+    {
+      "target": "split",
+      "objectName": "bench-cbde50f7b216-splitbench-split-128",
+      "rows": 131072,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 134217728,
+      "seedMs": 28236,
+      "copy": "native",
+      "copyMs": 3384,
+      "servingMs": 3403,
+      "doneMs": 30087,
+      "writes": 4978,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 34,
+        "p95": 105,
+        "p99": 354,
+        "max": 2973
+      }
+    },
+    {
+      "target": "two-copy",
+      "objectName": "bench-cbde50f7b216-splitbench-two-copy-128",
+      "rows": 131072,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 134217728,
+      "seedMs": 16414,
+      "copy": "native",
+      "copyMs": 13394,
+      "servingMs": 13394,
+      "doneMs": 13394,
+      "writes": 374,
+      "errors": 0,
+      "writeLatencyMs": {
+        "p50": 17,
+        "p95": 170,
+        "p99": 14702,
+        "max": 14735
+      }
+    },
+    {
+      "target": "legacy",
+      "objectName": "bench-cbde50f7b216-splitbench-legacy-128",
+      "rows": 131072,
+      "payloadBytes": 1024,
+      "writers": 8,
+      "bytes": 134217728,
+      "seedMs": 26909,
+      "copy": "rows",
+      "copyMs": 647,
+      "servingMs": 647,
+      "doneMs": 266944,
+      "writes": 7405,
+      "errors": 1,
+      "writeLatencyMs": {
+        "p50": 20,
+        "p95": 2210,
+        "p99": 5681,
+        "max": 16306
+      }
+    }
+  ]
+}

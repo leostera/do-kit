@@ -1,0 +1,465 @@
+{
+  "schemaVersion": 2,
+  "suite": "bench-6a6c9a74396f",
+  "generatedAt": "2026-10-30T04:51:11.026Z",
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1,
+      16,
+      64,
+      256,
+      1024,
+      2048
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-single-read-control-plane",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 970,
+      "errors": 0,
+      "elapsedMs": 10004,
+      "operationsPerSecond": 96.96121551379449,
+      "mebibytesPerSecond": 0.09468868702518993,
+      "latencyMs": {
+        "p50": 11,
+        "p95": 17,
+        "p99": 23,
+        "max": 62
+      },
+      "topology": null,
+      "errorSample": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-single-read-control-plane",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 2369,
+      "errors": 0,
+      "elapsedMs": 10215,
+      "operationsPerSecond": 231.91385217816935,
+      "mebibytesPerSecond": 0.2264783712677435,
+      "latencyMs": {
+        "p50": 54,
+        "p95": 174,
+        "p99": 200,
+        "max": 376
+      },
+      "topology": null,
+      "errorSample": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-single-read-control-plane",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 8360,
+      "errors": 0,
+      "elapsedMs": 10322,
+      "operationsPerSecond": 809.9205580313893,
+      "mebibytesPerSecond": 0.7909380449525286,
+      "latencyMs": {
+        "p50": 46,
+        "p95": 295,
+        "p99": 390,
+        "max": 589
+      },
+      "topology": null,
+      "errorSample": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-single-read-control-plane",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 12402,
+      "errors": 0,
+      "elapsedMs": 10857,
+      "operationsPerSecond": 1142.3045040066318,
+      "mebibytesPerSecond": 1.1155317421939763,
+      "latencyMs": {
+        "p50": 135,
+        "p95": 797,
+        "p99": 939,
+        "max": 1305
+      },
+      "topology": null,
+      "errorSample": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-single-read-control-plane",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 16069,
+      "errors": 0,
+      "elapsedMs": 10520,
+      "operationsPerSecond": 1527.4714828897338,
+      "mebibytesPerSecond": 1.4916713700095057,
+      "latencyMs": {
+        "p50": 675,
+        "p95": 1083,
+        "p99": 1392,
+        "max": 1669
+      },
+      "topology": null,
+      "errorSample": null
+    },
+    {
+      "target": "single",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-single-read-control-plane",
+      "driverCount": 128,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "Durable Object is overloaded. Requests queued for too long."
+      ],
+      "successes": 18918,
+      "errors": 27650,
+      "elapsedMs": 11043,
+      "operationsPerSecond": 1713.1214343928282,
+      "mebibytesPerSecond": 1.6729701507742463,
+      "latencyMs": {
+        "p50": 9,
+        "p95": 1682,
+        "p99": 1807,
+        "max": 2624
+      },
+      "topology": null,
+      "errorSample": "Durable Object is overloaded. Requests queued for too long."
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-split-read-control-plane",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 784,
+      "errors": 0,
+      "elapsedMs": 10002,
+      "operationsPerSecond": 78.38432313537292,
+      "mebibytesPerSecond": 0.07654719056188762,
+      "latencyMs": {
+        "p50": 13,
+        "p95": 20,
+        "p99": 29,
+        "max": 126
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10,
+        "depth": 0
+      },
+      "errorSample": null
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-split-read-control-plane",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 2977,
+      "errors": 0,
+      "elapsedMs": 10074,
+      "operationsPerSecond": 295.5132023029581,
+      "mebibytesPerSecond": 0.28858711162398254,
+      "latencyMs": {
+        "p50": 27,
+        "p95": 175,
+        "p99": 193,
+        "max": 857
+      },
+      "topology": {
+        "leaves": 1,
+        "rows": 10,
+        "depth": 0
+      },
+      "errorSample": null
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-split-read-control-plane",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 10318,
+      "errors": 0,
+      "elapsedMs": 10337,
+      "operationsPerSecond": 998.1619425365193,
+      "mebibytesPerSecond": 0.9747675220083196,
+      "latencyMs": {
+        "p50": 27,
+        "p95": 228,
+        "p99": 381,
+        "max": 2703
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 10,
+        "depth": 3
+      },
+      "errorSample": null
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-split-read-control-plane",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 17882,
+      "errors": 0,
+      "elapsedMs": 10722,
+      "operationsPerSecond": 1667.785860846857,
+      "mebibytesPerSecond": 1.6286971297332589,
+      "latencyMs": {
+        "p50": 71,
+        "p95": 557,
+        "p99": 807,
+        "max": 1704
+      },
+      "topology": {
+        "leaves": 8,
+        "rows": 10,
+        "depth": 6
+      },
+      "errorSample": null
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-split-read-control-plane",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 25436,
+      "errors": 0,
+      "elapsedMs": 10653,
+      "operationsPerSecond": 2387.684220407397,
+      "mebibytesPerSecond": 2.3317228714915985,
+      "latencyMs": {
+        "p50": 327,
+        "p95": 1168,
+        "p99": 2417,
+        "max": 5635
+      },
+      "topology": {
+        "leaves": 15,
+        "rows": 10,
+        "depth": 9
+      },
+      "errorSample": null
+    },
+    {
+      "target": "split",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 2048,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-split-read-control-plane",
+      "driverCount": 128,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "Durable Object is overloaded. Requests queued for too long."
+      ],
+      "successes": 50725,
+      "errors": 9655,
+      "elapsedMs": 10895,
+      "operationsPerSecond": 4655.805415328133,
+      "mebibytesPerSecond": 4.54668497590638,
+      "latencyMs": {
+        "p50": 183,
+        "p95": 1164,
+        "p99": 1598,
+        "max": 6793
+      },
+      "topology": {
+        "leaves": 29,
+        "rows": 10,
+        "depth": 12
+      },
+      "errorSample": "Durable Object is overloaded. Requests queued for too long."
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-presplit-read-control-plane",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 1150,
+      "errors": 0,
+      "elapsedMs": 10001,
+      "operationsPerSecond": 114.98850114988502,
+      "mebibytesPerSecond": 0.1122934581541846,
+      "latencyMs": {
+        "p50": 9,
+        "p95": 13,
+        "p99": 16,
+        "max": 40
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10,
+        "depth": 4
+      },
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-presplit-read-control-plane",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 5601,
+      "errors": 0,
+      "elapsedMs": 10189,
+      "operationsPerSecond": 549.7104720777309,
+      "mebibytesPerSecond": 0.536826632888409,
+      "latencyMs": {
+        "p50": 9,
+        "p95": 141,
+        "p99": 206,
+        "max": 1252
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10,
+        "depth": 4
+      },
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "read",
+      "distribution": "control-plane",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10,
+      "payloadBytes": 1024,
+      "objectName": "bench-6a6c9a74396f-presplit-read-control-plane",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 21384,
+      "errors": 0,
+      "elapsedMs": 10323,
+      "operationsPerSecond": 2071.490845684394,
+      "mebibytesPerSecond": 2.022940278988666,
+      "latencyMs": {
+        "p50": 9,
+        "p95": 151,
+        "p99": 281,
+        "max": 589
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10,
+        "depth": 4
+      },
+      "errorSample": null
+    }
+  ],
+  "splits": []
+}
