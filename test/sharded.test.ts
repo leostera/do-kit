@@ -371,10 +371,15 @@ test("a shard keeps a record of its splits, and counts what it answered", async 
   await call("m", name, "add", KEYS, KEYS.map(() => 1));
   const key = KEYS.find((k) => firstBit(k) === 1)!; // in the half that moves
   await post("/slowHandOut", { cls: "m", name, bits: "", ms: 500 });
-  const split = post<boolean>("/split", { cls: "m", name, bits: "" });
-  await Bun.sleep(100);
-  // Held, and with holdWaitMs 0 answered "not ready" at once; the client retries until the split is done.
-  await post<number[]>("/call", { cls: "m", name, method: "add", keys: [key], payloads: [1] });
+  let splitDone = false;
+  const split = post<boolean>("/split", { cls: "m", name, bits: "" }).finally(() => (splitDone = true));
+  // The hold starts once the new object is warm, which takes longer deployed: write until the split is done,
+  // so at least one write lands while it is held. Held writes, with holdWaitMs 0, are answered "not ready"
+  // at once, and the client retries until the split is done.
+  for (let i = 0; i < 40 && !splitDone; i++) {
+    await Bun.sleep(50);
+    await post<number[]>("/call", { cls: "m", name, method: "add", keys: [key], payloads: [1] });
+  }
   expect(await split).toBe(true);
 
   const root = await describe("m", name, "");
@@ -382,9 +387,11 @@ test("a shard keeps a record of its splits, and counts what it answered", async 
   const [record] = root.splits;
   expect(record).toMatchObject({ outcome: "split", copy: deployed ? "native" : "logical", rows: KEYS.length, rightRows: KEYS.filter((k) => firstBit(k) === 1).length, error: null });
   expect(record!.ms).toBeGreaterThanOrEqual(500);
-  // The slow hand-out is where the time went; locally the copy is logical.
+  // The slow hand-out is where the time went. Locally the copy is logical, so it takes no snapshot;
+  // deployed, it is native, so it copies no rows.
   expect(record!.steps.handOut).toBeGreaterThanOrEqual(500);
-  expect(record!.steps).toMatchObject({ snapshot: 0, restore: 0, restoreInside: 0 });
+  if (deployed) expect(record!.steps.copyRows).toBe(0);
+  else expect(record!.steps).toMatchObject({ snapshot: 0, restore: 0, restoreInside: 0 });
   expect(record!.steps.warm).toBeGreaterThanOrEqual(0); // before the hold, so not in ms
   expect(record!.steps.claimAttempts).toBeGreaterThanOrEqual(1);
   expect(record!.ms).toBeGreaterThanOrEqual(record!.steps.handOut + record!.steps.copyRows + record!.steps.claim);
