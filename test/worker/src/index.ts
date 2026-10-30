@@ -5,6 +5,8 @@
 import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
+import { ShardedDurability } from "../../../src/durability/index.ts";
+import { DurableObject } from "cloudflare:workers";
 
 interface Env {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
@@ -14,6 +16,121 @@ interface Env {
   readonly EVOLVING: DurableObjectNamespace<EvolvingRepos>;
   readonly FLAKY: DurableObjectNamespace<FlakyRepos>;
   readonly OLD_ALARM: DurableObjectNamespace<OldAlarm>;
+  readonly MIRROR: DurableObjectNamespace<MirrorCounters>;
+  readonly SINK: DurableObjectNamespace<Sink>;
+}
+
+// ---- SPIKE: durability's outbox on a sharded object ----
+
+/** Counts every row the object's SQL writes (cursors are summed when asked). */
+function countRows(ctx: DurableObjectState): () => number {
+  const sql = ctx.storage.sql;
+  const exec = sql.exec.bind(sql);
+  const cursors: SqlStorageCursor<Record<string, SqlStorageValue>>[] = [];
+  let base = 0;
+  sql.exec = ((query: string, ...bindings: unknown[]) => {
+    const cursor = exec(query, ...bindings);
+    cursors.push(cursor);
+    if (cursors.length > 10_000) base += cursors.splice(0, 5_000).reduce((n, c) => n + c.rowsWritten, 0);
+    return cursor;
+  }) as typeof sql.exec;
+  return () => base + cursors.reduce((n, c) => n + c.rowsWritten, 0);
+}
+
+/** One publication the sink received. */
+export type Delivery = { key: string; version: number; value: number; from: string; at: number };
+
+/**
+ * The outbox's sink: keeps the highest version of each key, as the outbox asks of sinks, and logs
+ * every delivery. Can be made to fail, to build a backlog.
+ */
+export class Sink extends DurableObject<Env> {
+  private failing = false;
+  private readonly latest = new Map<string, { version: number; value: number }>();
+  private readonly log: Delivery[] = [];
+  async apply(entries: readonly { key: string; version: number; value: number }[], from: string): Promise<void> {
+    if (this.failing) throw new Error("sink: failing");
+    for (const e of entries) {
+      this.log.push({ ...e, from, at: Date.now() });
+      const now = this.latest.get(e.key);
+      if (!now || e.version > now.version) this.latest.set(e.key, { version: e.version, value: e.value });
+    }
+  }
+  async fail(failing: boolean): Promise<void> {
+    this.failing = failing;
+  }
+  async state(): Promise<{ latest: Record<string, { version: number; value: number }>; deliveries: number; duplicates: number; senders: Record<string, string[]> }> {
+    const seen = new Set<string>();
+    let duplicates = 0;
+    const senders: Record<string, Set<string>> = {};
+    for (const d of this.log) {
+      const id = `${d.key}@${d.version}`;
+      if (seen.has(id)) duplicates++;
+      seen.add(id);
+      (senders[d.key] ??= new Set()).add(d.from);
+    }
+    return { latest: Object.fromEntries(this.latest), deliveries: this.log.length, duplicates, senders: Object.fromEntries(Object.entries(senders).map(([k, v]) => [k, [...v]])) };
+  }
+}
+
+/** Counters whose every write is mirrored to a sink through an outbox. */
+export class MirrorCounters extends ShardedObject<Env, number> {
+  protected override splitPolicy: SplitPolicy = { ...DEFAULT_SPLIT_POLICY, holdWaitMs: 0 };
+  private readonly durability: ShardedDurability<{ mirror: number }>;
+  private readonly rowsWritten: () => number;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.rowsWritten = countRows(ctx);
+    this.durability = new ShardedDurability<{ mirror: number }>({ ctx, scheduleAlarm: (at) => this.scheduleAlarm(at), alarmMinDelayMs: 1000 });
+    this.durability.outbox("mirror", {
+      maxBatchSize: 50,
+      retries: { delay: () => 200 },
+      publish: async (entries) => {
+        const sink = this.env.SINK.get(this.env.SINK.idFromName(`sink:${this.objectName()}`));
+        await sink.apply(entries.map(({ key, version, value }) => ({ key, version, value })), this.nodeLabel());
+      },
+    });
+  }
+
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
+    return this.env.MIRROR as never;
+  }
+
+  async get(keys: readonly string[], _payloads: null): Promise<(number | null)[]> {
+    const rows = await this.read(keys);
+    return keys.map((k) => rows.get(k) ?? null);
+  }
+
+  /** Sets each key, and stages it for the sink in the same transaction. */
+  async set(keys: readonly string[], payloads: readonly number[]): Promise<number[]> {
+    const versions = await this.update(keys, () => {
+      const writes = new Map(keys.map((k, i) => [k, payloads[i]!]));
+      return { writes, result: keys.map((k, i) => this.durability.stage("mirror", k, payloads[i]!)) };
+    });
+    this.durability.kick();
+    return versions;
+  }
+
+  /** This shard's rows, and its pending outbox entries with whether it owns each. */
+  async outboxState(): Promise<{ label: string; rows: Record<string, number>; pending: { key: string; version: number; attempt: number; owned: boolean }[]; stats: ShardedDurability["stats"]; alarm: number | null; rowsWritten: number }> {
+    return { rowsWritten: this.rowsWritten(), label: this.nodeLabel(), rows: Object.fromEntries(this.allRows()), pending: this.durability.pending().map((p) => ({ ...p, owned: this.owns(p.key) })), stats: { ...this.durability.stats }, alarm: await this.ctx.storage.getAlarm() };
+  }
+
+  /** Restarts this object: in-memory timers and publish runs are lost, storage stays. */
+  async crash(): Promise<void> {
+    this.ctx.abort("test: crash");
+  }
+
+  protected override async onAlarm(): Promise<void> {
+    await this.durability.onAlarm();
+  }
+  protected override afterClone(owns: (key: string) => boolean): void {
+    this.durability.afterClone(owns);
+  }
+  protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
+    return this.durability.cleanupForeign(owns, limit);
+  }
 }
 
 // ---- A sharded table: repositories, split by hand ----
@@ -147,8 +264,10 @@ export class OldAlarm extends ShardedObject<Env, number> {
 }
 
 class CounterBase extends ShardedObject<Env, number> {
+  private readonly rowsWritten: () => number;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.rowsWritten = countRows(ctx);
     // A subclass table: which keys were added to here (a stand-in for an outbox).
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY)");
     // A subclass table that both shards clean after a split (a stand-in for a listing).
@@ -287,6 +406,10 @@ class CounterBase extends ShardedObject<Env, number> {
     this.ctx.abort("wiped");
   }
 
+  async writtenRows(): Promise<number> {
+    return this.rowsWritten();
+  }
+
   async entries(): Promise<[string, number][]> {
     return [...this.allRows()];
   }
@@ -314,7 +437,7 @@ export class PresplitCounters extends CounterBase {
 }
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.REPOS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
+  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.REPOS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : cls === "mirror" ? env.MIRROR : env.COUNTERS) as never;
 }
 
 /** POST /table {cls, name, op, args}: one call of the table client. */
@@ -404,6 +527,15 @@ export default {
         case "/slowHandOut":
           await (ns.get(ns.idFromName(shardObjectName(body.name, body.bits))) as unknown as { slowHandOut(ms: number): Promise<void> }).slowHandOut((body as unknown as { ms: number }).ms);
           return Response.json(null);
+        case "/crash":
+          await (ns.get(ns.idFromName(shardObjectName(body.name, body.bits))) as unknown as { crash(): Promise<void> }).crash().catch(() => {});
+          return Response.json(null);
+        case "/sink": {
+          const b = body as unknown as { name: string; fail?: boolean };
+          const sink = env.SINK.get(env.SINK.idFromName(`sink:${b.name}`));
+          if (b.fail !== undefined) await sink.fail(b.fail);
+          return Response.json(await sink.state());
+        }
         case "/splits":
           return Response.json(sharded(ns, body.name).knownSplits());
       }
