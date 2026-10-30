@@ -21,7 +21,7 @@ are kept with every write.
 
 ## Motivation
 
-Most users of a sharded object build the same thing by hand: a registry, a control plane, records
+Most users of a sharded object build the same thing by hand: a directory, a control plane, records
 listed several ways. They need typed rows, indexes, create-if-absent, compare-and-set, listings with
 a cursor, and totals. Built on raw keys and values, every one of them has to get pagination across
 splits right. With no indexes, a sharded table is a key-value store.
@@ -51,25 +51,25 @@ splits right. With no indexes, a sharded table is a key-value store.
 ## Guide-level explanation
 
 ```ts
-type Repo = { name: string; id: string; status: string; createdAt: number };
-const repos = defineTable<Repo>({
-  primaryKey: "name",
-  columns: { name: "text", id: "text", status: "text", createdAt: "integer" },
+type Order = { id: string; customer: string; status: string; createdAt: number };
+const orders = defineTable<Order>({
+  primaryKey: "id",
+  columns: { id: "text", customer: "text", status: "text", createdAt: "integer" },
   indexes: { byCreated: ["createdAt"] },
   counts: { byStatus: "status" },
 });
 
-export class Repos extends ShardedTable<Env, Repo> {
-  protected table = repos;
-  protected nodes() { return this.env.REPOS; }
+export class Orders extends ShardedTable<Env, Order> {
+  protected table = orders;
+  protected nodes() { return this.env.ORDERS; }
 }
 
 // A Worker
-const t = table(env.REPOS, "acct:namespace", repos);
-await t.put({ name: "foo", id: "r1", status: "creating", createdAt: Date.now() }, { ifVersion: 0 }); // only if new
-const page = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "deleted" }], limit: 50, withCount: "byStatus" });
-const next = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "deleted" }], limit: 50, cursor: page.cursor });
-const perStatus = await t.countBy("byStatus"); // [{ value: "ready", count: 812 }, ...]
+const t = table(env.ORDERS, "shop-42", orders);
+await t.put({ id: "o_1001", customer: "ada", status: "pending", createdAt: Date.now() }, { ifVersion: 0 }); // only if new
+const page = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "cancelled" }], limit: 50, withCount: "byStatus" });
+const next = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "cancelled" }], limit: 50, cursor: page.cursor });
+const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 812 }, ...]
 ```
 
 `where` conditions are `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix`, and

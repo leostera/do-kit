@@ -24,7 +24,7 @@ themselves and follow splits lazily. A stale view costs an extra hop, never a wr
 
 One Durable Object is one thread with 10 GB of storage, and serves roughly 800 calls/s on the edge.
 Past that, the runtime sheds requests as overloaded. A logical object with many independent keys
-(an account's repositories, a namespace's configuration, a room's messages) hits that limit, and
+(an account's documents, a project's configuration, a room's messages) hits that limit, and
 the usual answer is to shard it by hand. That means choosing a shard count up front, routing, and
 migrating when the count turns out wrong.
 

@@ -10,26 +10,26 @@ interface Env {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
   readonly AUTO_COUNTERS: DurableObjectNamespace<AutoCounters>;
   readonly PRESPLIT_COUNTERS: DurableObjectNamespace<PresplitCounters>;
-  readonly REPOS: DurableObjectNamespace<Repos>;
-  readonly EVOLVING: DurableObjectNamespace<EvolvingRepos>;
-  readonly FLAKY: DurableObjectNamespace<FlakyRepos>;
+  readonly DOCS: DurableObjectNamespace<Docs>;
+  readonly EVOLVING: DurableObjectNamespace<EvolvingDocs>;
+  readonly FLAKY: DurableObjectNamespace<FlakyDocs>;
   readonly OLD_ALARM: DurableObjectNamespace<OldAlarm>;
   /** Set when deployed: every request carries it as a bearer token (the routes can delete data). */
   readonly TEST_TOKEN?: string;
 }
 
-// ---- A sharded table: repositories, split by hand ----
+// ---- A sharded table: documents, split by hand ----
 
-export type Repo = { name: string; id: string; createdAt: number; lastPushAt: number | null; deleted: boolean; meta: unknown };
-export const repos = defineTable<Repo>({
+export type Doc = { name: string; id: string; createdAt: number; lastEditAt: number | null; deleted: boolean; meta: unknown };
+export const docs = defineTable<Doc>({
   primaryKey: "name",
-  columns: { name: "text", id: "text", createdAt: "integer", lastPushAt: "integer", deleted: "boolean", meta: "json" },
-  indexes: { byCreated: ["createdAt"], byPush: ["lastPushAt"], byDeletedCreated: ["deleted", "createdAt"] },
+  columns: { name: "text", id: "text", createdAt: "integer", lastEditAt: "integer", deleted: "boolean", meta: "json" },
+  indexes: { byCreated: ["createdAt"], byEdit: ["lastEditAt"], byDeletedCreated: ["deleted", "createdAt"] },
   counts: { byDeleted: "deleted" },
 });
 
-export class Repos extends ShardedTable<Env, Repo> {
-  protected table = repos;
+export class Docs extends ShardedTable<Env, Doc> {
+  protected table = docs;
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6, holdWaitMs: 0 };
   /** Tests hold cleanup back, to list while shards still store rows they gave away. */
   protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
@@ -47,26 +47,26 @@ export class Repos extends ShardedTable<Env, Repo> {
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_table").one().n;
   }
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
-    return this.env.REPOS as never;
+    return this.env.DOCS as never;
   }
 }
 
-/** The repos table, then (after `upgrade`) with a `stars` column and a `byStars` index instead of `byPush`. */
-type RepoV2 = Repo & { stars: number | null };
-const reposV2 = defineTable<RepoV2>({
+/** The docs table, then (after `upgrade`) with a `stars` column and a `byStars` index instead of `byEdit`. */
+type DocV2 = Doc & { stars: number | null };
+const docsV2 = defineTable<DocV2>({
   primaryKey: "name",
-  columns: { ...repos.columns, stars: "integer" },
+  columns: { ...docs.columns, stars: "integer" },
   indexes: { byCreated: ["createdAt"], byStars: ["stars"], byDeletedCreated: ["deleted", "createdAt"] },
   // byDeleted dropped, and the same column counted again under a new name: counted from the rows stored.
   counts: { deletedAgain: "deleted", byStars: "stars" },
 });
 
-export class EvolvingRepos extends ShardedTable<Env, RepoV2> {
+export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
-  protected get table(): TableSchema<RepoV2> {
+  protected get table(): TableSchema<DocV2> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
     const version = this.ctx.storage.sql.exec<{ version: number }>("SELECT version FROM test_schema").toArray()[0]?.version ?? 1;
-    return (version === 2 ? reposV2 : repos) as TableSchema<RepoV2>;
+    return (version === 2 ? docsV2 : docs) as TableSchema<DocV2>;
   }
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.EVOLVING as never;
@@ -85,10 +85,10 @@ export class EvolvingRepos extends ShardedTable<Env, RepoV2> {
 }
 
 /**
- * EvolvingRepos whose split copies can be made to fail to claim (`failClones`), so a split is
+ * EvolvingDocs whose split copies can be made to fail to claim (`failClones`), so a split is
  * abandoned after its copy was made, and with a short split timeout.
  */
-export class FlakyRepos extends EvolvingRepos {
+export class FlakyDocs extends EvolvingDocs {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6, splitTimeoutMs: 1500 };
   protected override nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.FLAKY as never;
@@ -358,19 +358,19 @@ export class PresplitCounters extends CounterBase {
 }
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.REPOS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
+  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
 }
 
 /** POST /table {cls, name, op, args}: one call of the table client. */
 async function tableOp(env: Env, body: { cls: string; name: string; op: string; args: unknown[] }): Promise<unknown> {
-  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? reposV2 : repos) as never) as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never) as unknown as Record<string, (...a: unknown[]) => unknown>;
   if (body.op === "all") {
     const rows: unknown[] = [];
     for await (const row of (t.all as (q: ListQuery) => AsyncGenerator<unknown>).call(t, body.args[0] as ListQuery)) rows.push(row);
     return rows;
   }
   if (body.op === "upgrade") {
-    const ns = namespace(env, body.cls) as unknown as DurableObjectNamespace<EvolvingRepos>;
+    const ns = namespace(env, body.cls) as unknown as DurableObjectNamespace<EvolvingDocs>;
     await ns.get(ns.idFromName(shardObjectName(body.name, ""))).upgrade().catch(() => {});
     return null;
   }

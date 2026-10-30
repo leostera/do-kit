@@ -15,7 +15,7 @@ To try one, run an [example](examples): small apps for each layer, each started 
 
 ## Sharded objects: Durable Objects that split themselves when they get busy
 
-A Durable Object is a great home for state, but it is one object: one thread, 10 GB of storage. When a hot account, repository or room outgrows it, you are left sharding by hand. A `ShardedObject` lets you write the object as if it were one, and splits it for you. When a shard stays busy, it hands half of its keys to a new object, and your Workers follow the split without you changing a line.
+A Durable Object is a great home for state, but it is one object: one thread, 10 GB of storage. When a hot account, document or room outgrows it, you are left sharding by hand. A `ShardedObject` lets you write the object as if it were one, and splits it for you. When a shard stays busy, it hands half of its keys to a new object, and your Workers follow the split without you changing a line.
 
 A split moves that half with a single storage snapshot, so it takes seconds, not minutes, and the object keeps serving while it happens.
 
@@ -119,34 +119,34 @@ These are estimates from the [published prices](https://developers.cloudflare.co
 
 ## Sharded tables: rows, indexes and listings
 
-Most things built on a sharded object end up as a table: a registry, a control plane, records listed newest first. `ShardedTable` is that table. Declare the columns and indexes, and every shard keeps them for its own rows.
+Most things built on a sharded object end up as a table: a directory, a control plane, records listed newest first. `ShardedTable` is that table. Declare the columns and indexes, and every shard keeps them for its own rows.
 
 ```ts
 import { defineTable, ShardedTable, table } from "@leostera/do-kit";
 
-type Repo = { name: string; id: string; createdAt: number; lastPushAt: number | null; deleted: boolean };
-const repos = defineTable<Repo>({
-  primaryKey: "name", // also what routes a row to its shard
-  columns: { name: "text", id: "text", createdAt: "integer", lastPushAt: "integer", deleted: "boolean" },
-  indexes: { byCreated: ["createdAt"], byPush: ["lastPushAt"] },
-  counts: { byDeleted: "deleted" }, // rows per value of a column, kept with every write
+type Order = { id: string; customer: string; total: number; createdAt: number; shippedAt: number | null; cancelled: boolean };
+const orders = defineTable<Order>({
+  primaryKey: "id", // also what routes a row to its shard
+  columns: { id: "text", customer: "text", total: "integer", createdAt: "integer", shippedAt: "integer", cancelled: "boolean" },
+  indexes: { byCreated: ["createdAt"], byShipped: ["shippedAt"] },
+  counts: { byCancelled: "cancelled" }, // rows per value of a column, kept with every write
 });
 
-export class Repos extends ShardedTable<Env, Repo> {
-  protected table = repos;
-  protected nodes() { return this.env.REPOS; }
+export class Orders extends ShardedTable<Env, Order> {
+  protected table = orders;
+  protected nodes() { return this.env.ORDERS; }
 }
 
 // In a Worker
-const t = table(env.REPOS, "acct:namespace", repos);
-await t.put({ name: "foo", id: "r1", createdAt: Date.now(), lastPushAt: null, deleted: false }, { ifVersion: 0 }); // only if new
-const page = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "deleted", op: "=", value: false }], limit: 50 });
-const next = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "deleted", op: "=", value: false }], limit: 50, cursor: page.cursor });
+const t = table(env.ORDERS, "shop-42", orders);
+await t.put({ id: "o_1001", customer: "ada", total: 4200, createdAt: Date.now(), shippedAt: null, cancelled: false }, { ifVersion: 0 }); // only if new
+const page = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "cancelled", op: "=", value: false }], limit: 50 });
+const next = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "cancelled", op: "=", value: false }], limit: 50, cursor: page.cursor });
 ```
 
 - **Writes** (`put`, `patch`, `delete`, and batches) are conditional on a version per row: `ifVersion: 0` means "only if absent". Each is one transaction with its index entries, fenced against splits. A key never has the same version twice: a row written again after a delete starts above the versions of the rows its shard deleted, so a write conditional on a version read before the delete fails. That costs a delete one more row written.
 - **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring case).
-- **Counts** are kept per hash prefix with every write, so `count()` is cheap and exact at any depth up to 16. Declare `counts` groups to also count rows per value of a column: `countBy("byDeleted")` returns `[{ value: false, count: 812 }, { value: true, count: 40 }]`, just as cheaply. A listing takes `withCount: true` (or a group's name) and returns `total` (and `counts`) from the same calls to the shards, so a page with its total costs one fan-out, not two. Counts don't take `where`: counting arbitrary conditions would read every row of every shard.
+- **Counts** are kept per hash prefix with every write, so `count()` is cheap and exact at any depth up to 16. Declare `counts` groups to also count rows per value of a column: `countBy("byCancelled")` returns `[{ value: false, count: 812 }, { value: true, count: 40 }]`, just as cheaply. A listing takes `withCount: true` (or a group's name) and returns `total` (and `counts`) from the same calls to the shards, so a page with its total costs one fan-out, not two. Counts don't take `where`: counting arbitrary conditions would read every row of every shard.
 - **Schema changes:** add columns and indexes in the schema; each shard applies them the first time it runs the new code.
 - Custom transactional methods use `getRow`, `putRow`, `patchRow` and `deleteRow` inside `transact`.
 
