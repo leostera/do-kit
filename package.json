@@ -31,15 +31,27 @@
     "bench:plot": "bun bench/plot.ts"
   },
   "devDependencies": {
+    "@cloudflare/kumo": "^2.16.0",
     "@cloudflare/vite-plugin": "beta",
     "@cloudflare/workers-types": "5.20261027.1",
     "@leostera/feynman": "0.12.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "^1.4.4",
     "@types/node": "26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
     "cf": "^1.0.0-beta.23",
+    "echarts": "^6.1.0",
     "fast-check": "^4.10.2",
+    "hono": "^4.13.14",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5"
+    "vite": "^8.3.5",
+    "zod": "^4.6.7"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

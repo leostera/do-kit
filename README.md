@@ -11,6 +11,8 @@ Everything is exported from `@leostera/do-kit`. Each layer also has its own path
 | **Indexed table** (`IndexedTable`) | proposed: [RFD0003](docs/rfds/RFD0003-indexed-table.md) | Global indexes across shards: lookups by another column, unique constraints, and listings that read one index shard per page. |
 | Events, cached reads | coming | Change feeds and watches, and reads cached in every data center. |
 
+To try one, run an [example](examples): small apps for each layer, each started with `bun dev` or `npm run dev`, with a page that shows its shards splitting live.
+
 ## Sharded objects: Durable Objects that split themselves when they get busy
 
 A Durable Object is a great home for state, but it is one object: one thread, 10 GB of storage. When a hot account, repository or room outgrows it, you are left sharding by hand. A `ShardedObject` lets you write the object as if it were one, and splits it for you. When a shard stays busy, it hands half of its keys to a new object, and your Workers follow the split without you changing a line.
