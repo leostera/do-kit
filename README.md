@@ -8,7 +8,8 @@ Everything is exported from `@leostera/do-kit`. Each layer also has its own path
 |---|---|---|
 | **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, routing that follows splits. |
 | **Sharded table** (`ShardedTable`) | `@leostera/do-kit/table` | Typed rows on a sharded object: indexes in every shard, conditional writes on a version per row, counts, and sorted listings across shards with a cursor that survives splits. With no indexes, a key-value store. |
-| Unique keys and lookups across shards, events, cached reads | coming | Unique constraints and secondary lookups across shards, change feeds and watches, and reads cached in every data center. |
+| **Indexed table** (`IndexedTable`) | proposed: [RFD0003](docs/rfds/RFD0003-indexed-table.md) | Global indexes across shards: lookups by another column, unique constraints, and listings that read one index shard per page. |
+| Events, cached reads | coming | Change feeds and watches, and reads cached in every data center. |
 
 ## Sharded objects: Durable Objects that split themselves when they get busy
 
@@ -163,7 +164,7 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 
 ![Table listings vs concurrency](docs/bench/table-list-throughput.svg)
 
-More in [docs/performance.md](docs/performance.md#sharded-tables) and the design in [docs/design/sharded-table.md](docs/design/sharded-table.md).
+More in [docs/performance.md](docs/performance.md#sharded-tables) and the design in [RFD0002](docs/rfds/RFD0002-sharded-table.md).
 
 ## Install
 
@@ -263,6 +264,8 @@ bun run build        # dist/: JavaScript and type declarations, what the package
 bun test             # integration tests under cf dev: concurrent writes and CAS across splits, load splits, presplit, large rows, subclass tables
 bun run specs:check  # model-check the split protocol
 ```
+
+Design decisions are RFDs in [docs/rfds](docs/rfds/README.md): one numbered document per decision, proposals and snapshots of what is built. There are no other design documents.
 
 Locally, splits copy rows: workerd has no storage snapshots. To run the same tests against snapshots, deploy the test Worker under another name with a token, and point the tests at it:
 

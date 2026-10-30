@@ -1,5 +1,5 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
-// conditional writes, listings merged across shards, and counts. See docs/design/sharded-table.md.
+// conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
 import { keyHash, ShardedObject } from "../sharded/index.js";
 import { encodeIndexKey, encodeValue, pageRequest } from "./schema.js";
 export * from "./schema.js";
