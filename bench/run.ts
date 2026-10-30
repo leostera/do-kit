@@ -65,8 +65,18 @@ async function measure(config: {
 }): Promise<Point> {
   // A failed point is retried once; what failed is logged, as the platform answered it.
   for (let attempt = 1; ; attempt++) {
-    const response = await fetch(`${baseUrl}/measure`, { method: "POST", headers, body: JSON.stringify({ ...config, durationMs, keyCount, payloadBytes }), timeout: false } as RequestInit);
-    const text = await response.text();
+    // A measurement takes durationMs plus setup; an answer that never comes is a failed attempt, not a hang.
+    const signal = AbortSignal.timeout(durationMs + 120_000);
+    let response: Response;
+    let text: string;
+    try {
+      response = await fetch(`${baseUrl}/measure`, { method: "POST", headers, body: JSON.stringify({ ...config, durationMs, keyCount, payloadBytes }), timeout: false, signal } as RequestInit);
+      text = await response.text();
+    } catch (error) {
+      console.error(JSON.stringify({ failed: config, error: String(error) }));
+      if (attempt >= 2) throw error;
+      continue;
+    }
     if (response.ok) {
       try {
         return JSON.parse(text) as Point;
@@ -112,8 +122,15 @@ if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ??
     for (const target of (process.env.BENCH_TARGETS ?? "single,split,presplit,legacy").split(",") as Target[]) {
       const objectName = `${suite}-${target}-${operation}-${distribution}`;
       for (const concurrency of concurrencyLevels) {
-        if (warmup) await measure({ target, operation, distribution, concurrency, objectName });
-        const point = await measure({ target, operation, distribution, concurrency, objectName });
+        let point: Point;
+        try {
+          if (warmup) await measure({ target, operation, distribution, concurrency, objectName });
+          point = await measure({ target, operation, distribution, concurrency, objectName });
+        } catch (error) {
+          // A point that failed twice is logged and left out: the rest of the suite still runs.
+          console.error(JSON.stringify({ skipped: { target, operation, distribution, concurrency }, error: String(error) }));
+          continue;
+        }
         points.push(point);
         save();
         console.log(JSON.stringify({ target, operation, distribution, concurrency: point.concurrency, opsPerSecond: Math.round(point.operationsPerSecond), mebibytesPerSecond: Number(point.mebibytesPerSecond.toFixed(3)), latencyMs: point.latencyMs, errors: point.errors, leaves: point.topology?.leaves ?? 1 }));

@@ -14,13 +14,23 @@ const points: unknown[] = [];
 
 async function measure(operation: string, concurrency: number, objectName: string): Promise<any> {
   for (let attempt = 1; ; attempt++) {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, ...(access ? { "cf-access-token": access } : {}), "content-type": "application/json" },
-      body: JSON.stringify({ target: "presplit-4096", operation, distribution: "uniform", concurrency, durationMs: 10_000, keyCount: 100_000, objectName }),
-      timeout: false,
-    } as RequestInit);
-    const text = await r.text();
+    // Seeding 4,096 shards takes a while, but an answer that never comes is a failed attempt, not a hang.
+    let r: Response;
+    let text: string;
+    try {
+      r = await fetch(url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, ...(access ? { "cf-access-token": access } : {}), "content-type": "application/json" },
+        body: JSON.stringify({ target: "presplit-4096", operation, distribution: "uniform", concurrency, durationMs: 10_000, keyCount: 100_000, objectName }),
+        timeout: false,
+        signal: AbortSignal.timeout(300_000),
+      } as RequestInit);
+      text = await r.text();
+    } catch (error) {
+      console.error(JSON.stringify({ failed: { operation, concurrency }, error: String(error) }));
+      if (attempt >= 2) return null;
+      continue;
+    }
     try {
       const j = JSON.parse(text);
       if (j.operationsPerSecond !== undefined) return j;
