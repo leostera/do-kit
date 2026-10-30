@@ -20,13 +20,17 @@
     "./table": {
       "types": "./dist/table/index.d.ts",
       "import": "./dist/table/index.js"
+    },
+    "./indexed": {
+      "types": "./dist/indexed/index.d.ts",
+      "import": "./dist/indexed/index.js"
     }
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json",
     "test": "bun test",
-    "specs:check": "feynman check",
+    "specs:check": "feynman check call-one-shard scan-visibility snapshot-split table-listing && feynman check indexed-write --repeats 1 --no-rules --max-states 20000000 --time-limit 600",
     "bench:run": "bun bench/run.ts",
     "bench:plot": "bun bench/plot.ts"
   },
@@ -34,7 +38,7 @@
     "@cloudflare/kumo": "^2.16.0",
     "@cloudflare/vite-plugin": "beta",
     "@cloudflare/workers-types": "5.20261027.1",
-    "@leostera/feynman": "0.12.0",
+    "@leostera/feynman": "0.13.0",
     "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "^1.4.4",

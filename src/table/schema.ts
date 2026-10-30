@@ -18,6 +18,24 @@ export interface TableSchema<Row extends RowShape> {
    * write, so `countBy` (and a listing's `withCount`) is exact without reading rows.
    */
   readonly counts?: Readonly<Record<string, keyof Row & string>>;
+  /**
+   * IndexedTable only: index name to a global index, kept apart from the rows on its own shards
+   * (see RFD0003). A write returns once its entries are written.
+   */
+  readonly globalIndexes?: Readonly<Record<string, GlobalIndexDef<Row>>>;
+}
+
+/** A global index of an IndexedTable. */
+export interface GlobalIndexDef<Row extends RowShape> {
+  /** The columns it sorts by. The primary key is appended unless the index is unique. */
+  readonly columns: readonly (keyof Row & string)[];
+  /** At most one row per value of `columns`. Rows with a null in them are not indexed. */
+  readonly unique?: boolean;
+  /**
+   * How many leading columns pick the index shard: entries with the same values of those live on
+   * one shard, sorted by the rest. A unique index is partitioned by all its columns (the default).
+   */
+  readonly partition?: number;
 }
 
 /** Rows with one value of a count group's column. */
@@ -44,6 +62,20 @@ export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): Tab
       if (!type) throw new Error(`index ${name}: no column ${col}`);
       if (type === "json") throw new Error(`index ${name}: json column ${col} cannot be indexed`);
     }
+  }
+  for (const [name, def] of Object.entries(schema.globalIndexes ?? {})) {
+    if (!IDENTIFIER.test(name)) throw new Error(`global index ${JSON.stringify(name)}: a plain identifier`);
+    if (schema.indexes?.[name]) throw new Error(`global index ${name}: an index has that name`);
+    if (def.columns.length === 0) throw new Error(`global index ${name}: no columns`);
+    for (const col of def.columns) {
+      const type = schema.columns[col];
+      if (!type) throw new Error(`global index ${name}: no column ${col}`);
+      if (type === "json") throw new Error(`global index ${name}: json column ${col} cannot be indexed`);
+    }
+    const partition = def.partition ?? def.columns.length;
+    if (partition === 0) throw new Error(`global index ${name}: partition 0 (by range) is not built yet`);
+    if (!Number.isInteger(partition) || partition < 1 || partition > def.columns.length) throw new Error(`global index ${name}: partition must be from 1 to ${def.columns.length}`);
+    if (def.unique && partition !== def.columns.length) throw new Error(`global index ${name}: a unique index is partitioned by all its columns`);
   }
   for (const [name, col] of Object.entries(schema.counts ?? {})) {
     if (!IDENTIFIER.test(name)) throw new Error(`count group ${JSON.stringify(name)}: a plain identifier`);
@@ -100,6 +132,8 @@ export interface Versioned<Row> {
 export interface WriteResult {
   readonly ok: boolean;
   readonly version: number;
+  /** Refused by a layer above (IndexedTable: a unique index's name), and nothing was written. */
+  readonly refused?: string;
 }
 
 export type Op = "=" | "!=" | "<" | "<=" | ">" | ">=" | "isNull" | "notNull" | "prefix" | "contains";

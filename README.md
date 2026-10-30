@@ -8,7 +8,7 @@ Everything is exported from `@leostera/do-kit`. Each layer also has its own path
 |---|---|---|
 | **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, routing that follows splits. |
 | **Sharded table** (`ShardedTable`) | `@leostera/do-kit/table` | Typed rows on a sharded object: indexes in every shard, conditional writes on a version per row, counts, and sorted listings across shards with a cursor that survives splits. With no indexes, a key-value store. |
-| **Indexed table** (`IndexedTable`) | proposed: [RFD0003](docs/rfds/RFD0003-indexed-table.md) | Global indexes across shards: lookups by another column, unique constraints, and listings that read one index shard per page. |
+| **Indexed table** (`IndexedTable`) | `@leostera/do-kit/indexed` (phase 1, [RFD0003](docs/rfds/RFD0003-indexed-table.md)) | Global indexes on shards of their own: lookups by another column, unique constraints, and listings within a partition that read one index shard per page. A write returns once its index entries are written. Not benchmarked yet. |
 | Events, cached reads | coming | Change feeds and watches, and reads cached in every data center. |
 
 To try one, run an [example](examples): small apps for each layer, each started with `bun dev` or `npm run dev`, with a page that shows its shards splitting live.
@@ -169,6 +169,50 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 ![Table listings vs concurrency](docs/bench/table-list-throughput.svg)
 
 More in [docs/performance.md](docs/performance.md#sharded-tables) and the design in [RFD0002](docs/rfds/RFD0002-sharded-table.md).
+
+## Indexed tables: global indexes
+
+A sharded table answers "the row with this key" in one call. Anything else, such as "which user has this email?", asks every shard, and nothing stops two rows on different shards from having the same email. `IndexedTable` adds **global indexes**: they live on shards of their own, routed by the indexed values, so a lookup is one call and a unique index is enforced across the whole table.
+
+```ts
+import { defineTable, GlobalIndex, IndexedTable, indexedTable } from "@leostera/do-kit";
+
+type User = { id: string; email: string; name: string; team: string; createdAt: number };
+const users = defineTable<User>({
+  primaryKey: "id",
+  columns: { id: "text", email: "text", name: "text", team: "text", createdAt: "integer" },
+  globalIndexes: {
+    byEmail: { columns: ["email"], unique: true },
+    byTeam: { columns: ["team", "createdAt"], partition: 1 }, // one team per index shard, sorted by createdAt
+  },
+});
+
+export class Users extends IndexedTable<Env, User> {
+  protected table = users;
+  protected nodes() { return this.env.USERS; }
+  protected indexNodes() { return this.env.USER_INDEXES; }
+}
+
+export class UserIndexes extends GlobalIndex<Env> {
+  protected nodes() { return this.env.USER_INDEXES; }
+  protected rowNodes() { return this.env.USERS; }
+}
+
+// In a Worker
+const t = indexedTable(env.USERS, env.USER_INDEXES, "workspace-42", users);
+await t.put({ id: "u_1", email: "ada@example.com", name: "Ada", team: "core", createdAt: Date.now() }, { ifVersion: 0 });
+// { ok: true, version: 1 }
+await t.lookup("byEmail", ["ada@example.com"]); // { row: { id: "u_1", ... }, version: 1 }
+await t.put({ id: "u_2", email: "ada@example.com", name: "Ada L.", team: "web", createdAt: Date.now() });
+// { ok: false, version: 0, conflict: "byEmail" }: nothing was written
+await t.list({ index: "byTeam", partition: ["core"], direction: "desc", limit: 50 }); // one index shard per page
+```
+
+- **A write returns once every index has it.** A write reserves its unique values, writes the row and its index changes (an outbox) in one transaction, and delivers them before it returns. If delivery takes longer than `indexWaitMs` (5 s), the client throws `IndexPending`: the row is written, and the row shard's alarm goes on delivering.
+- **Unique values are reserved with fencing tokens.** A reservation left behind by a writer that never wrote is resolved by asking the row's shard, which fences the token so that writer's write cannot land later. The protocol is model-checked in [`specs/indexed-write.ts`](specs/indexed-write.ts): at most one row has a value, a write that returned is found, and the indexes converge to the rows, across lost calls, timeouts and late deliveries.
+- **The rows stay the truth.** Index entries carry a copy of the row, so a lookup or page needs no second call. Every write rewrites its entries, so each global index costs one more write per row write, and a write with a unique index makes one more call before it.
+- Rows and index shards split by load, independently. Per-shard `indexes` and `counts` work as in `ShardedTable`. Custom methods that write rows use `indexedTransact`.
+- Not built yet: sorted listings across the whole table (range-partitioned indexes, phase 2), and adding a global index to a table that already has rows.
 
 ## Install
 

@@ -25,6 +25,28 @@ export function defineTable(schema) {
                 throw new Error(`index ${name}: json column ${col} cannot be indexed`);
         }
     }
+    for (const [name, def] of Object.entries(schema.globalIndexes ?? {})) {
+        if (!IDENTIFIER.test(name))
+            throw new Error(`global index ${JSON.stringify(name)}: a plain identifier`);
+        if (schema.indexes?.[name])
+            throw new Error(`global index ${name}: an index has that name`);
+        if (def.columns.length === 0)
+            throw new Error(`global index ${name}: no columns`);
+        for (const col of def.columns) {
+            const type = schema.columns[col];
+            if (!type)
+                throw new Error(`global index ${name}: no column ${col}`);
+            if (type === "json")
+                throw new Error(`global index ${name}: json column ${col} cannot be indexed`);
+        }
+        const partition = def.partition ?? def.columns.length;
+        if (partition === 0)
+            throw new Error(`global index ${name}: partition 0 (by range) is not built yet`);
+        if (!Number.isInteger(partition) || partition < 1 || partition > def.columns.length)
+            throw new Error(`global index ${name}: partition must be from 1 to ${def.columns.length}`);
+        if (def.unique && partition !== def.columns.length)
+            throw new Error(`global index ${name}: a unique index is partitioned by all its columns`);
+    }
     for (const [name, col] of Object.entries(schema.counts ?? {})) {
         if (!IDENTIFIER.test(name))
             throw new Error(`count group ${JSON.stringify(name)}: a plain identifier`);

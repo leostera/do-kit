@@ -65,20 +65,53 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
 
   async tablePut(keys: readonly string[], payloads: readonly { readonly row: Row; readonly ifVersion?: number }[]): Promise<WriteResult[]> {
     this.migrate();
-    return this.transact(keys, () => payloads.map(({ row, ifVersion }, i) => this.putRow(this.checkKey(keys[i]!, row), ifVersion === undefined ? {} : { ifVersion })));
+    return this.writeBatch(keys, payloads, () => payloads.map(({ row, ifVersion }, i) => this.putRow(this.checkKey(keys[i]!, row), ifVersion === undefined ? {} : { ifVersion })));
   }
 
   async tablePatch(keys: readonly string[], payloads: readonly { readonly changes: Partial<Row>; readonly ifVersion?: number }[]): Promise<WriteResult[]> {
     this.migrate();
-    return this.transact(keys, () => payloads.map(({ changes, ifVersion }, i) => this.patchRow(keys[i]!, changes, ifVersion === undefined ? {} : { ifVersion })));
+    return this.writeBatch(keys, payloads, () => payloads.map(({ changes, ifVersion }, i) => this.patchRow(keys[i]!, changes, ifVersion === undefined ? {} : { ifVersion })));
   }
 
   async tableDelete(keys: readonly string[], payloads: readonly { readonly ifVersion?: number }[] | null): Promise<WriteResult[]> {
     this.migrate();
-    return this.transact(keys, () => keys.map((key, i) => {
+    return this.writeBatch(keys, payloads, () => keys.map((key, i) => {
       const ifVersion = payloads?.[i]?.ifVersion;
       return this.deleteRow(key, ifVersion === undefined ? {} : { ifVersion });
     }));
+  }
+
+  // ---- Hooks for layers above (IndexedTable) ----
+
+  /**
+   * Runs one client write call (`tablePut`, `tablePatch`, `tableDelete`): `write` in one
+   * transaction over `keys`. A layer above wraps it (to read what the payloads carry, and to act
+   * after the commit). The default is `transact(keys, write)`.
+   */
+  protected writeBatch(keys: readonly string[], _payloads: readonly unknown[] | null, write: () => WriteResult[]): Promise<WriteResult[]> {
+    return this.transact(keys, write);
+  }
+
+  /** Whether `putRow`, `patchRow` and `deleteRow` call `refuseRowWrite` and `rowWritten`. */
+  protected watchesRows(): boolean {
+    return false;
+  }
+
+  /**
+   * Before a write that passed its version check: a reason to refuse it (nothing is written, and the
+   * result is `{ ok: false, version, refused }`), or null. `before` null: the row is new; `after`
+   * null: it is deleted. Inside the write's transaction. Only if `watchesRows()`.
+   */
+  protected refuseRowWrite(_key: string, _before: Row | null, _after: Row | null): string | null {
+    return null;
+  }
+
+  /** After a write, in its transaction: the row was `before` and is now `after` at `version`. Only if `watchesRows()`. */
+  protected rowWritten(_key: string, _before: Row | null, _after: Row | null, _version: number): void {}
+
+  /** Whether this class keeps the schema's `globalIndexes` (IndexedTable does). */
+  protected keepsGlobalIndexes(): boolean {
+    return false;
   }
 
   /** One shard's part of a listing page. */
@@ -121,9 +154,14 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     const key = row[this.table.primaryKey] as string;
     const current = this.version(key);
     if (options.ifVersion !== undefined && options.ifVersion !== current) return { ok: false, version: current };
-    const before = current === 0 ? null : this.storedGroupValues(key);
     const stored: Record<string, SqlValue> = {};
     for (const name of Object.keys(this.table.columns)) stored[name] = this.encode(name, row[name]);
+    const watched = this.watchesRows() ? { before: current === 0 ? null : this.getRow(key)!.row, after: this.decode(stored) } : null;
+    if (watched) {
+      const refused = this.refuseRowWrite(key, watched.before, watched.after);
+      if (refused !== null) return { ok: false, version: current, refused };
+    }
+    const before = current === 0 ? null : this.storedGroupValues(key);
     for (const ix of this.indexes()) stored[ix.keyColumn] = this.indexKey(ix, stored);
     const names = Object.keys(stored);
     const version = (current === 0 ? this.deletedVersion() : current) + 1;
@@ -136,6 +174,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     );
     if (current === 0) this.countRow(key, 1);
     this.countGroups(key, before, stored);
+    if (watched) this.rowWritten(key, watched.before, watched.after, version);
     return { ok: true, version };
   }
 
@@ -150,6 +189,11 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     const before = { ...stored };
     const updates: Record<string, SqlValue> = {};
     for (const name of changed) updates[name] = stored[name] = this.encode(name, (changes as RowShape)[name]);
+    const watched = this.watchesRows() ? { before: this.decode(before), after: this.decode(stored) } : null;
+    if (watched) {
+      const refused = this.refuseRowWrite(key, watched.before, watched.after);
+      if (refused !== null) return { ok: false, version: current, refused };
+    }
     for (const ix of this.indexes()) if (ix.columns.some((c) => changed.includes(c))) updates[ix.keyColumn] = this.indexKey(ix, stored);
     const names = Object.keys(updates);
     const version = current + 1;
@@ -160,6 +204,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       key,
     );
     this.countGroups(key, before, stored);
+    if (watched) this.rowWritten(key, watched.before, watched.after, version);
     return { ok: true, version };
   }
 
@@ -169,11 +214,20 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     const current = this.version(key);
     if (options.ifVersion !== undefined && options.ifVersion !== current) return { ok: false, version: current };
     if (current === 0) return { ok: true, version: 0 };
+    const watched = this.watchesRows() ? { before: this.getRow(key)!.row } : null;
+    if (watched) {
+      const refused = this.refuseRowWrite(key, watched.before, null);
+      if (refused !== null) return { ok: false, version: current, refused };
+    }
     const before = this.storedGroupValues(key);
     this.db.exec(`DELETE FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key);
     this.countRow(key, -1);
     this.countGroups(key, before, null);
-    this.db.exec(`INSERT INTO ${VERSIONS} (name, version) VALUES ('deleted', ?) ON CONFLICT (name) DO UPDATE SET version = max(version, excluded.version)`, current);
+    // Watched, the delete is a write of its own, at one past the row's last version: a row written
+    // after it starts above that, so the two never share a version.
+    const deletedAt = watched ? current + 1 : current;
+    this.db.exec(`INSERT INTO ${VERSIONS} (name, version) VALUES ('deleted', ?) ON CONFLICT (name) DO UPDATE SET version = max(version, excluded.version)`, deletedAt);
+    if (watched) this.rowWritten(key, watched.before, null, deletedAt);
     return { ok: true, version: 0 };
   }
 
@@ -274,11 +328,12 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   // ---- Storage ----
 
   /** Brings this shard's storage up to the schema: once per instance, on its first use. */
-  private migrate(): void {
+  protected migrate(): void {
     if (this.migrated) return;
     // Rows are counted per 16-bit hash prefix: a deeper shard would count its sibling's rows too.
     if (this.splitPolicy.maxDepth > MAX_TABLE_DEPTH) throw new Error(`a sharded table splits at most ${MAX_TABLE_DEPTH} deep: lower splitPolicy.maxDepth`);
     const schema = this.table;
+    if (schema.globalIndexes && Object.keys(schema.globalIndexes).length > 0 && !this.keepsGlobalIndexes()) throw new Error("the table declares globalIndexes: extend IndexedTable, not ShardedTable");
     const pk = this.q(schema.primaryKey);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${TABLE} (${pk} TEXT PRIMARY KEY NOT NULL, _hash TEXT NOT NULL, _version INTEGER NOT NULL)`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${COUNTS} (bucket TEXT PRIMARY KEY NOT NULL, n INTEGER NOT NULL) WITHOUT ROWID`);
@@ -407,7 +462,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     return encodeValue(this.table, column, value);
   }
 
-  private decode(stored: Record<string, SqlValue>): Row {
+  protected decode(stored: Record<string, SqlValue>): Row {
     const row: RowShape = {};
     for (const [name, type] of Object.entries(this.table.columns) as [string, ColumnType][]) {
       const v = stored[name] ?? null;

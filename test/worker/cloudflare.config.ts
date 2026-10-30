@@ -20,6 +20,8 @@ export default defineConfig(() => ({
       EVOLVING: bindings.durableObject({ worker: NAME, exportName: "EvolvingDocs" }),
       FLAKY: bindings.durableObject({ worker: NAME, exportName: "FlakyDocs" }),
       OLD_ALARM: bindings.durableObject({ worker: NAME, exportName: "OldAlarm" }),
+      USERS: bindings.durableObject({ worker: NAME, exportName: "Users" }),
+      USER_INDEXES: bindings.durableObject({ worker: NAME, exportName: "UserIndexes" }),
     },
     exports: {
       Counters: exports.durableObject({ storage: "sqlite" }),
@@ -29,6 +31,8 @@ export default defineConfig(() => ({
       EvolvingDocs: exports.durableObject({ storage: "sqlite" }),
       FlakyDocs: exports.durableObject({ storage: "sqlite" }),
       OldAlarm: exports.durableObject({ storage: "sqlite" }),
+      Users: exports.durableObject({ storage: "sqlite" }),
+      UserIndexes: exports.durableObject({ storage: "sqlite" }),
     },
   },
 }));

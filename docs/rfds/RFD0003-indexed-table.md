@@ -1,10 +1,10 @@
 # RFD0003 - Indexed tables: global indexes across shards
 
 - Feature Name: `indexed-table`
-- Status: Draft
+- Status: Draft (phase 1 built)
 - Author: `leostera`
 - Start Date: `2026-10-30`
-- Updated: `2026-10-30`
+- Updated: `2026-10-31`
 - Discussion PR: none
 - Tracking Issue: none
 
@@ -163,9 +163,13 @@ entry holds:
 | `version` | The row version the entry reflects (0: reserved, never confirmed). |
 | `row` | A copy of the row at that version, so lookups and pages need no second call. |
 | `pending` | Unique indexes only: the newest reservation token not yet confirmed, or none. |
-| `deleted` | A tombstone: the version at which the entry was removed, kept for an hour. |
+| `issued` | The newest token issued to `owner` for this value. |
+| `removed`, `floor` | A tombstone: the owner's row let go of the entry at version `floor`, and older changes are ignored. Kept for an hour. |
+| `fenced` | Every token issued to `owner` is fenced on its row shard, so the value may pass to another row. |
 
-Index shards issue tokens from a counter that only grows, one counter per index shard.
+Index shards issue tokens from a counter that only grows, one counter per index shard. A split
+copies the counter, and all tokens for one value come from the shard that owns its route, so the
+tokens for one value only grow.
 
 ### Writes
 
@@ -178,32 +182,37 @@ write rows too (see "Custom methods").
    - If the entry is the same key's, the shard sets `pending` to a new token.
    - If the entry is another key's and confirmed, the answer is `taken`. The write returns
      `{ ok: false, conflict: index }`, and nothing is written.
-   - If the entry is another key's and only pending, the index shard first **resolves** that
-     reservation (below), then answers.
+   - If the entry is another key's and only pending, or let go of but not fenced yet, the index
+     shard first **resolves** it (below) and decides again. After two rounds it answers
+     `contended`, and the client asks again with backoff (`IndexContended` after six tries).
+   - If the entry is another key's, let go of, and fenced, the reservation takes it.
 2. **Write the row.** The client calls the row shard with the row and the tokens. In one
    transaction, the row shard:
    - checks `ifVersion`;
-   - refuses any token below its fence for that key, index and value (`refused`: retry with a new
-     reservation);
-   - writes the row and raises the fences to the tokens;
-   - appends to the outbox: one **put** for each entry the row now has, one **remove** for each
-     entry it no longer has, and for unique indexes a **confirm** (with the token) and a
-     **release** of the old values.
+   - refuses a write that gives the row a unique value without a token above its fence for that
+     key, index and value (`refused`: the client reserves again and retries, up to three times);
+   - writes the row and raises the fences to the tokens it used, so an older write still in flight
+     cannot land after it;
+   - appends to the outbox one **put** for each entry the row now has (a unique index's put carries
+     its token, which confirms the reservation) and one **remove** for each entry it no longer has.
 
-   Retrying a write with the same tokens is idempotent: if the row's last write used them, the
-   shard answers that write's result.
+   A write retried with the same tokens after it landed is refused like any stale token, and the
+   client reserves again: a write conditional on `ifVersion` then fails on the version it already
+   moved past, as any conditional retry does.
+
+   A delete is a write too: its removes carry one past the row's last version, and a row written
+   later starts above that, so a recreated row's puts are never mistaken for older changes.
 3. **Deliver.** Still inside the call, the row shard sends the outbox entries to their index
    shards in parallel, deletes each one acknowledged, and only then returns the write's result.
    If delivery has not finished by the client's deadline, the call throws `IndexPending` with the
    row's version. The row is written, and the alarm keeps delivering. The alarm also delivers
    whatever a restart left in the outbox.
-4. **Apply.** Index shards apply what is delivered, idempotently and by version:
-   - a put applies if the entry is absent or older, and no tombstone is newer;
-   - a remove leaves a tombstone at its version;
-   - a confirm sets the entry's version and row if it is the owner's and newer, and clears
-     `pending` if the token is at least the pending one;
-   - a release deletes the entry if it is the owner's, older than the release, and not pending.
-     If it is pending, the reservation's resolution decides.
+4. **Apply.** Index shards apply what is delivered, idempotently and by version, and only the
+   entry owner's changes:
+   - a put sets the entry's version and row if it is newer than both the entry and its tombstone,
+     and clears `pending` if its token is at least the pending one;
+   - a remove leaves a tombstone at its version (also where no entry is yet, so a put that
+     arrives after it is ignored).
 
    Messages may arrive in any order and more than once. The versions make the end state the same.
 
@@ -217,16 +226,21 @@ asks the row shard of `k` (routed as any call, so splits are followed). In one t
 shard answers:
 - **committed**, if row `k` has value `b`: the index confirms the entry;
 - **aborted**, otherwise: it raises the fence for (`k`, index, `b`) to `t`, so no write carrying
-  `t` or an older token can land afterwards. The index deletes the entry if `pending` is still
-  `t`.
+  `t` or an older token can land afterwards. If `t` is still the newest token issued, the index
+  marks the entry let go of and fenced; another key's reservation may then take it.
+
+The index asks with the newest token issued, so a let-go-of entry passes on only once every token
+its owner holds is fenced. Taking a value another row let go of therefore costs one resolution,
+the first time.
 
 The fence is what makes stealing a stale reservation safe. Without it, a write of `k := b` still
 in flight could land after the index gave `b` to another key.
 
 ### Lookups and listings
 
-- `lookup(index, values)` reads the entry from one index shard. It returns the confirmed row copy,
-  and treats a pending-only entry as absent.
+- `lookup(index, values)`, for a unique index, reads the entry from one index shard. It returns
+  the confirmed row copy, and treats a pending-only entry as absent. A non-unique index is read with
+  `list` and its partition.
 - `list({ index, partition: values, ... })`, phase 1, pages one index shard's entries under the
   partition values in index order. The cursor is the entry key of the last row. `where` filters
   the row copies, with the same budget and frontier as RFD0002.
@@ -235,15 +249,17 @@ in flight could land after the index gave `b` to another key.
 
 ### Custom methods
 
-Inside `transact`, `putRow`, `patchRow` and `deleteRow` append the same outbox entries. They
-refuse to change a unique column's value without a token. Such changes go through the client,
-which reserves first. Delivery happens when the method's call returns, as for client writes.
+Inside `indexedTransact`, `putRow`, `patchRow` and `deleteRow` append the same outbox entries, and
+the method returns once they are delivered (or throws, with the rows written and the alarm
+delivering). They refuse (`refused: index`) to give a row a unique value without a token. Such
+changes go through the client, which reserves first.
 
 ### Splits
 
-- **Row shards.** The outbox and fences are tables, so a split copies them with the rows. Each side
-  delivers only the outbox entries of keys it owns, and `cleanupForeign` drops the rest. Fences of
-  keys it gave away are dropped the same way.
+- **Row shards.** The outbox and fences are tables, so a split copies them with the rows. The
+  original goes on delivering its whole outbox, and the copy drops the outbox it got (`afterClone`):
+  index changes apply by version, so the original's late ones are harmless. Each side drops the
+  fences of keys it does not own (`cleanupForeign`).
 - **Index shards** are sharded objects: they split by load like any other, by entry routing key.
   All entries of one partition value stay together (phase 1).
 - **Phase 2** needs the core to split a shard by range at a key chosen from its data, and to
@@ -281,11 +297,13 @@ which reserves first. Delivery happens when the method's call returns, as for cl
 
 ### Rollout and validation
 
-1. **A Feynman spec of the write protocol**, `specs/indexed-write.ts`, before code:
-   - two writers race for a unique value, with value changes, deletes, lost calls, lost replies
-     and restarts;
-   - it checks the four invariants above.
-2. **Phase 1**, with tests under `cf dev` against a reference model:
+1. **A Feynman spec of the write protocol**, `specs/indexed-write.ts`, before code (done):
+   - two writers race for a unique value, with value changes, deletes, lost calls and timeouts;
+   - the four invariants above hold on every path within the bounds (one more write per writer
+     past each scenario, one fault);
+   - each rule is needed: without fences, unique breaks; without waiting for delivery,
+     read-your-writes breaks; without tombstones, converges breaks.
+2. **Phase 1** (built: `src/indexed/`, `test/indexed.test.ts`), with tests under `cf dev` against a reference model:
    - unique conflicts, lookups, listings within a partition;
    - reservations abandoned by `ifVersion` failures and by killed writers;
    - splits of row and index shards during writes.
@@ -372,18 +390,24 @@ uniqueness beyond the primary key.
 
 ### Before acceptance
 
+Phase 1 is built with the first answer to each, so each can still change before a release:
+
 - The `partition` option: is "how many leading columns" clear enough, or should it be named
-  columns (`partitionBy: ["owner"]`)?
-- `IndexPending`: throw, or return `{ ok: true, indexed: false }`?
+  columns (`partitionBy: ["owner"]`)? Built: `partition: n`.
+- `IndexPending`: throw, or return `{ ok: true, indexed: false }`? Built: the client throws
+  `IndexPending` with the key and version.
 - Should the index shards be a separate binding (`indexNodes()`), or another name in the rows'
-  class?
+  class? Built: a separate binding, of a `GlobalIndex` class.
 
 ### During implementation
 
-- Tombstone and fence lifetimes. An hour covers any late delivery. Fences need only outlive the
-  client's write deadline.
-- How long a reservation waits before the alarm resolves it.
-- Batching outbox delivery per index shard for `putMany`.
+- Tombstone and fence lifetimes. Built: tombstones are kept an hour (`tombstoneMs`); fences are
+  kept until the key moves to another shard. Fences could be dropped once older than any write
+  deadline.
+- How long a reservation waits before the alarm resolves it. Built: 5 s (`reservationTimeoutMs`).
+- Batching outbox delivery per index shard for `putMany`. Built: one routed call per write batch,
+  which the sharded client splits per index shard.
+- Not built yet: the backfill of a global index added to a table that has rows.
 
 ### Out of scope
 

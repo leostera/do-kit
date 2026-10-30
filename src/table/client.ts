@@ -29,7 +29,7 @@ interface TableMethods {
   tableCountBy(group: string): Promise<GroupCount[]>;
 }
 
-type Untyped = {
+export type Untyped = {
   call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{ positions: readonly number[]; result: readonly unknown[] }[]>;
   scan(method: string, ...args: unknown[]): Promise<unknown[]>;
   knownShardCount(): Promise<number>;
@@ -47,8 +47,8 @@ export function perShardLimit(wanted: number, shards: number): number {
 }
 
 export class TableClient<Row extends RowShape> {
-  private readonly client: Untyped;
-  private readonly primaryKey: keyof Row & string;
+  protected readonly client: Untyped;
+  protected readonly primaryKey: keyof Row & string;
   private readonly indexes: Readonly<Record<string, readonly string[]>>;
 
   constructor(
@@ -147,13 +147,13 @@ export class TableClient<Row extends RowShape> {
     } while (cursor !== null);
   }
 
-  private keyOf(row: Row): string {
+  protected keyOf(row: Row): string {
     const key = row[this.primaryKey];
     if (typeof key !== "string") throw new Error(`the row has no ${this.primaryKey}`);
     return key;
   }
 
-  private async byPosition<R>(keys: readonly string[], method: keyof TableMethods, payloads: readonly unknown[] | null): Promise<R[]> {
+  protected async byPosition<R>(keys: readonly string[], method: keyof TableMethods, payloads: readonly unknown[] | null): Promise<R[]> {
     const out = new Array<R>(keys.length);
     for (const group of await this.client.call(keys, method, payloads)) group.positions.forEach((p, i) => (out[p] = group.result[i] as R));
     return out;

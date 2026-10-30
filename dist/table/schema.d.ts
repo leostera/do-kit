@@ -15,6 +15,23 @@ export interface TableSchema<Row extends RowShape> {
      * write, so `countBy` (and a listing's `withCount`) is exact without reading rows.
      */
     readonly counts?: Readonly<Record<string, keyof Row & string>>;
+    /**
+     * IndexedTable only: index name to a global index, kept apart from the rows on its own shards
+     * (see RFD0003). A write returns once its entries are written.
+     */
+    readonly globalIndexes?: Readonly<Record<string, GlobalIndexDef<Row>>>;
+}
+/** A global index of an IndexedTable. */
+export interface GlobalIndexDef<Row extends RowShape> {
+    /** The columns it sorts by. The primary key is appended unless the index is unique. */
+    readonly columns: readonly (keyof Row & string)[];
+    /** At most one row per value of `columns`. Rows with a null in them are not indexed. */
+    readonly unique?: boolean;
+    /**
+     * How many leading columns pick the index shard: entries with the same values of those live on
+     * one shard, sorted by the rest. A unique index is partitioned by all its columns (the default).
+     */
+    readonly partition?: number;
 }
 /** Rows with one value of a count group's column. */
 export interface GroupCount {
@@ -41,6 +58,8 @@ export interface Versioned<Row> {
 export interface WriteResult {
     readonly ok: boolean;
     readonly version: number;
+    /** Refused by a layer above (IndexedTable: a unique index's name), and nothing was written. */
+    readonly refused?: string;
 }
 export type Op = "=" | "!=" | "<" | "<=" | ">" | ">=" | "isNull" | "notNull" | "prefix" | "contains";
 /** A condition on one column; conditions are ANDed. `contains` ignores case. */

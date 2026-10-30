@@ -5,6 +5,7 @@
 import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
+import { GlobalIndex, IndexedTable, indexedTable, type IndexedListQuery } from "../../../src/indexed/index.ts";
 
 interface Env {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
@@ -14,6 +15,8 @@ interface Env {
   readonly EVOLVING: DurableObjectNamespace<EvolvingDocs>;
   readonly FLAKY: DurableObjectNamespace<FlakyDocs>;
   readonly OLD_ALARM: DurableObjectNamespace<OldAlarm>;
+  readonly USERS: DurableObjectNamespace<Users>;
+  readonly USER_INDEXES: DurableObjectNamespace<UserIndexes>;
   /** Set when deployed: every request carries it as a bearer token (the routes can delete data). */
   readonly TEST_TOKEN?: string;
 }
@@ -48,6 +51,65 @@ export class Docs extends ShardedTable<Env, Doc> {
   }
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.DOCS as never;
+  }
+}
+
+// ---- An indexed table: users, unique by email, listed by team ----
+
+export type User = { id: string; email: string | null; name: string; team: string; createdAt: number; active: boolean };
+export const users = defineTable<User>({
+  primaryKey: "id",
+  columns: { id: "text", email: "text", name: "text", team: "text", createdAt: "integer", active: "boolean" },
+  indexes: { byName: ["name"] },
+  globalIndexes: {
+    byEmail: { columns: ["email"], unique: true },
+    byTeam: { columns: ["team", "createdAt"], partition: 1 },
+  },
+});
+
+export class Users extends IndexedTable<Env, User> {
+  protected table = users;
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
+  protected override indexWaitMs = 1_500;
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.USERS as never;
+  }
+  protected indexNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.USER_INDEXES as never;
+  }
+  /** Index changes not delivered yet, on this object (owned or not). */
+  async outboxSize(): Promise<number> {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM indexed_outbox").one().n;
+  }
+  /** A custom write: renames users in one transaction (no unique column changes). */
+  async rename(keys: readonly string[], payloads: readonly { name: string }[]): Promise<number[]> {
+    return this.indexedTransact(keys, () => keys.map((key, i) => this.patchRow(key, { name: payloads[i]!.name }).version));
+  }
+  /** A custom write that tries to change a unique column: refused. */
+  async setEmail(keys: readonly string[], payloads: readonly { email: string }[]): Promise<(string | undefined)[]> {
+    return this.indexedTransact(keys, () => keys.map((key, i) => this.patchRow(key, { email: payloads[i]!.email }).refused));
+  }
+}
+
+export class UserIndexes extends GlobalIndex<Env> {
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
+  protected override reservationTimeoutMs = 1_000;
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.USER_INDEXES as never;
+  }
+  protected rowNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.USERS as never;
+  }
+  /** While set, deliveries to this object fail (the flag is copied with the rest). */
+  async failApply(fail: boolean): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_apply (fail INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_apply");
+    this.ctx.storage.sql.exec("INSERT INTO test_apply (fail) VALUES (?)", fail ? 1 : 0);
+  }
+  override async indexApply(...args: Parameters<GlobalIndex<Env>["indexApply"]>): Promise<null[]> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_apply (fail INTEGER NOT NULL)");
+    if (this.ctx.storage.sql.exec("SELECT fail FROM test_apply WHERE fail = 1").toArray().length) throw new Error("test: apply failed");
+    return super.indexApply(...args);
   }
 }
 
@@ -358,7 +420,58 @@ export class PresplitCounters extends CounterBase {
 }
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
+  return (cls === "users" ? env.USERS : cls === "userIndexes" ? env.USER_INDEXES : cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
+}
+
+/** POST /indexed {name, op, args}: one call of the indexed table client, or a test hook. */
+async function indexedOp(env: Env, body: { name: string; op: string; args: unknown[] }): Promise<unknown> {
+  const t = indexedTable(env.USERS, env.USER_INDEXES, body.name, users);
+  const rows = sharded(env.USERS, body.name);
+  const indexes = sharded(env.USER_INDEXES, body.name);
+  const untyped = (client: unknown) => client as { call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{ positions: number[]; result: unknown[] }[]>; scan(method: string, ...a: unknown[]): Promise<unknown[]> };
+  const flat = async (groups: Promise<{ positions: number[]; result: unknown[] }[]>) => {
+    const out: unknown[] = [];
+    for (const g of await groups) g.positions.forEach((p, i) => (out[p] = g.result[i]));
+    return out;
+  };
+  switch (body.op) {
+    case "all": {
+      const out: unknown[] = [];
+      for await (const row of t.all(body.args[0] as ListQuery)) out.push(row);
+      return out;
+    }
+    case "listAll": {
+      // Every page of a listing through a global index.
+      const out: unknown[] = [];
+      let cursor: string | null = null;
+      do {
+        const page = await t.list({ ...(body.args[0] as IndexedListQuery), cursor });
+        out.push(...page.rows);
+        cursor = page.cursor;
+      } while (cursor !== null);
+      return out;
+    }
+    case "rawReserve": // [routes, payloads]
+      return flat(untyped(indexes).call(body.args[0] as string[], "indexReserve", body.args[1] as unknown[]));
+    case "rawPut": // [keys, payloads]
+      return flat(untyped(rows).call(body.args[0] as string[], "tablePut", body.args[1] as unknown[]));
+    case "rawCall": // [method, keys, payloads]: a custom method of Users
+      return flat(untyped(rows).call(body.args[1] as string[], body.args[0] as string, body.args[2] as unknown[]));
+    case "indexStats":
+      return untyped(indexes).scan("indexStats");
+    case "outbox":
+      return (await untyped(rows).scan("outboxSize")).reduce((a: number, b) => a + (b as number), 0);
+    case "split": // [side, bits]
+      return (body.args[0] === "rows" ? env.USERS : env.USER_INDEXES).get((body.args[0] === "rows" ? env.USERS : env.USER_INDEXES).idFromName(shardObjectName(body.name, body.args[1] as string))).shardedSplit(body.name, body.args[1] as string);
+    case "failApply": // [fail, bits]
+      return env.USER_INDEXES.get(env.USER_INDEXES.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).failApply(body.args[0] as boolean);
+  }
+  try {
+    return { ok: await (t as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[body.op]!.call(t, ...body.args) };
+  } catch (error) {
+    const e = error as Error & { key?: string; version?: number; index?: string };
+    return { error: e.name, message: e.message, ...(e.version === undefined ? {} : { version: e.version }), ...(e.index === undefined ? {} : { index: e.index }) };
+  }
 }
 
 /** POST /table {cls, name, op, args}: one call of the table client. */
@@ -430,6 +543,8 @@ export default {
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedSplit(body.name, body.bits));
         case "/describe":
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedDescribe());
+        case "/indexed":
+          return Response.json((await indexedOp(env, body as never)) ?? null);
         case "/table":
           return Response.json((await tableOp(env, body as never)) ?? null);
         case "/wipe":

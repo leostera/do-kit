@@ -1,5 +1,31 @@
 import { type ShardedClientOptions } from "../sharded/client.js";
 import { type GroupCount, type ListPage, type ListQuery, type Position, type RowShape, type ShardPage, type TableSchema, type ShardPageRequest, type Versioned, type WriteResult } from "./schema.js";
+/** The `table*` methods, as the client calls them through the sharded client. */
+interface TableMethods {
+    tableGet(keys: readonly string[], payloads: null): Promise<(Versioned<RowShape> | null)[]>;
+    tablePut(keys: readonly string[], payloads: readonly {
+        row: RowShape;
+        ifVersion?: number;
+    }[]): Promise<WriteResult[]>;
+    tablePatch(keys: readonly string[], payloads: readonly {
+        changes: RowShape;
+        ifVersion?: number;
+    }[]): Promise<WriteResult[]>;
+    tableDelete(keys: readonly string[], payloads: readonly {
+        ifVersion?: number;
+    }[] | null): Promise<WriteResult[]>;
+    tablePage(request: ShardPageRequest): Promise<ShardPage>;
+    tableCount(): Promise<number>;
+    tableCountBy(group: string): Promise<GroupCount[]>;
+}
+export type Untyped = {
+    call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{
+        positions: readonly number[];
+        result: readonly unknown[];
+    }[]>;
+    scan(method: string, ...args: unknown[]): Promise<unknown[]>;
+    knownShardCount(): Promise<number>;
+};
 /**
  * Rows to ask each of `shards` shards for, to fill `wanted`: keys spread over shards by hash, so
  * each holds about wanted/shards of a page; twice that, plus two, rarely comes up short.
@@ -7,8 +33,8 @@ import { type GroupCount, type ListPage, type ListQuery, type Position, type Row
 export declare function perShardLimit(wanted: number, shards: number): number;
 export declare class TableClient<Row extends RowShape> {
     readonly name: string;
-    private readonly client;
-    private readonly primaryKey;
+    protected readonly client: Untyped;
+    protected readonly primaryKey: keyof Row & string;
     private readonly indexes;
     constructor(namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>, name: string, schema: TableSchema<Row>, options?: ShardedClientOptions);
     get(key: string): Promise<Versioned<Row> | null>;
@@ -44,8 +70,8 @@ export declare class TableClient<Row extends RowShape> {
     list(query?: ListQuery): Promise<ListPage<Row>>;
     /** Every row of a query, page after page. */
     all(query?: Omit<ListQuery, "cursor">): AsyncGenerator<Versioned<Row>>;
-    private keyOf;
-    private byPosition;
+    protected keyOf(row: Row): string;
+    protected byPosition<R>(keys: readonly string[], method: keyof TableMethods, payloads: readonly unknown[] | null): Promise<R[]>;
 }
 /**
  * Merges one page from every shard: every shard reported every match up to the smallest frontier,
@@ -61,4 +87,5 @@ export declare function mergePages(pages: readonly ShardPage[], request: Pick<Sh
  * `schema` the table it declares (the client routes rows by its primary key).
  */
 export declare function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>, options?: ShardedClientOptions): TableClient<Row>;
+export {};
 //# sourceMappingURL=client.d.ts.map

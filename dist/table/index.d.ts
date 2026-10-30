@@ -1,5 +1,5 @@
 import { ShardedObject } from "../sharded/index.js";
-import { type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
+import { type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
 export * from "./schema.js";
 export { table, TableClient } from "./client.js";
 /** A put: the whole row, written if the row's version is `ifVersion` (0: absent), or always. */
@@ -30,6 +30,24 @@ export declare abstract class ShardedTable<Env, Row extends RowShape> extends Sh
     tableDelete(keys: readonly string[], payloads: readonly {
         readonly ifVersion?: number;
     }[] | null): Promise<WriteResult[]>;
+    /**
+     * Runs one client write call (`tablePut`, `tablePatch`, `tableDelete`): `write` in one
+     * transaction over `keys`. A layer above wraps it (to read what the payloads carry, and to act
+     * after the commit). The default is `transact(keys, write)`.
+     */
+    protected writeBatch(keys: readonly string[], _payloads: readonly unknown[] | null, write: () => WriteResult[]): Promise<WriteResult[]>;
+    /** Whether `putRow`, `patchRow` and `deleteRow` call `refuseRowWrite` and `rowWritten`. */
+    protected watchesRows(): boolean;
+    /**
+     * Before a write that passed its version check: a reason to refuse it (nothing is written, and the
+     * result is `{ ok: false, version, refused }`), or null. `before` null: the row is new; `after`
+     * null: it is deleted. Inside the write's transaction. Only if `watchesRows()`.
+     */
+    protected refuseRowWrite(_key: string, _before: Row | null, _after: Row | null): string | null;
+    /** After a write, in its transaction: the row was `before` and is now `after` at `version`. Only if `watchesRows()`. */
+    protected rowWritten(_key: string, _before: Row | null, _after: Row | null, _version: number): void;
+    /** Whether this class keeps the schema's `globalIndexes` (IndexedTable does). */
+    protected keepsGlobalIndexes(): boolean;
     /** One shard's part of a listing page. */
     tablePage(request: ShardPageRequest): Promise<ShardPage>;
     /** Rows this shard owns. */
@@ -54,7 +72,7 @@ export declare abstract class ShardedTable<Env, Row extends RowShape> extends Sh
     private indexKey;
     private condition;
     /** Brings this shard's storage up to the schema: once per instance, on its first use. */
-    private migrate;
+    protected migrate(): void;
     /**
      * Keeps the count groups of the schema: drops the counts of groups removed or moved to another
      * column, and counts the rows stored (owned or not: counts are per hash prefix, like the rows)
@@ -74,7 +92,7 @@ export declare abstract class ShardedTable<Env, Row extends RowShape> extends Sh
     private countRow;
     private checkKey;
     private encode;
-    private decode;
+    protected decode(stored: Record<string, SqlValue>): Row;
     private q;
     private get db();
 }
