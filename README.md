@@ -1,6 +1,6 @@
 # do-kit
 
-**Building blocks for Cloudflare Durable Objects.** Pick the layer you need:
+**Building blocks for Cloudflare Durable Objects.** The smallest set of layers that lets you pick what fits your app: each adds one capability on top of the one below, and stops there. Use the lowest layer that does the job:
 
 Everything is exported from `@leostera/do-kit`. Each layer also has its own path, if you want to import only that layer.
 

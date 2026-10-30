@@ -70,6 +70,10 @@ to ask every shard:
   decided before this RFD, because callers expect to find what they just wrote.
 - Joins, and queries that combine two global indexes.
 - Splitting one hot index value. All entries with one partition value live on one index shard.
+- Becoming a database. do-kit is the smallest set of layers an app picks from, and this one adds
+  only global indexes. Transactions across many items, an expression language, item expiry, and
+  change feeds to other systems stay out; an app that wants them wants a database such as
+  FokosDB (see Prior art).
 
 ## Guide-level explanation
 
@@ -346,6 +350,13 @@ uniqueness beyond the primary key.
 
 ## Prior art
 
+- **FokosDB** is a DynamoDB-style database on Durable Objects: items by hash and sort key,
+  partitions that split by size, transactions of up to 100 items across partitions, SQLite
+  expressions, item expiry, and change capture. Its GSIs are built from that change capture in the
+  background: reads are eventually consistent, and a GSI does not make a key unique. This RFD makes
+  the opposite trade, write latency for read-your-writes and uniqueness, and builds nothing else of
+  a database. Its producer epochs and fences, which keep a stale writer's changes out of an index,
+  are close to the reservation fences here, and are worth reading before the spec is written.
 - **DynamoDB global secondary indexes** are partitioned by a partition key and sorted by a sort key
   within it, like phase 1. They are updated asynchronously, so reads may be stale, and they cannot
   enforce uniqueness. Here writes wait for the index instead.
