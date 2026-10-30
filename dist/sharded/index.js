@@ -165,6 +165,8 @@ export class ShardedObject extends DurableObject {
     presplitting = null;
     /** This shard had rows when it could have presplit: it splits by load only. */
     presplitDeclined = false;
+    /** The stub options of the last routed call (in memory only): see `stubOptions`. */
+    callerStubOptions = null;
     constructor(ctx, env) {
         super(ctx, env);
         // The alarm is the base class's: it runs splits' work, and a subclass's code after it would
@@ -368,7 +370,8 @@ export class ShardedObject extends DurableObject {
     }
     // ---- The routed call ----
     /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-    async shardedCall(name, bits, method, keys, payloads, args) {
+    async shardedCall(name, bits, method, keys, payloads, args, stubOptions = null) {
+        this.callerStubOptions = stubOptions;
         const answer = await this.arriveSettled(name, bits);
         if (answer)
             return this.answered(answer);
@@ -392,7 +395,8 @@ export class ShardedObject extends DurableObject {
         }
     }
     /** A call to every shard: `method(...args)`, with no keys. */
-    async shardedScan(name, bits, method, args) {
+    async shardedScan(name, bits, method, args, stubOptions = null) {
+        this.callerStubOptions = stubOptions;
         const answer = await this.arriveSettled(name, bits);
         if (answer)
             return this.answered(answer);
@@ -774,9 +778,29 @@ export class ShardedObject extends DurableObject {
     tables() {
         return this.tableList().map((t) => t.name);
     }
+    /**
+     * Options for the stubs this shard makes for others of its object (when it splits, presplits or
+     * activates a sibling). By default, those of the last routed call: the client's `stubOptions`,
+     * such as a version cohort, so a split's new shard runs the version its callers asked for. In
+     * memory only: work an alarm resumes after a restart uses none until the next call. Override to
+     * compute them here instead.
+     */
+    stubOptions() {
+        return this.callerStubOptions;
+    }
+    /**
+     * A stub of another shard of this object, in this shard's jurisdiction: a shard of an object
+     * reached through `namespace.jurisdiction("eu")` makes its shards there too, never through the
+     * plain binding (the same name there is another object, outside the jurisdiction).
+     */
     node(bits) {
-        const nodes = this.nodes();
-        return nodes.get(nodes.idFromName(shardObjectName(this.meta.name, bits)));
+        let nodes = this.nodes();
+        const jurisdiction = this.ctx.id.jurisdiction;
+        if (jurisdiction)
+            nodes = nodes.jurisdiction(jurisdiction);
+        const id = nodes.idFromName(shardObjectName(this.meta.name, bits));
+        const options = this.stubOptions();
+        return options ? nodes.get(id, options) : nodes.get(id);
     }
     async activateSibling() {
         const pending = this.meta?.activate;

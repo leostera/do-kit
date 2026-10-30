@@ -99,6 +99,14 @@ the write against splits (see Invariants).
 
   The client learns from `moved` and retries. It backs off on `notReady` with jitter. After 1 s of
   `notReady`, it forgets the object's splits once and routes from the root.
+- Shards make stubs of other shards (to split, presplit and activate) in their own
+  jurisdiction (`ctx.id.jurisdiction`): an object reached through `namespace.jurisdiction("eu")`
+  keeps every shard there. The same name in the plain namespace is another object.
+- The client's `stubOptions` (a version cohort, a location hint) go into every `get` it makes,
+  and along with each call. A shard makes its own stubs with the options of the last call it
+  served (`stubOptions()`, which a subclass may override), so a split's new shard runs the
+  version its callers asked for. These options are kept in memory only: work an alarm resumes
+  after a restart uses none until the next call.
 
 ### Splitting
 

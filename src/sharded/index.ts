@@ -90,6 +90,12 @@ export function checkSplitPolicy(policy: SplitPolicy): SplitPolicy {
  * `stale` says the caller's map of splits is deeper than this object, so it outlived the storage
  * it was learned from (deleted, then the name used again): the caller forgets it.
  */
+/**
+ * Options for a stub of a shard: those of `namespace.get(id, options)`, and a version cohort (in
+ * the experimental types only, so spelled out here).
+ */
+export type StubOptions = DurableObjectNamespaceGetDurableObjectOptions & { readonly version?: { readonly cohort?: string } };
+
 export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly notReady: string; readonly until?: number } | { readonly stale: string };
 
 /** An object's state, for tests and operators. */
@@ -360,6 +366,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private presplitting: Promise<void> | null = null;
   /** This shard had rows when it could have presplit: it splits by load only. */
   private presplitDeclined = false;
+  /** The stub options of the last routed call (in memory only): see `stubOptions`. */
+  private callerStubOptions: StubOptions | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -562,7 +570,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   // ---- The routed call ----
 
   /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<CallAnswer<unknown>> {
+  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null): Promise<CallAnswer<unknown>> {
+    this.callerStubOptions = stubOptions;
     const answer = await this.arriveSettled(name, bits);
     if (answer) return this.answered(answer);
     this.counters.calls++;
@@ -581,7 +590,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   /** A call to every shard: `method(...args)`, with no keys. */
-  async shardedScan(name: string, bits: string, method: string, args: readonly unknown[]): Promise<CallAnswer<unknown>> {
+  async shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions: StubOptions | null = null): Promise<CallAnswer<unknown>> {
+    this.callerStubOptions = stubOptions;
     const answer = await this.arriveSettled(name, bits);
     if (answer) return this.answered(answer);
     this.counters.calls++;
@@ -940,9 +950,29 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return this.tableList().map((t) => t.name);
   }
 
+  /**
+   * Options for the stubs this shard makes for others of its object (when it splits, presplits or
+   * activates a sibling). By default, those of the last routed call: the client's `stubOptions`,
+   * such as a version cohort, so a split's new shard runs the version its callers asked for. In
+   * memory only: work an alarm resumes after a restart uses none until the next call. Override to
+   * compute them here instead.
+   */
+  protected stubOptions(): StubOptions | null {
+    return this.callerStubOptions;
+  }
+
+  /**
+   * A stub of another shard of this object, in this shard's jurisdiction: a shard of an object
+   * reached through `namespace.jurisdiction("eu")` makes its shards there too, never through the
+   * plain binding (the same name there is another object, outside the jurisdiction).
+   */
   private node(bits: string): DurableObjectStub<ShardedObject<Env, V>> {
-    const nodes = this.nodes() as DurableObjectNamespace<ShardedObject<Env, V>>;
-    return nodes.get(nodes.idFromName(shardObjectName(this.meta!.name, bits)));
+    let nodes = this.nodes() as DurableObjectNamespace<ShardedObject<Env, V>>;
+    const jurisdiction = this.ctx.id.jurisdiction as DurableObjectJurisdiction | undefined;
+    if (jurisdiction) nodes = nodes.jurisdiction(jurisdiction);
+    const id = nodes.idFromName(shardObjectName(this.meta!.name, bits));
+    const options = this.stubOptions();
+    return options ? nodes.get(id, options) : nodes.get(id);
   }
 
   private async activateSibling(): Promise<void> {

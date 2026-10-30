@@ -58,6 +58,15 @@ export declare function checkSplitPolicy(policy: SplitPolicy): SplitPolicy;
  * `stale` says the caller's map of splits is deeper than this object, so it outlived the storage
  * it was learned from (deleted, then the name used again): the caller forgets it.
  */
+/**
+ * Options for a stub of a shard: those of `namespace.get(id, options)`, and a version cohort (in
+ * the experimental types only, so spelled out here).
+ */
+export type StubOptions = DurableObjectNamespaceGetDurableObjectOptions & {
+    readonly version?: {
+        readonly cohort?: string;
+    };
+};
 export type CallAnswer<R> = {
     readonly ok: R;
 } | {
@@ -203,6 +212,8 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private presplitting;
     /** This shard had rows when it could have presplit: it splits by load only. */
     private presplitDeclined;
+    /** The stub options of the last routed call (in memory only): see `stubOptions`. */
+    private callerStubOptions;
     constructor(ctx: DurableObjectState, env: Env);
     /** The current rows of these keys (absent keys are missing from the map). */
     protected read(keys: readonly string[]): Promise<Map<string, V>>;
@@ -274,9 +285,9 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     /** What an update of these keys waits for, if any. */
     private holding;
     /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-    shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<CallAnswer<unknown>>;
+    shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions?: StubOptions | null): Promise<CallAnswer<unknown>>;
     /** A call to every shard: `method(...args)`, with no keys. */
-    shardedScan(name: string, bits: string, method: string, args: readonly unknown[]): Promise<CallAnswer<unknown>>;
+    shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions?: StubOptions | null): Promise<CallAnswer<unknown>>;
     /**
      * The subclass method a routed call or scan names. Never one of this base class's own (its
      * reads and writes, the split protocol, the alarm) nor a runtime handler: a call must not reach
@@ -332,6 +343,19 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      */
     private tableList;
     private tables;
+    /**
+     * Options for the stubs this shard makes for others of its object (when it splits, presplits or
+     * activates a sibling). By default, those of the last routed call: the client's `stubOptions`,
+     * such as a version cohort, so a split's new shard runs the version its callers asked for. In
+     * memory only: work an alarm resumes after a restart uses none until the next call. Override to
+     * compute them here instead.
+     */
+    protected stubOptions(): StubOptions | null;
+    /**
+     * A stub of another shard of this object, in this shard's jurisdiction: a shard of an object
+     * reached through `namespace.jurisdiction("eu")` makes its shards there too, never through the
+     * plain binding (the same name there is another object, outside the jurisdiction).
+     */
     private node;
     private activateSibling;
     /**

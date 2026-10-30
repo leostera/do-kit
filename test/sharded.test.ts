@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
+import type { NodeDescription } from "../src/index.ts";
 import { call, describe, post, requestHeaders, shards, useWorker, workerUrl } from "./harness.ts";
 
 useWorker();
@@ -424,4 +425,30 @@ test("a split copies every subclass table, whatever its name", async () => {
   expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
   const notes = (await post<[string, string][][]>("/scan", { cls: "m", name, method: "notes" })).flat().sort();
   expect(notes).toEqual(KEYS.map((k): [string, string] => [k, `note of ${k}`]).sort());
+}, 60_000);
+
+// workerd has no jurisdictions: deployed only.
+test.skipIf(!deployed)("an object in a jurisdiction splits into shards in that jurisdiction", async () => {
+  const name = `eu-${run++}-${Date.now()}`;
+  const eu = { cls: "m", name, jurisdiction: "eu" };
+  await post("/call", { ...eu, method: "add", keys: KEYS, payloads: KEYS.map(() => 1) });
+  expect(await post("/split", { ...eu, bits: "" })).toBe(true);
+  // Every key is still there through the jurisdiction's namespace: the right half went to its
+  // shard there, which the client reaches.
+  expect(await post("/call", { ...eu, method: "get", keys: KEYS, payloads: null, notReadyWaitMs: 5_000 })).toEqual(KEYS.map(() => 1));
+  expect((await post<NodeDescription>("/describe", { ...eu, bits: "1" })).bits).toBe("1");
+  // The same names outside the jurisdiction are other objects, never used.
+  expect((await describe("m", name, "")).state).toBe("new");
+  expect((await describe("m", name, "1")).state).toBe("new");
+}, 60_000);
+
+test("stub options go with every call, and shards make their stubs with them", async () => {
+  const name = `cohort-${run++}-${Date.now()}`;
+  const stubOptions = { version: { cohort: "canary" } };
+  await post("/call", { cls: "m", name, method: "add", keys: KEYS, payloads: KEYS.map(() => 1), stubOptions });
+  // The split makes its new shard's stub with the options of the last call.
+  expect(await post("/split", { cls: "m", name, bits: "" })).toBe(true);
+  expect(await post("/call", { cls: "m", name, method: "seenStubOptions", keys: KEYS, payloads: null, stubOptions })).toEqual(KEYS.map(() => stubOptions));
+  expect(await post("/call", { cls: "m", name, method: "get", keys: KEYS, payloads: null, stubOptions })).toEqual(KEYS.map(() => 1));
+  expect(await call("m", name, "seenStubOptions", KEYS)).toEqual(KEYS.map(() => null));
 }, 60_000);

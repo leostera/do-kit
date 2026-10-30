@@ -1,3 +1,4 @@
+import { type StubOptions } from "./index.js";
 /** One shard's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface ShardResult<R> {
     readonly keys: readonly string[];
@@ -29,6 +30,12 @@ export declare const MAX_KNOWN_OBJECTS = 10000;
 export interface ShardedClientOptions {
     /** How long a call waits for a shard to start serving, at least (default 30 s). */
     readonly notReadyWaitMs?: number;
+    /**
+     * Options for every stub of this object's shards (`namespace.get(id, stubOptions)`): a version
+     * cohort, a location hint. Sent along with each call, so the stubs shards make for each other,
+     * when they split, carry them too.
+     */
+    readonly stubOptions?: StubOptions;
 }
 export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly namespace;
@@ -36,6 +43,7 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     /** What known splits are filed under: two classes may share a name, never a root ID. */
     private readonly identity;
     private readonly notReadyWaitMs;
+    private readonly stubOptions;
     constructor(namespace: DurableObjectNamespace<T>, name: string, options?: ShardedClientOptions);
     private get splits();
     /** Marks this object as just used, so it is the last its isolate forgets. */

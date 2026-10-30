@@ -1,7 +1,7 @@
 // The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { hashBit, keyHash, shardObjectName, nodeName, type CallAnswer, type ShardedObject } from "./index.js";
+import { hashBit, keyHash, shardObjectName, nodeName, type CallAnswer, type ShardedObject, type StubOptions } from "./index.js";
 
 /** One shard's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface ShardResult<R> {
@@ -52,6 +52,12 @@ const MAX_HELD_WAIT_MS = 10 * 60_000;
 export interface ShardedClientOptions {
   /** How long a call waits for a shard to start serving, at least (default 30 s). */
   readonly notReadyWaitMs?: number;
+  /**
+   * Options for every stub of this object's shards (`namespace.get(id, stubOptions)`): a version
+   * cohort, a location hint. Sent along with each call, so the stubs shards make for each other,
+   * when they split, carry them too.
+   */
+  readonly stubOptions?: StubOptions;
 }
 /**
  * After waiting this long on shards that are not ready, a call forgets the splits it knows of this
@@ -93,11 +99,13 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private readonly identity: string;
 
   private readonly notReadyWaitMs: number;
+  private readonly stubOptions: StubOptions | null;
 
   constructor(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}) {
     this.namespace = namespace;
     this.name = name;
     this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
+    this.stubOptions = options.stubOptions ?? null;
     this.identity = namespace.idFromName(nodeName(name, "")).toString();
   }
 
@@ -131,7 +139,8 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   private stub(bits: string): DurableObjectStub<ShardedObject<never, unknown>> {
     const ns = this.namespace as unknown as DurableObjectNamespace<ShardedObject<never, unknown>>;
-    return ns.get(ns.idFromName(shardObjectName(this.name, bits)));
+    const id = ns.idFromName(shardObjectName(this.name, bits));
+    return this.stubOptions ? ns.get(id, this.stubOptions) : ns.get(id);
   }
 
   /**
@@ -177,7 +186,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
         [...groups].map(async ([bits, positions]) => {
           const groupKeys = positions.map((i) => keys[i]!);
           const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
-          const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args)) as CallAnswer<Result<T[M]>>;
+          const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions)) as CallAnswer<Result<T[M]>>;
           if ("ok" in answer) out.push({ keys: groupKeys, positions, result: answer.ok });
           else if ("moved" in answer) {
             this.learn(answer.moved);
@@ -218,7 +227,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
           return;
         }
-        const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args)) as CallAnswer<Result<T[M]>>;
+        const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args, this.stubOptions)) as CallAnswer<Result<T[M]>>;
         if ("ok" in answer) out.push(answer.ok);
         else if ("moved" in answer) {
           this.learn(answer.moved);

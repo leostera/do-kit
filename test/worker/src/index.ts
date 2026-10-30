@@ -3,7 +3,7 @@
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
 import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
-import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
+import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 
 interface Env {
@@ -152,6 +152,11 @@ export class OldAlarm extends ShardedObject<Env, number> {
 }
 
 class CounterBase extends ShardedObject<Env, number> {
+  /** The stub options this shard would make its stubs with now (see `stubOptions`). */
+  async seenStubOptions(keys: readonly string[], _payloads: null): Promise<unknown[]> {
+    return keys.map(() => this.stubOptions());
+  }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // A subclass table: which keys were added to here (a stand-in for an outbox).
@@ -396,13 +401,14 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (env.TEST_TOKEN && request.headers.get("authorization") !== `Bearer ${env.TEST_TOKEN}`) return new Response("unauthorized", { status: 401 });
     const url = new URL(request.url);
-    const body = (await request.json().catch(() => ({}))) as { cls: string; name: string; method: string; keys: string[]; payloads: unknown[] | null; bits: string; args?: unknown[] };
-    const ns = namespace(env, body.cls);
+    const body = (await request.json().catch(() => ({}))) as { cls: string; name: string; method: string; keys: string[]; payloads: unknown[] | null; bits: string; args?: unknown[]; jurisdiction?: DurableObjectJurisdiction; stubOptions?: StubOptions };
+    // In a jurisdiction, if asked: the same names there are other objects.
+    const ns = body.jurisdiction ? namespace(env, body.cls).jurisdiction(body.jurisdiction) : namespace(env, body.cls);
     try {
       switch (url.pathname) {
         case "/call": {
           const wait = (body as { notReadyWaitMs?: number }).notReadyWaitMs;
-          const options = wait === undefined ? {} : { notReadyWaitMs: wait };
+          const options = { ...(wait === undefined ? {} : { notReadyWaitMs: wait }), ...(body.stubOptions ? { stubOptions: body.stubOptions } : {}) };
           const results = await sharded(ns, body.name, options).call(body.keys, body.method as "get", (body.payloads ?? null) as null);
           // Back in the caller's order.
           const out: unknown[] = new Array(body.keys.length);

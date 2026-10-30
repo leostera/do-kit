@@ -69,10 +69,12 @@ export class ShardedClient {
     /** What known splits are filed under: two classes may share a name, never a root ID. */
     identity;
     notReadyWaitMs;
+    stubOptions;
     constructor(namespace, name, options = {}) {
         this.namespace = namespace;
         this.name = name;
         this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
+        this.stubOptions = options.stubOptions ?? null;
         this.identity = namespace.idFromName(nodeName(name, "")).toString();
     }
     get splits() {
@@ -104,7 +106,8 @@ export class ShardedClient {
     }
     stub(bits) {
         const ns = this.namespace;
-        return ns.get(ns.idFromName(shardObjectName(this.name, bits)));
+        const id = ns.idFromName(shardObjectName(this.name, bits));
+        return this.stubOptions ? ns.get(id, this.stubOptions) : ns.get(id);
     }
     /**
      * Calls `method(keys, payloads, ...args)` on every shard owning some of the keys, with its share
@@ -151,7 +154,7 @@ export class ShardedClient {
             await Promise.all([...groups].map(async ([bits, positions]) => {
                 const groupKeys = positions.map((i) => keys[i]);
                 const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
-                const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args));
+                const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions));
                 if ("ok" in answer)
                     out.push({ keys: groupKeys, positions, result: answer.ok });
                 else if ("moved" in answer) {
@@ -196,7 +199,7 @@ export class ShardedClient {
                     await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
                     return;
                 }
-                const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args));
+                const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args, this.stubOptions));
                 if ("ok" in answer)
                     out.push(answer.ok);
                 else if ("moved" in answer) {
