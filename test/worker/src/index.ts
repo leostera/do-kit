@@ -25,6 +25,7 @@ export const repos = defineTable<Repo>({
   primaryKey: "name",
   columns: { name: "text", id: "text", createdAt: "integer", lastPushAt: "integer", deleted: "boolean", meta: "json" },
   indexes: { byCreated: ["createdAt"], byPush: ["lastPushAt"], byDeletedCreated: ["deleted", "createdAt"] },
+  counts: { byDeleted: "deleted" },
 });
 
 export class Repos extends ShardedTable<Env, Repo> {
@@ -56,6 +57,8 @@ const reposV2 = defineTable<RepoV2>({
   primaryKey: "name",
   columns: { ...repos.columns, stars: "integer" },
   indexes: { byCreated: ["createdAt"], byStars: ["stars"], byDeletedCreated: ["deleted", "createdAt"] },
+  // byDeleted dropped, and the same column counted again under a new name: counted from the rows stored.
+  counts: { deletedAgain: "deleted", byStars: "stars" },
 });
 
 export class EvolvingRepos extends ShardedTable<Env, RepoV2> {

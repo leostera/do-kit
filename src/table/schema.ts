@@ -13,6 +13,17 @@ export interface TableSchema<Row extends RowShape> {
   readonly columns: { readonly [K in keyof Row & string]: ColumnType };
   /** Index name to the columns it sorts by. The primary key is appended to every index. */
   readonly indexes?: Readonly<Record<string, readonly (keyof Row & string)[]>>;
+  /**
+   * Count group name to a column: rows are counted per value of that column, kept with every
+   * write, so `countBy` (and a listing's `withCount`) is exact without reading rows.
+   */
+  readonly counts?: Readonly<Record<string, keyof Row & string>>;
+}
+
+/** Rows with one value of a count group's column. */
+export interface GroupCount {
+  readonly value: unknown;
+  readonly count: number;
 }
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
@@ -33,6 +44,12 @@ export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): Tab
       if (!type) throw new Error(`index ${name}: no column ${col}`);
       if (type === "json") throw new Error(`index ${name}: json column ${col} cannot be indexed`);
     }
+  }
+  for (const [name, col] of Object.entries(schema.counts ?? {})) {
+    if (!IDENTIFIER.test(name)) throw new Error(`count group ${JSON.stringify(name)}: a plain identifier`);
+    const type = schema.columns[col];
+    if (!type) throw new Error(`count group ${name}: no column ${col}`);
+    if (type === "json") throw new Error(`count group ${name}: json column ${col} cannot be counted by value`);
   }
   return schema;
 }
@@ -105,12 +122,21 @@ export interface ListQuery {
   readonly cursor?: string | null;
   /** Rows each shard may scan for one page: 1,000 or 10 × limit by default, at most 10,000. */
   readonly budget?: number;
+  /**
+   * Also count, in the same calls to the shards: `true` for every row (`total`), or a count
+   * group's name for its counts per value too (`counts`). Counts ignore `where`.
+   */
+  readonly withCount?: boolean | string;
 }
 
 export interface ListPage<Row> {
   readonly rows: readonly Versioned<Row>[];
   /** For the next page; null when the listing is done. */
   readonly cursor: string | null;
+  /** With `withCount`: rows in the table, as `count()` says. */
+  readonly total?: number;
+  /** With `withCount` naming a count group: its counts, as `countBy` says. */
+  readonly counts?: readonly GroupCount[];
 }
 
 /**
@@ -125,6 +151,9 @@ export type SqlValue = string | number | null;
 export interface ShardPage {
   readonly rows: readonly { readonly key: string; readonly row: RowShape; readonly version: number; readonly position: Position }[];
   readonly frontier: Position | null;
+  /** Asked for: this shard's rows, and its counts of a group. */
+  readonly total?: number;
+  readonly counts?: readonly GroupCount[];
 }
 
 /** What the client asks each shard for one page. */
@@ -135,6 +164,8 @@ export interface ShardPageRequest {
   readonly limit: number;
   readonly budget: number;
   readonly after: Position | null;
+  /** Count this shard's rows too, and (a group's name) its counts per value. */
+  readonly withCount?: boolean | string;
 }
 
 export const MAX_LIMIT = 1_000;

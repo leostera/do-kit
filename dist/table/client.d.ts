@@ -1,5 +1,5 @@
 import { type ShardedClientOptions } from "../sharded/client.js";
-import { type ListPage, type ListQuery, type Position, type RowShape, type ShardPage, type TableSchema, type ShardPageRequest, type Versioned, type WriteResult } from "./schema.js";
+import { type GroupCount, type ListPage, type ListQuery, type Position, type RowShape, type ShardPage, type TableSchema, type ShardPageRequest, type Versioned, type WriteResult } from "./schema.js";
 /**
  * Rows to ask each of `shards` shards for, to fill `wanted`: keys spread over shards by hash, so
  * each holds about wanted/shards of a page; twice that, plus two, rarely comes up short.
@@ -31,6 +31,11 @@ export declare class TableClient<Row extends RowShape> {
     }): Promise<WriteResult>;
     /** Rows in the whole table: exact unless a split commits during the count. */
     count(): Promise<number>;
+    /**
+     * Rows of the whole table per value of a count group's column (values with no rows left out),
+     * kept with every write: as exact as `count()`.
+     */
+    countBy(group: string): Promise<GroupCount[]>;
     /**
      * One page of a listing across every shard. Pass the page's cursor back for the next one;
      * a null cursor means the listing is done. A page may hold fewer than `limit` rows (a sparse

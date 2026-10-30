@@ -194,6 +194,77 @@ test("count follows inserts, deletes and splits", async () => {
   expect(await op(name, "count")).toBe(70);
 }, 60_000);
 
+type Counted = { value: unknown; count: number }[];
+const byValue = (counts: Counted) => Object.fromEntries(counts.map((c) => [String(c.value), c.count]));
+const reference = (rows: Map<string, Repo>) => {
+  const out: Record<string, number> = {};
+  for (const r of rows.values()) out[String(r.deleted)] = (out[String(r.deleted)] ?? 0) + 1;
+  return out;
+};
+
+test("counts per value follow puts, patches, deletes and splits, and come with a listing", async () => {
+  const name = `count-by-${Date.now()}`;
+  const rows = new Map(makeRepos(120).map((r) => [r.name, r]));
+  await op(name, "putMany", [...rows.values()].map((row) => ({ row })));
+  const check = async () => {
+    expect(byValue(await op<Counted>(name, "countBy", "byDeleted"))).toEqual(reference(rows));
+    const page = await op<Page & { total: number; counts: Counted }>(name, "list", { index: "byCreated", where: [{ column: "deleted", op: "=", value: false }], limit: 5, withCount: "byDeleted" });
+    expect(page.rows).toHaveLength(5);
+    expect(page.total).toBe(rows.size);
+    expect(byValue(page.counts)).toEqual(reference(rows));
+    expect((await op<Page & { total: number; counts?: Counted }>(name, "list", { limit: 3, withCount: true })).total).toBe(rows.size);
+  };
+  await check();
+
+  const names = [...rows.keys()];
+  // Patch some live rows to deleted, put whole rows back as live, delete a few of each.
+  for (const key of names.slice(1, 9)) {
+    await op(name, "patch", key, { deleted: true });
+    rows.set(key, { ...rows.get(key)!, deleted: true });
+  }
+  for (const key of names.filter((k) => rows.get(k)!.deleted).slice(0, 4)) {
+    await op(name, "put", { ...rows.get(key)!, deleted: false });
+    rows.set(key, { ...rows.get(key)!, deleted: false });
+  }
+  await op(name, "patch", names[20]!, { lastPushAt: 1 }); // not a counted column
+  rows.set(names[20]!, { ...rows.get(names[20]!)!, lastPushAt: 1 });
+  for (const key of names.slice(30, 45)) {
+    await op(name, "delete", key);
+    rows.delete(key);
+  }
+  await check();
+
+  // Splits with cleanup held back: both shards store rows they gave away, counted once.
+  await op(name, "scan", "pauseCleanup", true);
+  expect(await split(name, "")).toBe(true);
+  await check();
+  expect(await split(name, "1")).toBe(true);
+  await check();
+  await op(name, "scan", "pauseCleanup", false);
+  for (let i = 0; ; i++) {
+    const stored = await op<number[]>(name, "scan", "storedRows");
+    if (stored.reduce((a, b) => a + b, 0) === rows.size) break;
+    if (i > 200) throw new Error(`cleanup did not finish: ${stored}`);
+    await Bun.sleep(50);
+  }
+  await check();
+  await expect(op(name, "countBy", "nope")).rejects.toThrow("no count group nope");
+}, 120_000);
+
+test("a new count group counts the rows already stored", async () => {
+  const name = `count-group-evolve-${Date.now()}`;
+  const evolve = <T>(operation: string, ...args: unknown[]) => post<T>("/table", { cls: "evolving", name, op: operation, args });
+  const rows = makeRepos(40);
+  await evolve("putMany", rows.map((row) => ({ row })));
+  await evolve("upgrade");
+  const deleted = rows.filter((r) => r.deleted).length;
+  expect(byValue(await evolve<Counted>("countBy", "deletedAgain"))).toEqual({ false: rows.length - deleted, true: deleted });
+  expect(byValue(await evolve<Counted>("countBy", "byStars"))).toEqual({ null: rows.length });
+  await evolve("patch", rows[1]!.name, { stars: 3 });
+  expect(byValue(await evolve<Counted>("countBy", "byStars"))).toEqual({ null: rows.length - 1, 3: 1 });
+  await expect(evolve("countBy", "byDeleted")).rejects.toThrow("no count group byDeleted");
+}, 60_000);
+
 test("a cursor only continues the query it came from", async () => {
   const name = `cursor-${Date.now()}`;
   await op(name, "putMany", makeRepos(20).map((row) => ({ row })));

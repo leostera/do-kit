@@ -28,12 +28,12 @@
     "src/sharded/index.ts#ShardedObject.split": "9eee4bdcfde5",
     "src/sharded/index.ts#ShardedObject.update": "e757c263164b",
     "src/sharded/index.ts#ShardedObject.waitForHold": "b4d682f943bf",
-    "src/table/client.ts#TableClient.list": "d35008e23e6d",
+    "src/table/client.ts#TableClient.list": "dc8f5a4e57a7",
     "src/table/client.ts#mergePages": "2edd6fab6b9c",
     "src/table/client.ts#perShardLimit": "4fb242e403e9",
-    "src/table/index.ts#ShardedTable.cleanupForeign": "46ce9716e350",
-    "src/table/index.ts#ShardedTable.page": "39b409eb6be6",
-    "src/table/index.ts#ShardedTable.tablePage": "d4a1840db67f",
+    "src/table/index.ts#ShardedTable.cleanupForeign": "4211d2731091",
+    "src/table/index.ts#ShardedTable.page": "dc479b030161",
+    "src/table/index.ts#ShardedTable.tablePage": "4c3f95575761",
     "src/table/schema.ts#pageRequest": "c129ce2d7ccb"
   }
 }

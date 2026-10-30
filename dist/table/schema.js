@@ -25,6 +25,15 @@ export function defineTable(schema) {
                 throw new Error(`index ${name}: json column ${col} cannot be indexed`);
         }
     }
+    for (const [name, col] of Object.entries(schema.counts ?? {})) {
+        if (!IDENTIFIER.test(name))
+            throw new Error(`count group ${JSON.stringify(name)}: a plain identifier`);
+        const type = schema.columns[col];
+        if (!type)
+            throw new Error(`count group ${name}: no column ${col}`);
+        if (type === "json")
+            throw new Error(`count group ${name}: json column ${col} cannot be counted by value`);
+    }
     return schema;
 }
 /**

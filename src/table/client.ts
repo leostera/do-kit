@@ -6,6 +6,7 @@ import {
   encodeCursor,
   pageRequest,
   queryFingerprint,
+  type GroupCount,
   type ListPage,
   type ListQuery,
   type Position,
@@ -25,6 +26,7 @@ interface TableMethods {
   tableDelete(keys: readonly string[], payloads: readonly { ifVersion?: number }[] | null): Promise<WriteResult[]>;
   tablePage(request: ShardPageRequest): Promise<ShardPage>;
   tableCount(): Promise<number>;
+  tableCountBy(group: string): Promise<GroupCount[]>;
 }
 
 type Untyped = {
@@ -93,6 +95,14 @@ export class TableClient<Row extends RowShape> {
   }
 
   /**
+   * Rows of the whole table per value of a count group's column (values with no rows left out),
+   * kept with every write: as exact as `count()`.
+   */
+  async countBy(group: string): Promise<GroupCount[]> {
+    return sumGroups((await this.client.scan("tableCountBy", group)) as GroupCount[][]);
+  }
+
+  /**
    * One page of a listing across every shard. Pass the page's cursor back for the next one;
    * a null cursor means the listing is done. A page may hold fewer than `limit` rows (a sparse
    * filter ran out of budget) and still have a cursor.
@@ -104,10 +114,17 @@ export class TableClient<Row extends RowShape> {
     const request = pageRequest(query, after);
     const rows: ShardPage["rows"][number][] = [];
     let next: Position | null = after;
+    let counted: { total?: number; counts?: GroupCount[] } = {};
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const wanted = request.limit - rows.length;
       const limit = perShardLimit(wanted, await this.client.knownShardCount());
-      const pages = (await this.client.scan("tablePage", { ...request, limit, after: next })) as ShardPage[];
+      // Counts come with the first round's pages: the same calls to the same shards.
+      const withCount = round === 0 && query.withCount ? { withCount: query.withCount } : {};
+      const pages = (await this.client.scan("tablePage", { ...request, limit, after: next, ...withCount })) as ShardPage[];
+      if (round === 0 && query.withCount) {
+        counted = { total: pages.reduce((n, p) => n + (p.total ?? 0), 0) };
+        if (typeof query.withCount === "string") counted.counts = sumGroups(pages.map((p) => p.counts ?? []));
+      }
       const merged = mergePages(pages, { limit: wanted, direction: request.direction });
       rows.push(...merged.rows);
       next = merged.next;
@@ -116,6 +133,7 @@ export class TableClient<Row extends RowShape> {
     return {
       rows: rows.map(({ row, version }) => ({ row: row as Row, version })),
       cursor: next === null ? null : encodeCursor(fingerprint, next),
+      ...counted,
     };
   }
 
@@ -140,6 +158,18 @@ export class TableClient<Row extends RowShape> {
     for (const group of await this.client.call(keys, method, payloads)) group.positions.forEach((p, i) => (out[p] = group.result[i] as R));
     return out;
   }
+}
+
+/** Sums counts per value over shards, leaving out values with none. */
+function sumGroups(perShard: readonly (readonly GroupCount[])[]): GroupCount[] {
+  const sums = new Map<string, GroupCount>();
+  for (const counts of perShard) {
+    for (const { value, count } of counts) {
+      const key = JSON.stringify(value);
+      sums.set(key, { value, count: (sums.get(key)?.count ?? 0) + count });
+    }
+  }
+  return [...sums.values()].filter((c) => c.count !== 0);
 }
 
 /**

@@ -126,6 +126,7 @@ const repos = defineTable<Repo>({
   primaryKey: "name", // also what routes a row to its shard
   columns: { name: "text", id: "text", createdAt: "integer", lastPushAt: "integer", deleted: "boolean" },
   indexes: { byCreated: ["createdAt"], byPush: ["lastPushAt"] },
+  counts: { byDeleted: "deleted" }, // rows per value of a column, kept with every write
 });
 
 export class Repos extends ShardedTable<Env, Repo> {
@@ -142,7 +143,7 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 
 - **Writes** (`put`, `patch`, `delete`, and batches) are conditional on a version per row: `ifVersion: 0` means "only if absent". Each is one transaction with its index entries, fenced against splits. A key never has the same version twice: a row written again after a delete starts above the versions of the rows its shard deleted, so a write conditional on a version read before the delete fails. That costs a delete one more row written.
 - **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring case).
-- **Counts** are kept per hash prefix, so `count()` is cheap and exact at any depth up to 16.
+- **Counts** are kept per hash prefix with every write, so `count()` is cheap and exact at any depth up to 16. Declare `counts` groups to also count rows per value of a column: `countBy("byDeleted")` returns `[{ value: false, count: 812 }, { value: true, count: 40 }]`, just as cheaply. A listing takes `withCount: true` (or a group's name) and returns `total` (and `counts`) from the same calls to the shards, so a page with its total costs one fan-out, not two. Counts don't take `where`: counting arbitrary conditions would read every row of every shard.
 - **Schema changes:** add columns and indexes in the schema; each shard applies them the first time it runs the new code.
 - Custom transactional methods use `getRow`, `putRow`, `patchRow` and `deleteRow` inside `transact`.
 

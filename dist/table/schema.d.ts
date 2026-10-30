@@ -10,6 +10,16 @@ export interface TableSchema<Row extends RowShape> {
     };
     /** Index name to the columns it sorts by. The primary key is appended to every index. */
     readonly indexes?: Readonly<Record<string, readonly (keyof Row & string)[]>>;
+    /**
+     * Count group name to a column: rows are counted per value of that column, kept with every
+     * write, so `countBy` (and a listing's `withCount`) is exact without reading rows.
+     */
+    readonly counts?: Readonly<Record<string, keyof Row & string>>;
+}
+/** Rows with one value of a count group's column. */
+export interface GroupCount {
+    readonly value: unknown;
+    readonly count: number;
 }
 /** Checks a schema and returns it: names are plain identifiers, the key is text, indexes name columns. */
 export declare function defineTable<Row extends RowShape>(schema: TableSchema<Row>): TableSchema<Row>;
@@ -50,11 +60,20 @@ export interface ListQuery {
     readonly cursor?: string | null;
     /** Rows each shard may scan for one page: 1,000 or 10 × limit by default, at most 10,000. */
     readonly budget?: number;
+    /**
+     * Also count, in the same calls to the shards: `true` for every row (`total`), or a count
+     * group's name for its counts per value too (`counts`). Counts ignore `where`.
+     */
+    readonly withCount?: boolean | string;
 }
 export interface ListPage<Row> {
     readonly rows: readonly Versioned<Row>[];
     /** For the next page; null when the listing is done. */
     readonly cursor: string | null;
+    /** With `withCount`: rows in the table, as `count()` says. */
+    readonly total?: number;
+    /** With `withCount` naming a count group: its counts, as `countBy` says. */
+    readonly counts?: readonly GroupCount[];
 }
 /**
  * A row's place in an index: its index key (the index's values and the row's key, in an
@@ -72,6 +91,9 @@ export interface ShardPage {
         readonly position: Position;
     }[];
     readonly frontier: Position | null;
+    /** Asked for: this shard's rows, and its counts of a group. */
+    readonly total?: number;
+    readonly counts?: readonly GroupCount[];
 }
 /** What the client asks each shard for one page. */
 export interface ShardPageRequest {
@@ -81,6 +103,8 @@ export interface ShardPageRequest {
     readonly limit: number;
     readonly budget: number;
     readonly after: Position | null;
+    /** Count this shard's rows too, and (a group's name) its counts per value. */
+    readonly withCount?: boolean | string;
 }
 export declare const MAX_LIMIT = 1000;
 export declare const MAX_BUDGET = 10000;

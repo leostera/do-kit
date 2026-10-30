@@ -47,6 +47,13 @@ export class TableClient {
         return (await this.client.scan("tableCount")).reduce((a, b) => a + b, 0);
     }
     /**
+     * Rows of the whole table per value of a count group's column (values with no rows left out),
+     * kept with every write: as exact as `count()`.
+     */
+    async countBy(group) {
+        return sumGroups((await this.client.scan("tableCountBy", group)));
+    }
+    /**
      * One page of a listing across every shard. Pass the page's cursor back for the next one;
      * a null cursor means the listing is done. A page may hold fewer than `limit` rows (a sparse
      * filter ran out of budget) and still have a cursor.
@@ -58,10 +65,18 @@ export class TableClient {
         const request = pageRequest(query, after);
         const rows = [];
         let next = after;
+        let counted = {};
         for (let round = 0; round < MAX_ROUNDS; round++) {
             const wanted = request.limit - rows.length;
             const limit = perShardLimit(wanted, await this.client.knownShardCount());
-            const pages = (await this.client.scan("tablePage", { ...request, limit, after: next }));
+            // Counts come with the first round's pages: the same calls to the same shards.
+            const withCount = round === 0 && query.withCount ? { withCount: query.withCount } : {};
+            const pages = (await this.client.scan("tablePage", { ...request, limit, after: next, ...withCount }));
+            if (round === 0 && query.withCount) {
+                counted = { total: pages.reduce((n, p) => n + (p.total ?? 0), 0) };
+                if (typeof query.withCount === "string")
+                    counted.counts = sumGroups(pages.map((p) => p.counts ?? []));
+            }
             const merged = mergePages(pages, { limit: wanted, direction: request.direction });
             rows.push(...merged.rows);
             next = merged.next;
@@ -71,6 +86,7 @@ export class TableClient {
         return {
             rows: rows.map(({ row, version }) => ({ row: row, version })),
             cursor: next === null ? null : encodeCursor(fingerprint, next),
+            ...counted,
         };
     }
     /** Every row of a query, page after page. */
@@ -94,6 +110,17 @@ export class TableClient {
             group.positions.forEach((p, i) => (out[p] = group.result[i]));
         return out;
     }
+}
+/** Sums counts per value over shards, leaving out values with none. */
+function sumGroups(perShard) {
+    const sums = new Map();
+    for (const counts of perShard) {
+        for (const { value, count } of counts) {
+            const key = JSON.stringify(value);
+            sums.set(key, { value, count: (sums.get(key)?.count ?? 0) + count });
+        }
+    }
+    return [...sums.values()].filter((c) => c.count !== 0);
 }
 /**
  * Merges one page from every shard: every shard reported every match up to the smallest frontier,

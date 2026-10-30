@@ -136,6 +136,18 @@ store all prefixes, but each sums only its own range, so there is nothing to rec
 object's count is the sum over shards. It may count a row twice or not at all for the instant of
 a split commit.
 
+**Count groups** (`counts: { byStatus: "status" }` in the schema) count rows per value of a
+column the same way: `sharded_table_group_counts` holds (group, value, prefix) → rows, updated
+in the write's transaction when a row is added, deleted, or changes that column. `countBy`
+sums a shard's range per value. A new group is counted from the rows stored (owned or not, as
+the counts are per prefix) on the shard's first use of the schema; a removed group's counts are
+dropped. Cleanup deletes the prefixes a shard gave away, as for the rows.
+
+A listing with `withCount` gets each shard's count (and a group's counts) with that shard's
+first page, so a page and its total are one call per shard. Counts ignore `where`: an exact
+count of arbitrary conditions would read every matching row on every shard, every time. Count
+the values you filter on with a group instead.
+
 ## API
 
 ```ts
@@ -151,6 +163,8 @@ await t.put({ name: "foo", id: "r1", createdAt: Date.now(), lastPushAt: null, de
 const row = await t.get("foo");
 const page = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "deleted", op: "=", value: false }], limit: 50 });
 const next = await t.list({ ...sameQuery, cursor: page.cursor });
+const { rows, cursor, total, counts } = await t.list({ ...sameQuery, withCount: "byStatus" }); // one fan-out
+const perStatus = await t.countBy("byStatus"); // [{ value: "ready", count: 812 }, ...]
 ```
 
 `where` conditions: `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix`, and
