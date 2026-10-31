@@ -11,3 +11,4 @@ that capability belongs in it rather than in a layer above, or in the app.
 | [RFD0001](RFD0001-sharded-object.md) | Sharded objects | Implemented (snapshot) |
 | [RFD0002](RFD0002-sharded-table.md) | Sharded tables | Implemented (snapshot) |
 | [RFD0003](RFD0003-indexed-table.md) | Indexed tables: global indexes across shards | Draft (phase 1 built) |
+| [RFD0004](RFD0004-leased-reads.md) | Leased reads for hot keys | Draft |
