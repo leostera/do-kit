@@ -178,7 +178,9 @@ See [`bench/README.md`](../bench/README.md).
 
 ## Presplitting
 
-With `initialDepth`, the first calls to a new object wait while it creates its shards. Measured with 64 concurrent first calls to a fresh name (`POST /first-calls` on the bench Worker), 5 runs each:
+Presplitting is now lazy: no shard above `initialDepth` is created, each shard at that depth creates itself on its first call (asking the root for the tree's depth, once), and every "moved" answer tells the client the depth, so it routes straight to it. A first call costs at most two hops and one object creation, whatever the depth. Before, a client learned one level per answer, so each isolate asked the shards above (shared by every key) for every path, and those overloaded under many isolates. The measurements below are of the eager presplit it replaced.
+
+With the eager presplit, the first calls to a new object waited while it created its shards. Measured with 64 concurrent first calls to a fresh name (`POST /first-calls` on the bench Worker), 5 runs each:
 
 | Shards | Before | Now |
 |---|---|---|

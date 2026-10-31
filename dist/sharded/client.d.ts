@@ -48,6 +48,10 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private get splits();
     /** Marks this object as just used, so it is the last its isolate forgets. */
     private touch;
+    /** The presplit depth known for this object (0: none known). */
+    private get presplitTo();
+    /** Whether the node `bits` is known to be split: above the presplit depth, or seen splitting. */
+    private isSplit;
     /** The deepest known node owning a hash. */
     private shardFor;
     private stub;
@@ -66,8 +70,10 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     scan<M extends ScanMethods<T>>(method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<Result<T[M]>[]>;
     /** How many shards this client knows of: one more than its known splits. There may be more. */
     knownShardCount(): Promise<number>;
-    /** The known splits (for tests and operators). */
+    /** The known splits seen in answers (for tests and operators); the presplit levels are not listed. */
     knownSplits(): string[];
+    /** The presplit depth this client knows of the object (0: none known). */
+    knownPresplit(): number;
     /** Drops what this client knows of the object's splits, here and in the colo: it was stale. */
     private forget;
     private learn;

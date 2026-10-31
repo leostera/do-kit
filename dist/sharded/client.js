@@ -5,12 +5,19 @@ import { hashBit, keyHash, shardObjectName, nodeName } from "./index.js";
 /** Keys that had to go to one shard belong to several (nothing was applied). */
 export class SpansShards extends Error {
 }
-const CACHE_ORIGIN = "https://do-kit.invalid/";
+/** v2: the splits and the presplit depth (v1 entries, splits only, are left to expire). */
+const CACHE_ORIGIN = "https://do-kit.invalid/v2/";
 /**
  * Splits known per object (keyed by its root's Durable Object ID, unique per namespace and
  * name), shared by every client in this isolate.
  */
 const knownSplits = new Map();
+/**
+ * Each object's presplit depth, once a shard said so: every node above it is split (it never
+ * existed), so calls go straight to that depth. Without it, each isolate would ask the shards
+ * above, one hop per level, for every path: the top ones are shared by all keys and overload.
+ */
+const knownPresplit = new Map();
 const loadedFromCache = new Set();
 /**
  * Objects whose splits an isolate keeps, the most recently used: a Worker that reaches one object
@@ -84,6 +91,7 @@ export class ShardedClient {
             if (knownSplits.size > MAX_KNOWN_OBJECTS) {
                 const oldest = knownSplits.keys().next().value;
                 knownSplits.delete(oldest);
+                knownPresplit.delete(oldest);
                 loadedFromCache.delete(oldest);
             }
         }
@@ -97,10 +105,18 @@ export class ShardedClient {
         knownSplits.delete(this.identity);
         knownSplits.set(this.identity, set);
     }
+    /** The presplit depth known for this object (0: none known). */
+    get presplitTo() {
+        return knownPresplit.get(this.identity) ?? 0;
+    }
+    /** Whether the node `bits` is known to be split: above the presplit depth, or seen splitting. */
+    isSplit(bits) {
+        return bits.length < this.presplitTo || this.splits.has(bits);
+    }
     /** The deepest known node owning a hash. */
     shardFor(hash) {
         let bits = "";
-        while (this.splits.has(bits))
+        while (this.isSplit(bits))
             bits += hashBit(hash, bits.length);
         return bits;
     }
@@ -154,11 +170,11 @@ export class ShardedClient {
             await Promise.all([...groups].map(async ([bits, positions]) => {
                 const groupKeys = positions.map((i) => keys[i]);
                 const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
-                const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions));
+                const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo));
                 if ("ok" in answer)
                     out.push({ keys: groupKeys, positions, result: answer.ok });
                 else if ("moved" in answer) {
-                    this.learn(answer.moved);
+                    this.learn(answer.moved, answer.presplit);
                     retry.push(...positions);
                 }
                 else if ("stale" in answer) {
@@ -195,15 +211,15 @@ export class ShardedClient {
                     throw new Error(`sharded ${this.name}: scan did not settle`);
                 if (stale)
                     return;
-                if (this.splits.has(bits)) {
+                if (this.isSplit(bits)) {
                     await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
                     return;
                 }
-                const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args, this.stubOptions));
+                const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo));
                 if ("ok" in answer)
                     out.push(answer.ok);
                 else if ("moved" in answer) {
-                    this.learn(answer.moved);
+                    this.learn(answer.moved, answer.presplit);
                     await visit(bits, depth + 1);
                 }
                 else if ("stale" in answer) {
@@ -227,22 +243,40 @@ export class ShardedClient {
     /** How many shards this client knows of: one more than its known splits. There may be more. */
     async knownShardCount() {
         await this.loadCache();
-        return this.splits.size + 1;
+        let splits = 0;
+        const count = (bits) => {
+            if (!this.isSplit(bits))
+                return;
+            splits++;
+            count(`${bits}0`);
+            count(`${bits}1`);
+        };
+        count("");
+        return splits + 1;
     }
-    /** The known splits (for tests and operators). */
+    /** The known splits seen in answers (for tests and operators); the presplit levels are not listed. */
     knownSplits() {
         return [...this.splits].sort();
+    }
+    /** The presplit depth this client knows of the object (0: none known). */
+    knownPresplit() {
+        return this.presplitTo;
     }
     /** Drops what this client knows of the object's splits, here and in the colo: it was stale. */
     forget() {
         this.splits.clear();
+        knownPresplit.delete(this.identity);
         void this.saveCache();
     }
-    learn(bits) {
-        if (this.splits.has(bits))
+    learn(bits, presplit) {
+        const newDepth = presplit !== undefined && presplit !== this.presplitTo;
+        if (newDepth)
+            knownPresplit.set(this.identity, presplit);
+        if (this.isSplit(bits) && !newDepth)
             return;
-        // A node that split had split ancestors: all of them are known to be split.
-        for (let i = 0; i <= bits.length; i++)
+        // A node that split had split ancestors: all of them are known to be split. Those above the
+        // presplit depth are known without listing them.
+        for (let i = this.presplitTo; i <= bits.length; i++)
             this.splits.add(bits.slice(0, i));
         void this.saveCache();
     }
@@ -253,9 +287,13 @@ export class ShardedClient {
         loadedFromCache.add(this.identity);
         try {
             const hit = await caches.default.match(CACHE_ORIGIN + this.identity);
-            if (hit)
-                for (const bits of (await hit.json()))
-                    this.splits.add(bits);
+            if (!hit)
+                return;
+            const cached = (await hit.json());
+            for (const bits of cached.splits)
+                this.splits.add(bits);
+            if (cached.presplit > 0 && !knownPresplit.has(this.identity))
+                knownPresplit.set(this.identity, cached.presplit);
         }
         catch {
             // the cache is an optimisation only
@@ -265,7 +303,7 @@ export class ShardedClient {
         if (typeof caches === "undefined")
             return;
         try {
-            const body = JSON.stringify([...this.splits]);
+            const body = JSON.stringify({ splits: [...this.splits], presplit: this.presplitTo });
             await caches.default.put(CACHE_ORIGIN + this.identity, new Response(body, { headers: { "cache-control": "max-age=86400", "content-type": "application/json" } }));
         }
         catch {

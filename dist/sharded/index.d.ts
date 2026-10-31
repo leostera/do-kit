@@ -24,8 +24,9 @@ export interface SplitPolicy {
      */
     readonly keysPerCall?: number;
     /**
-     * Depth a new object splits to before its first call, while empty: for uniform keys (hashes), so
-     * a fresh object starts with 2^initialDepth shards and nothing to copy.
+     * Depth a new tree starts at, for uniform keys (hashes): 2^initialDepth empty shards, each
+     * created by its first call, and clients route straight to them. Read when a tree's root is
+     * first called, and recorded there: changing it later applies to new names only.
      */
     readonly initialDepth?: number;
     /**
@@ -67,10 +68,12 @@ export type StubOptions = DurableObjectNamespaceGetDurableObjectOptions & {
         readonly cohort?: string;
     };
 };
+/** `presplit`, on "moved": the tree's initial depth, so the client routes to it directly. */
 export type CallAnswer<R> = {
     readonly ok: R;
 } | {
     readonly moved: string;
+    readonly presplit?: number;
 } | {
     readonly notReady: string;
     readonly until?: number;
@@ -81,6 +84,8 @@ export type CallAnswer<R> = {
 export interface NodeDescription {
     /** The bits of the shard this object hosts now. */
     readonly bits: string;
+    /** The tree's initial depth, as this shard knows it (0: none). */
+    readonly presplit: number;
     /** "copy": a split's copy that does not serve yet; "new": never used. */
     readonly state: "shard" | "splitting" | "copy" | "new";
     /** Rows of keys this object owns. */
@@ -208,10 +213,6 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private counters;
     /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
     private receiving;
-    /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
-    private presplitting;
-    /** This shard had rows when it could have presplit: it splits by load only. */
-    private presplitDeclined;
     /** The stub options of the last routed call (in memory only): see `stubOptions`. */
     private callerStubOptions;
     constructor(ctx: DurableObjectState, env: Env);
@@ -285,9 +286,9 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     /** What an update of these keys waits for, if any. */
     private holding;
     /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-    shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions?: StubOptions | null): Promise<CallAnswer<unknown>>;
+    shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions?: StubOptions | null, presplitTo?: number): Promise<CallAnswer<unknown>>;
     /** A call to every shard: `method(...args)`, with no keys. */
-    shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions?: StubOptions | null): Promise<CallAnswer<unknown>>;
+    shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions?: StubOptions | null, presplitTo?: number): Promise<CallAnswer<unknown>>;
     /**
      * The subclass method a routed call or scan names. Never one of this base class's own (its
      * reads and writes, the split protocol, the alarm) nor a runtime handler: a call must not reach
@@ -299,13 +300,26 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     /** "moved" for a call addressed to `bits`: this shard went deeper, so `bits` and more split. */
     private moved;
     /**
-     * Null if this object serves `bits` now; otherwise what to answer. Splits to the initial depth
-     * first if this shard is above it and empty: every call waits for that.
+     * `arrive`, for an object reached with the depth the client learned (`presplitTo`): a new
+     * object at that depth, or above it on its all-zeros path (the same object, by its name),
+     * creates itself empty, if the tree's root says the tree has that depth. One call to the root
+     * per shard, ever: the root fixed the depth when it was first called, so a client that
+     * remembers another (the name's storage was deleted, and `initialDepth` changed) is told its map
+     * is stale, and learns the depth again (specs/lazy-presplit.ts). Safe because no shard above the
+     * initial depth ever holds rows: none is created.
      */
-    private arriveSettled;
-    /** Whether this object serves `bits`, initialising the root on its first call. */
+    private arriveOrCreate;
+    /** The root's answer to a new shard: the tree's presplit depth, creating the root if it is new. */
+    shardedTreeDepth(name: string): Promise<number>;
+    /** A new shard, empty and serving: the root (at the initial depth), or one at the tree's depth. */
+    private create;
+    /**
+     * Whether this object serves `bits`; null if it does, else what to answer. A new root object
+     * creates itself, as the all-zeros shard at this class's initial depth, which fixes the tree's
+     * (a caller that expected another depth is then moved, or told its map is stale); any other new
+     * object is a split's copy that has not arrived, or a name whose storage is gone.
+     */
     private arrive;
-    private presplit;
     private loadMeta;
     private saveMeta;
     private countCall;
@@ -438,7 +452,6 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     /** Starts serving, if this is the copy of attempt `epoch`. */
     shardedActivate(name: string, bits: string, epoch: number): Promise<boolean>;
     /** The right half of an empty shard's initial split: empty, and serving at once. */
-    shardedAdoptEmpty(name: string, bits: string, parent: string): Promise<void>;
     shardedDescribe(): Promise<NodeDescription>;
 }
 //# sourceMappingURL=index.d.ts.map

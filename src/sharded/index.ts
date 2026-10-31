@@ -10,7 +10,11 @@
 // final, so a client's map of splits can only lack some: it stops too shallow, and the object it
 // reaches answers "moved".
 //
-// The protocol is modelled in specs/snapshot-split.ts.
+// With `initialDepth` N, a tree starts with 2^N empty shards, created lazily: each depth-N
+// object makes itself on its first call, and every answer tells the client N (`presplit`), so it
+// routes straight to depth N without asking the shards above (which never exist).
+//
+// The protocol is modelled in specs/snapshot-split.ts and specs/lazy-presplit.ts.
 import { DurableObject } from "cloudflare:workers";
 import { createHash } from "node:crypto";
 
@@ -38,8 +42,9 @@ export interface SplitPolicy {
    */
   readonly keysPerCall?: number;
   /**
-   * Depth a new object splits to before its first call, while empty: for uniform keys (hashes), so
-   * a fresh object starts with 2^initialDepth shards and nothing to copy.
+   * Depth a new tree starts at, for uniform keys (hashes): 2^initialDepth empty shards, each
+   * created by its first call, and clients route straight to them. Read when a tree's root is
+   * first called, and recorded there: changing it later applies to new names only.
    */
   readonly initialDepth?: number;
   /**
@@ -96,12 +101,15 @@ export function checkSplitPolicy(policy: SplitPolicy): SplitPolicy {
  */
 export type StubOptions = DurableObjectNamespaceGetDurableObjectOptions & { readonly version?: { readonly cohort?: string } };
 
-export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string } | { readonly notReady: string; readonly until?: number } | { readonly stale: string };
+/** `presplit`, on "moved": the tree's initial depth, so the client routes to it directly. */
+export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string; readonly presplit?: number } | { readonly notReady: string; readonly until?: number } | { readonly stale: string };
 
 /** An object's state, for tests and operators. */
 export interface NodeDescription {
   /** The bits of the shard this object hosts now. */
   readonly bits: string;
+  /** The tree's initial depth, as this shard knows it (0: none). */
+  readonly presplit: number;
   /** "copy": a split's copy that does not serve yet; "new": never used. */
   readonly state: "shard" | "splitting" | "copy" | "new";
   /** Rows of keys this object owns. */
@@ -192,9 +200,6 @@ type Steps = { -readonly [K in keyof SplitSteps]: SplitSteps[K] };
 
 /** A split in progress: writes to `right` wait for `released`, and are counted for its record. */
 type Hold = { epoch: number; right: string; released: Promise<void>; deadline: number; held: number; notReady: number; heldMsMax: number };
-
-/** Levels one presplit round adopts at once: at most 63 new shards, so subrequests stay bounded. */
-const PRESPLIT_LEVELS = 6;
 
 /** How many split attempts a shard remembers. */
 const SPLIT_HISTORY = 8;
@@ -318,6 +323,11 @@ interface Meta {
   cleanup: (readonly [string, string])[];
   /** The subclass still has rows for keys it no longer owns: the alarm calls `cleanupForeign`. */
   foreign?: boolean;
+  /**
+   * The tree's initial depth (`initialDepth` when its root was first called): shards at this
+   * depth create themselves. Every shard of the tree records the same one.
+   */
+  presplit?: number;
   /** The shard this one split from and when (null for the root). */
   parent: string | null;
   splitAt: number;
@@ -362,10 +372,6 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private counters = { since: Date.now(), calls: 0, ok: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
   /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
   private receiving: number | null = null;
-  /** An empty shard splitting to the initial depth; calls wait for it, then are moved. */
-  private presplitting: Promise<void> | null = null;
-  /** This shard had rows when it could have presplit: it splits by load only. */
-  private presplitDeclined = false;
   /** The stub options of the last routed call (in memory only): see `stubOptions`. */
   private callerStubOptions: StubOptions | null = null;
 
@@ -570,9 +576,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   // ---- The routed call ----
 
   /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null): Promise<CallAnswer<unknown>> {
+  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0): Promise<CallAnswer<unknown>> {
     this.callerStubOptions = stubOptions;
-    const answer = await this.arriveSettled(name, bits);
+    const answer = await this.arriveOrCreate(name, bits, presplitTo);
     if (answer) return this.answered(answer);
     this.counters.calls++;
     for (const key of keys) if (!ownsHash(bits, keyHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
@@ -590,9 +596,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   /** A call to every shard: `method(...args)`, with no keys. */
-  async shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions: StubOptions | null = null): Promise<CallAnswer<unknown>> {
+  async shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0): Promise<CallAnswer<unknown>> {
     this.callerStubOptions = stubOptions;
-    const answer = await this.arriveSettled(name, bits);
+    const answer = await this.arriveOrCreate(name, bits, presplitTo);
     if (answer) return this.answered(answer);
     this.counters.calls++;
     const fn = this.routedMethod(method);
@@ -628,32 +634,56 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** "moved" for a call addressed to `bits`: this shard went deeper, so `bits` and more split. */
   private moved(bits: string): CallAnswer<never> {
-    const now = this.meta!.bits;
-    return { moved: now.length > bits.length ? now.slice(0, -1) : bits };
+    const meta = this.meta!;
+    const moved = meta.bits.length > bits.length ? meta.bits.slice(0, -1) : bits;
+    return meta.presplit ? { moved, presplit: meta.presplit } : { moved };
   }
 
   /**
-   * Null if this object serves `bits` now; otherwise what to answer. Splits to the initial depth
-   * first if this shard is above it and empty: every call waits for that.
+   * `arrive`, for an object reached with the depth the client learned (`presplitTo`): a new
+   * object at that depth, or above it on its all-zeros path (the same object, by its name),
+   * creates itself empty, if the tree's root says the tree has that depth. One call to the root
+   * per shard, ever: the root fixed the depth when it was first called, so a client that
+   * remembers another (the name's storage was deleted, and `initialDepth` changed) is told its map
+   * is stale, and learns the depth again (specs/lazy-presplit.ts). Safe because no shard above the
+   * initial depth ever holds rows: none is created.
    */
-  private async arriveSettled(name: string, bits: string): Promise<CallAnswer<never> | null> {
-    const answer = this.arrive(name, bits);
-    if (answer) return answer;
-    const meta = this.meta!;
-    if (this.presplitDeclined || meta.bits.length >= (this.policy.initialDepth ?? 0)) return null;
-    this.presplitting ??= this.presplit().finally(() => (this.presplitting = null));
-    await this.presplitting;
+  private async arriveOrCreate(name: string, bits: string, presplitTo: number): Promise<CallAnswer<never> | null> {
+    // (The root's own object, reached at its all-zeros bits, creates itself in `arrive`.)
+    if (!this.meta && hostBits(bits) !== "" && presplitTo > 0 && bits.length <= presplitTo) {
+      const depth = await this.node("", name).shardedTreeDepth(name);
+      // Another first call may have created this object meanwhile.
+      if (!this.meta) {
+        if (depth !== presplitTo) return { stale: bits };
+        this.create(name, bits.padEnd(depth, "0"));
+      }
+    }
     return this.arrive(name, bits);
   }
 
-  /** Whether this object serves `bits`, initialising the root on its first call. */
+  /** The root's answer to a new shard: the tree's presplit depth, creating the root if it is new. */
+  async shardedTreeDepth(name: string): Promise<number> {
+    if (!this.meta) this.create(name, "0".repeat(this.policy.initialDepth ?? 0));
+    if (this.meta!.name !== name || hostBits(this.meta!.bits) !== "") throw new Error(`${nodeName(name, "")} reached ${nodeName(this.meta!.name, this.meta!.bits)}`);
+    return this.meta!.presplit ?? 0;
+  }
+
+  /** A new shard, empty and serving: the root (at the initial depth), or one at the tree's depth. */
+  private create(name: string, bits: string): void {
+    const presplit = bits.length;
+    this.saveMeta({ name, bits, state: "shard", epoch: 0, splitting: null, activate: null, cleanup: [], ...(presplit > 0 ? { presplit } : {}), parent: presplit > 0 ? bits.slice(0, -1) : null, splitAt: Date.now() });
+  }
+
+  /**
+   * Whether this object serves `bits`; null if it does, else what to answer. A new root object
+   * creates itself, as the all-zeros shard at this class's initial depth, which fixes the tree's
+   * (a caller that expected another depth is then moved, or told its map is stale); any other new
+   * object is a split's copy that has not arrived, or a name whose storage is gone.
+   */
   private arrive(name: string, bits: string): CallAnswer<never> | null {
     if (!this.meta) {
-      // The root starts with the first call and splits only after it: a caller that knows splits
-      // of an unused root learned them from storage that is gone. Another object may be a
-      // sibling whose copy has not arrived.
-      if (bits !== "") return hostBits(bits) === "" ? { stale: bits } : { notReady: bits };
-      this.saveMeta({ name, bits: "", state: "shard", epoch: 0, splitting: null, activate: null, cleanup: [], parent: null, splitAt: 0 });
+      if (hostBits(bits) !== "") return { notReady: bits };
+      this.create(name, "0".repeat(this.policy.initialDepth ?? 0));
     }
     const meta = this.meta!;
     // Storage copied from another object and not claimed yet: it keeps that object's meta.
@@ -671,24 +701,6 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // Splits are final: a caller that knows this shard split, when it has not, learned that from
     // storage that is gone.
     return { stale: bits };
-  }
-
-  private async presplit(): Promise<void> {
-    const meta = this.meta!;
-    const rows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows").one().n;
-    if (rows > 0 || meta.state !== "shard" || this.hold) {
-      this.presplitDeclined = true; // not empty: splits by load only
-      return;
-    }
-    // Empty: the shards up to PRESPLIT_LEVELS deeper (all of them, for an initial depth up to 6)
-    // start empty and serving, adopted in one round at their bits (an object is named by its bits
-    // without trailing zeros); this object keeps the all-zeros one. Each goes deeper on its own
-    // first call. Adopting is idempotent, so a round that fails is retried by the next call.
-    const depth = this.policy.initialDepth ?? 0;
-    const extra = Math.min(depth - meta.bits.length, PRESPLIT_LEVELS);
-    const shards = Array.from({ length: 2 ** extra - 1 }, (_, i) => meta.bits + (i + 1).toString(2).padStart(extra, "0"));
-    await Promise.all(shards.map((bits) => this.node(bits).shardedAdoptEmpty(meta.name, bits, bits.slice(0, -1))));
-    this.saveMeta({ ...this.meta!, bits: meta.bits + "0".repeat(extra), parent: meta.bits, splitAt: Date.now() });
   }
 
   private loadMeta(): Meta | null {
@@ -733,8 +745,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    */
   private async split(): Promise<boolean> {
     const before = this.meta;
-    // A presplit is splitting this shard already, by other means.
-    if (!before || this.hold || this.warming || this.presplitting || before.state !== "shard" || before.bits.length >= this.policy.maxDepth) return false;
+    if (!before || this.hold || this.warming || before.state !== "shard" || before.bits.length >= this.policy.maxDepth) return false;
     const right = `${before.bits}1`;
     // Start the new object before holding writes: a first call to an object can take seconds.
     this.warming = true;
@@ -749,7 +760,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const warm = Date.now() - warmStarted;
     // Meanwhile the meta may have been saved (cleanup progress): split from the current one.
     const meta = this.meta;
-    if (!meta || meta.bits !== before.bits || meta.state !== "shard" || meta.epoch !== before.epoch || this.hold || this.presplitting) return false;
+    if (!meta || meta.bits !== before.bits || meta.state !== "shard" || meta.epoch !== before.epoch || this.hold) return false;
     const epoch = meta.epoch + 1;
     let release!: () => void;
     const started = Date.now();
@@ -966,11 +977,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * reached through `namespace.jurisdiction("eu")` makes its shards there too, never through the
    * plain binding (the same name there is another object, outside the jurisdiction).
    */
-  private node(bits: string): DurableObjectStub<ShardedObject<Env, V>> {
+  private node(bits: string, name: string = this.meta!.name): DurableObjectStub<ShardedObject<Env, V>> {
     let nodes = this.nodes() as DurableObjectNamespace<ShardedObject<Env, V>>;
     const jurisdiction = this.ctx.id.jurisdiction as DurableObjectJurisdiction | undefined;
     if (jurisdiction) nodes = nodes.jurisdiction(jurisdiction);
-    const id = nodes.idFromName(shardObjectName(this.meta!.name, bits));
+    const id = nodes.idFromName(shardObjectName(name, bits));
     const options = this.stubOptions();
     return options ? nodes.get(id, options) : nodes.get(id);
   }
@@ -1206,7 +1217,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.receiving = null; // claimed: no batch may change it now
     this.ctx.storage.transactionSync(() => {
       this.afterClone((key) => ownsHash(bits, keyHash(key)));
-      this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, parent, splitAt: Date.now() });
+      // The parent's meta (copied with its storage) gives the tree's presplit depth.
+      this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, ...(meta.presplit ? { presplit: meta.presplit } : {}), parent, splitAt: Date.now() });
     });
     await this.armAlarm(Date.now());
     return true;
@@ -1238,11 +1250,6 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   /** The right half of an empty shard's initial split: empty, and serving at once. */
-  async shardedAdoptEmpty(name: string, bits: string, parent: string): Promise<void> {
-    if (this.meta) return;
-    this.saveMeta({ name, bits, state: "shard", epoch: 0, splitting: null, activate: null, cleanup: [], parent, splitAt: Date.now() });
-  }
-
   async shardedDescribe(): Promise<NodeDescription> {
     const meta = this.meta;
     const storedRows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows").one().n;
@@ -1252,7 +1259,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       rows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows WHERE hash >= ? AND hash <= ?", lo, hi).one().n;
     }
     const state = !meta ? "new" : this.hold ? "splitting" : meta.state === "copy" || this.isUnclaimedCopy() ? "copy" : "shard";
-    return { bits: meta?.bits ?? "", state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null, splits: meta?.splits ?? [], counters: { ...this.counters } };
+    return { bits: meta?.bits ?? "", presplit: meta?.presplit ?? 0, state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null, splits: meta?.splits ?? [], counters: { ...this.counters } };
   }
 }
 

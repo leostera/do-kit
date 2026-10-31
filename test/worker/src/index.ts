@@ -567,6 +567,8 @@ export default {
           return Response.json(null);
         case "/splits":
           return Response.json(sharded(ns, body.name).knownSplits());
+        case "/presplit":
+          return Response.json(sharded(ns, body.name).knownPresplit());
       }
       return new Response("not found", { status: 404 });
     } catch (error) {

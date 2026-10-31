@@ -249,7 +249,7 @@ export default defineSpec(
         },
         [Page]: {
           description: "Not serving yet: not ready. Serving: lists row 1 after the cursor.",
-          sources: ["src/sharded/index.ts#ShardedObject.shardedScan", "src/sharded/index.ts#ShardedObject.arriveSettled", "src/table/index.ts#ShardedTable.page"],
+          sources: ["src/sharded/index.ts#ShardedObject.shardedScan", "src/sharded/index.ts#ShardedObject.arriveOrCreate", "src/table/index.ts#ShardedTable.page"],
           sends: [Rows, NotReady],
           run(s, msg, ctx) {
             if (!s.active) return ctx.reply(NotReady, {});

@@ -30,7 +30,7 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json",
     "test": "bun test",
-    "specs:check": "feynman check call-one-shard scan-visibility snapshot-split table-listing && feynman check indexed-write --repeats 1 --no-rules --max-states 20000000 --time-limit 600",
+    "specs:check": "feynman check call-one-shard scan-visibility snapshot-split table-listing && feynman check lazy-presplit --instances Client=2 --faults 0 && feynman check indexed-write --repeats 1 --no-rules --max-states 20000000 --time-limit 600",
     "bench:run": "bun bench/run.ts",
     "bench:plot": "bun bench/plot.ts"
   },

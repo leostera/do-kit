@@ -94,10 +94,10 @@ test("load splits a node by itself, and nothing is lost", async () => {
   KEYS.forEach((k, i) => expect(got[i] ?? 0).toBe(expected.get(k) ?? 0));
 }, 60_000);
 
-test("a new object splits to its initial depth before its first call, and concurrent first calls lose nothing", async () => {
+test("a new object starts at its initial depth, each shard made by its first call, and concurrent first calls lose nothing", async () => {
   const name = `presplit-${Date.now()}`;
   const expected = new Map<string, number>();
-  // Many first calls at once: they must wait for the presplit, then land on the shards.
+  // Many first calls at once: those that reach the root learn the depth, then land on the shards.
   await Promise.all(
     Array.from({ length: 16 }, async (_, w) => {
       for (let i = 0; i < 10; i++) {
@@ -112,6 +112,38 @@ test("a new object splits to its initial depth before its first call, and concur
   for (const bits of found) expect((await describe("presplit", name, bits)).state).toBe("shard");
   const got = await call<(number | null)[]>("presplit", name, "get", KEYS);
   KEYS.forEach((k, i) => expect(got[i] ?? 0).toBe(expected.get(k) ?? 0));
+}, 60_000);
+
+test("once a client knows the presplit depth, it routes every key straight to its shard", async () => {
+  const name = `presplit-route-${Date.now()}`;
+  // The first call reaches the root, which answers "moved" with the depth (once).
+  await call("presplit", name, "add", [KEYS[0]!], [1]);
+  expect(await post<number>("/presplit", { cls: "presplit", name })).toBe(2);
+  for (const key of KEYS) await call("presplit", name, "add", [key], [1]);
+  const found = await shards("presplit", name);
+  expect(found.sort()).toEqual(["00", "01", "10", "11"]);
+  const described = await Promise.all(found.map((bits) => describe("presplit", name, bits)));
+  // No shard above the depth exists to be asked: one "moved" in all, the root's first answer.
+  expect(described.reduce((sum, d) => sum + d.counters.moved, 0)).toBe(1);
+  // Shards made by their first call, and a scan reaches every one of them.
+  expect(await post<unknown[]>("/scan", { cls: "presplit", name, method: "listing" }).then((s) => s.length)).toBe(4);
+}, 60_000);
+
+test("a split below the initial depth keeps teaching the depth", async () => {
+  const name = `presplit-deeper-${Date.now()}`;
+  for (const key of KEYS) await call("presplit", name, "add", [key], [1]);
+  const leaf = (await shards("presplit", name)).sort().at(-1)!;
+  expect(await post<boolean>("/split", { cls: "presplit", name, bits: leaf })).toBe(true);
+  let right: Awaited<ReturnType<typeof describe>> | null = null;
+  for (let i = 0; i < 100 && right?.state !== "shard"; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    right = await describe("presplit", name, `${leaf}1`);
+  }
+  expect(right?.state).toBe("shard");
+  // The copy took the depth with its parent's meta, so its "moved" answers carry it too.
+  expect(right?.presplit).toBe(2);
+  const got = await call<(number | null)[]>("presplit", name, "get", KEYS);
+  KEYS.forEach((_, i) => expect(got[i]).toBe(1));
 }, 60_000);
 
 test("a split copies the right half, and each object deletes the half it gave away", async () => {
