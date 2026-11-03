@@ -1,7 +1,7 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
 import { keyHash, ShardedObject } from "../sharded/index.js";
-import { encodeIndexKey, encodeValue, pageRequest } from "./schema.js";
+import { encodeIndexKey, encodeValue, pageRequest, shortDigest } from "./schema.js";
 export * from "./schema.js";
 export { table, TableClient } from "./client.js";
 const TABLE = "sharded_table";
@@ -253,7 +253,7 @@ export class ShardedTable extends ShardedObject {
     }
     indexes() {
         return Object.entries(this.table.indexes ?? {}).map(([name, columns]) => {
-            const id = `${name}_${shortHash(columns.join(","))}`;
+            const id = `${name}_${shortDigest(columns.join(","))}`;
             return { name, columns, keyColumn: `${KEY_COLUMN_PREFIX}${id}`, sqlIndex: `${INDEX_PREFIX}${id}` };
         });
     }
@@ -451,11 +451,5 @@ export class ShardedTable extends ShardedObject {
     get db() {
         return this.ctx.storage.sql;
     }
-}
-function shortHash(text) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < text.length; i++)
-        h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
-    return (h >>> 0).toString(36);
 }
 //# sourceMappingURL=index.js.map

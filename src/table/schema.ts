@@ -1,5 +1,7 @@
 // The schema of a sharded table, the queries a listing takes, and the sort order shared by the
 // shards (SQLite) and the client that merges their pages (here): they must agree exactly.
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 
 /** How a column is stored: `boolean` as 0/1, `json` as text (not indexable). */
 export type ColumnType = "text" | "integer" | "real" | "boolean" | "json";
@@ -273,20 +275,22 @@ export function encodeIndexKey(values: readonly SqlValue[]): string {
  * direction and the conditions.
  */
 export function queryFingerprint(request: Pick<ShardPageRequest, "index" | "direction" | "where">, columns: readonly string[]): string {
-  const text = JSON.stringify([request.index, columns, request.direction, request.where]);
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
-  return (h >>> 0).toString(36);
+  return shortDigest(JSON.stringify([request.index, columns, request.direction, request.where]));
+}
+
+/** The first 8 hex digits of `text`'s SHA-256: a name or fingerprint, not a secret. */
+export function shortDigest(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 8);
 }
 
 export function encodeCursor(fingerprint: string, position: Position): string {
-  return btoa(unescape(encodeURIComponent(JSON.stringify({ f: fingerprint, p: position })))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return Buffer.from(JSON.stringify({ f: fingerprint, p: position })).toString("base64url");
 }
 
 export function decodeCursor(cursor: string, fingerprint: string): Position {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(decodeURIComponent(escape(atob(cursor.replace(/-/g, "+").replace(/_/g, "/")))));
+    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString());
   } catch {
     throw new Error("not a cursor of this table");
   }

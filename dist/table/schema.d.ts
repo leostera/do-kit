@@ -145,6 +145,8 @@ export declare function encodeIndexKey(values: readonly SqlValue[]): string;
  * direction and the conditions.
  */
 export declare function queryFingerprint(request: Pick<ShardPageRequest, "index" | "direction" | "where">, columns: readonly string[]): string;
+/** The first 8 hex digits of `text`'s SHA-256: a name or fingerprint, not a secret. */
+export declare function shortDigest(text: string): string;
 export declare function encodeCursor(fingerprint: string, position: Position): string;
 export declare function decodeCursor(cursor: string, fingerprint: string): Position;
 //# sourceMappingURL=schema.d.ts.map

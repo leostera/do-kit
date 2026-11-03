@@ -1,7 +1,7 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
 import { keyHash, ShardedObject } from "../sharded/index.js";
-import { encodeIndexKey, encodeValue, pageRequest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
+import { encodeIndexKey, encodeValue, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
 
 export * from "./schema.js";
 export { table, TableClient } from "./client.js";
@@ -286,7 +286,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
 
   private indexes(): IndexDef[] {
     return Object.entries(this.table.indexes ?? {}).map(([name, columns]) => {
-      const id = `${name}_${shortHash(columns.join(","))}`;
+      const id = `${name}_${shortDigest(columns.join(","))}`;
       return { name, columns, keyColumn: `${KEY_COLUMN_PREFIX}${id}`, sqlIndex: `${INDEX_PREFIX}${id}` };
     });
   }
@@ -480,8 +480,3 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   }
 }
 
-function shortHash(text: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
-  return (h >>> 0).toString(36);
-}
