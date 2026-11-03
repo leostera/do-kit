@@ -166,6 +166,13 @@ call. A non-empty object splits by load only.
 - counters since the object started: calls, `ok`, `moved`, `notReady` and `stale` answers, and
   held writes.
 
+Two structured logs are opt-in, off by default:
+- `ShardedClientOptions.logWideHops: n` logs a `sharded-wide-hop` line for each hop of a routed
+  call that reaches at least `n` shards: shards, keys, the hop's time, its calls' p10, p50, p90
+  and slowest times, and retries.
+- `shardCreatedLogShare` (0 to 1) on the class logs a `shard-created` line for that share of new
+  shards, with how long the root took to confirm the tree's depth on their first call.
+
 ### Invariants
 
 - At any moment one object serves a key. The original stops owning the right half in the commit

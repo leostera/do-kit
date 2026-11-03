@@ -42,6 +42,12 @@ const MAX_HELD_WAIT_MS = 10 * 60_000;
  * forever, and only the root can tell. A shard that is only slow to start costs a few hops.
  */
 const FORGET_AFTER_MS = 1_000;
+/** How long a hop's calls took: a few quantiles, which tell queued calls from one slow one. */
+function spread(took) {
+    const sorted = [...took].sort((a, b) => a - b);
+    const at = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
+    return { p10Ms: at(0.1), p50Ms: at(0.5), p90Ms: at(0.9), slowestMs: at(1) };
+}
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Waits a little longer each time a shard is not ready; throws once that has gone on too long. */
 class Backoff {
@@ -77,11 +83,13 @@ export class ShardedClient {
     identity;
     notReadyWaitMs;
     stubOptions;
+    logWideHops;
     constructor(namespace, name, options = {}) {
         this.namespace = namespace;
         this.name = name;
         this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
         this.stubOptions = options.stubOptions ?? null;
+        this.logWideHops = options.logWideHops ?? 0;
         this.identity = namespace.idFromName(nodeName(name, "")).toString();
     }
     get splits() {
@@ -166,11 +174,15 @@ export class ShardedClient {
             }
             if (oneShard && groups.size > 1)
                 throw new SpansShards(`keys of ${this.name} belong to ${groups.size} shards`);
+            const hopStarted = Date.now();
+            const took = [];
             const retry = [];
             await Promise.all([...groups].map(async ([bits, positions]) => {
                 const groupKeys = positions.map((i) => keys[i]);
                 const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
+                const called = Date.now();
                 const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo));
+                took.push(Date.now() - called);
                 if ("ok" in answer)
                     out.push({ keys: groupKeys, positions, result: answer.ok });
                 else if ("moved" in answer) {
@@ -187,6 +199,9 @@ export class ShardedClient {
                     retry.push(...positions);
                 }
             }));
+            // A routed call that fans out wide: how long its hop took, and its slowest shard.
+            if (this.logWideHops > 0 && groups.size >= this.logWideHops)
+                console.log(JSON.stringify({ event: "sharded-wide-hop", object: this.name, method: String(method), hop, shards: groups.size, keys: pending.length, ms: Date.now() - hopStarted, ...spread(took), retries: retry.length }));
             if (stale || (waiting && !forgot && backoff.waited >= FORGET_AFTER_MS)) {
                 forgot = true;
                 this.forget();

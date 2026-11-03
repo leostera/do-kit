@@ -36,6 +36,12 @@ export interface ShardedClientOptions {
      * when they split, carry them too.
      */
     readonly stubOptions?: StubOptions;
+    /**
+     * Log a `sharded-wide-hop` JSON line for each hop of a routed call that reaches at least this
+     * many shards: shards, keys, the hop's time, its calls' p10/p50/p90/slowest, and retries. A wide
+     * fan-out is rare, and these tell queued calls from one slow shard. Off by default.
+     */
+    readonly logWideHops?: number;
 }
 export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly namespace;
@@ -44,6 +50,7 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly identity;
     private readonly notReadyWaitMs;
     private readonly stubOptions;
+    private readonly logWideHops;
     constructor(namespace: DurableObjectNamespace<T>, name: string, options?: ShardedClientOptions);
     private get splits();
     /** Marks this object as just used, so it is the last its isolate forgets. */

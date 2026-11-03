@@ -65,6 +65,12 @@ export interface ShardedClientOptions {
    * when they split, carry them too.
    */
   readonly stubOptions?: StubOptions;
+  /**
+   * Log a `sharded-wide-hop` JSON line for each hop of a routed call that reaches at least this
+   * many shards: shards, keys, the hop's time, its calls' p10/p50/p90/slowest, and retries. A wide
+   * fan-out is rare, and these tell queued calls from one slow shard. Off by default.
+   */
+  readonly logWideHops?: number;
 }
 /**
  * After waiting this long on shards that are not ready, a call forgets the splits it knows of this
@@ -72,6 +78,13 @@ export interface ShardedClientOptions {
  * forever, and only the root can tell. A shard that is only slow to start costs a few hops.
  */
 const FORGET_AFTER_MS = 1_000;
+
+/** How long a hop's calls took: a few quantiles, which tell queued calls from one slow one. */
+function spread(took: number[]): Record<string, number> {
+  const sorted = [...took].sort((a, b) => a - b);
+  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
+  return { p10Ms: at(0.1), p50Ms: at(0.5), p90Ms: at(0.9), slowestMs: at(1) };
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -107,12 +120,14 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   private readonly notReadyWaitMs: number;
   private readonly stubOptions: StubOptions | null;
+  private readonly logWideHops: number;
 
   constructor(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}) {
     this.namespace = namespace;
     this.name = name;
     this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
     this.stubOptions = options.stubOptions ?? null;
+    this.logWideHops = options.logWideHops ?? 0;
     this.identity = namespace.idFromName(nodeName(name, "")).toString();
   }
 
@@ -199,12 +214,16 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
         group.push(i);
       }
       if (oneShard && groups.size > 1) throw new SpansShards(`keys of ${this.name} belong to ${groups.size} shards`);
+      const hopStarted = Date.now();
+      const took: number[] = [];
       const retry: number[] = [];
       await Promise.all(
         [...groups].map(async ([bits, positions]) => {
           const groupKeys = positions.map((i) => keys[i]!);
           const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
+          const called = Date.now();
           const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo)) as CallAnswer<Result<T[M]>>;
+          took.push(Date.now() - called);
           if ("ok" in answer) out.push({ keys: groupKeys, positions, result: answer.ok });
           else if ("moved" in answer) {
             this.learn(answer.moved, answer.presplit);
@@ -219,6 +238,8 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           }
         }),
       );
+      // A routed call that fans out wide: how long its hop took, and its slowest shard.
+      if (this.logWideHops > 0 && groups.size >= this.logWideHops) console.log(JSON.stringify({ event: "sharded-wide-hop", object: this.name, method: String(method), hop, shards: groups.size, keys: pending.length, ms: Date.now() - hopStarted, ...spread(took), retries: retry.length }));
       if (stale || (waiting && !forgot && backoff.waited >= FORGET_AFTER_MS)) {
         forgot = true;
         this.forget();

@@ -349,6 +349,11 @@ interface Meta {
 export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableObject<Env> {
   protected splitPolicy: SplitPolicy = DEFAULT_SPLIT_POLICY;
   /**
+   * The share (0 to 1) of new shards that log a `shard-created` JSON line on their first call,
+   * with how long the root took to confirm the tree's depth (`rootMs`). Off by default.
+   */
+  protected shardCreatedLogShare = 0;
+  /**
    * The binding of this class, to reach its other shards: `return this.env.COUNTERS`. Typed loosely
    * because a binding's type names the subclass, which a base class cannot.
    */
@@ -651,7 +656,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private async arriveOrCreate(name: string, bits: string, presplitTo: number): Promise<CallAnswer<never> | null> {
     // (The root's own object, reached at its all-zeros bits, creates itself in `arrive`.)
     if (!this.meta && hostBits(bits) !== "" && presplitTo > 0 && bits.length <= presplitTo) {
+      const started = Date.now();
       const depth = await this.node("", name).shardedTreeDepth(name);
+      // A sample of what a new shard's first call costs: the root's answer is on its path.
+      if (this.shardCreatedLogShare > 0 && Math.random() < this.shardCreatedLogShare) console.log(JSON.stringify({ event: "shard-created", node: nodeName(name, bits), rootMs: Date.now() - started }));
       // Another first call may have created this object meanwhile.
       if (!this.meta) {
         if (depth !== presplitTo) return { stale: bits };

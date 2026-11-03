@@ -195,6 +195,11 @@ export declare function shardObjectName(name: string, bits: string): string;
 export declare abstract class ShardedObject<Env = unknown, V = unknown> extends DurableObject<Env> {
     protected splitPolicy: SplitPolicy;
     /**
+     * The share (0 to 1) of new shards that log a `shard-created` JSON line on their first call,
+     * with how long the root took to confirm the tree's depth (`rootMs`). Off by default.
+     */
+    protected shardCreatedLogShare: number;
+    /**
      * The binding of this class, to reach its other shards: `return this.env.COUNTERS`. Typed loosely
      * because a binding's type names the subclass, which a base class cannot.
      */
