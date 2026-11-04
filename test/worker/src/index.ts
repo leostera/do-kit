@@ -406,6 +406,11 @@ export class Counters extends CounterBase {
 
 export class AutoCounters extends CounterBase {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 20, windowSeconds: 2, maxDepth: 3 };
+  /** A shard holding only the key "pinned" does not split: its load is that one key. */
+  protected override splittable(): boolean {
+    const rows = this.ownedRowsPage(null, 2);
+    return !(rows.length === 1 && rows[0]![0] === "pinned");
+  }
   protected override nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
     return this.env.AUTO_COUNTERS as never;
   }

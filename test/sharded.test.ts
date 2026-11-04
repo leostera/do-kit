@@ -94,6 +94,22 @@ test("load splits a node by itself, and nothing is lost", async () => {
   KEYS.forEach((k, i) => expect(got[i] ?? 0).toBe(expected.get(k) ?? 0));
 }, 60_000);
 
+test("a shard that says a split would not help stays one shard under load", async () => {
+  const name = `pinned-${Date.now()}`;
+  let added = 0;
+  const until = Date.now() + 6000;
+  await Promise.all(
+    Array.from({ length: 8 }, async () => {
+      while (Date.now() < until) {
+        await call("auto", name, "add", ["pinned"], [1]);
+        added++;
+      }
+    }),
+  );
+  expect(await shards("auto", name)).toEqual([""]);
+  expect(await call<(number | null)[]>("auto", name, "get", ["pinned"])).toEqual([added]);
+}, 60_000);
+
 test("a new object starts at its initial depth, each shard made by its first call, and concurrent first calls lose nothing", async () => {
   const name = `presplit-${Date.now()}`;
   const expected = new Map<string, number>();

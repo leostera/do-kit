@@ -729,7 +729,17 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (this.calls.size > this.policy.windowSeconds + 2) {
       for (const s of this.calls.keys()) if (s < second - this.policy.windowSeconds - 1) this.calls.delete(s);
     }
-    if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond) void this.split();
+    if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond && this.splittable()) void this.split();
+  }
+
+  /**
+   * Whether a split would spread this shard's load (asked only once the load calls for one). A
+   * split halves the keys, not the load of any one key: a subclass whose load is one hot key,
+   * which it serves some other way, answers false, and the shard stays put rather than handing
+   * that key to a new object that knows nothing of it. True by default.
+   */
+  protected splittable(): boolean {
+    return true;
   }
 
   /** Average calls/s over the last full `windowSeconds`. */
