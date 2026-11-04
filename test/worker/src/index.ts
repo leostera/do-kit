@@ -526,7 +526,8 @@ export default {
       switch (url.pathname) {
         case "/call": {
           const wait = (body as { notReadyWaitMs?: number }).notReadyWaitMs;
-          const options = { ...(wait === undefined ? {} : { notReadyWaitMs: wait }), ...(body.stubOptions ? { stubOptions: body.stubOptions } : {}) };
+          const hint = (body as { presplitHint?: number }).presplitHint;
+          const options = { ...(wait === undefined ? {} : { notReadyWaitMs: wait }), ...(body.stubOptions ? { stubOptions: body.stubOptions } : {}), ...(hint === undefined ? {} : { presplitHint: hint }) };
           const results = await sharded(ns, body.name, options).call(body.keys, body.method as "get", (body.payloads ?? null) as null);
           // Back in the caller's order.
           const out: unknown[] = new Array(body.keys.length);

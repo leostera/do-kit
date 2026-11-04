@@ -130,6 +130,28 @@ test("a new object starts at its initial depth, each shard made by its first cal
   KEYS.forEach((k, i) => expect(got[i] ?? 0).toBe(expected.get(k) ?? 0));
 }, 60_000);
 
+test("a client told the presplit depth never sends a first call to the root", async () => {
+  const name = `presplit-hint-${Date.now()}`;
+  for (const key of KEYS) await post("/call", { cls: "presplit", name, method: "add", keys: [key], payloads: [1], presplitHint: 2 });
+  expect((await shards("presplit", name)).sort()).toEqual(["00", "01", "10", "11"]);
+  // The root's object is also the all-zeros shard: it answered calls, and moved none of them.
+  const root = await describe("presplit", name, "");
+  expect(root.counters.moved).toBe(0);
+  const got = await call<(number | null)[]>("presplit", name, "get", KEYS);
+  KEYS.forEach((_, i) => expect(got[i]).toBe(1));
+}, 60_000);
+
+test("a wrong presplit hint costs a stale answer, and the client learns the depth from the root", async () => {
+  for (const hint of [1, 3]) {
+    const name = `presplit-wrong-hint-${hint}-${Date.now()}`;
+    for (const key of KEYS) await post("/call", { cls: "presplit", name, method: "add", keys: [key], payloads: [1], presplitHint: hint });
+    expect(await post<number>("/presplit", { cls: "presplit", name })).toBe(2);
+    expect((await shards("presplit", name)).sort()).toEqual(["00", "01", "10", "11"]);
+    const got = await call<(number | null)[]>("presplit", name, "get", KEYS);
+    KEYS.forEach((_, i) => expect(got[i]).toBe(1));
+  }
+}, 60_000);
+
 test("once a client knows the presplit depth, it routes every key straight to its shard", async () => {
   const name = `presplit-route-${Date.now()}`;
   // The first call reaches the root, which answers "moved" with the depth (once).

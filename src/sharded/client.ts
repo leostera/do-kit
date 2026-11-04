@@ -35,6 +35,8 @@ const knownSplits = new Map<string, Set<string>>();
  * above, one hop per level, for every path: the top ones are shared by all keys and overload.
  */
 const knownPresplit = new Map<string, number>();
+/** Objects whose root said a client's `presplitHint` was wrong: they learn the depth from the root. */
+const hintRejected = new Set<string>();
 const loadedFromCache = new Set<string>();
 /**
  * Objects whose splits an isolate keeps, the most recently used: a Worker that reaches one object
@@ -71,6 +73,13 @@ export interface ShardedClientOptions {
    * fan-out is rare, and these tell queued calls from one slow shard. Off by default.
    */
   readonly logWideHops?: number;
+  /**
+   * The object's `initialDepth`, if the caller knows it (the class's split policy, usually): the
+   * first call from a new isolate goes straight to that depth instead of to the root, which every
+   * new isolate's first call would otherwise reach at once. A wrong hint costs one "stale" answer;
+   * the client then learns the depth from the root, as without one.
+   */
+  readonly presplitHint?: number;
 }
 /**
  * After waiting this long on shards that are not ready, a call forgets the splits it knows of this
@@ -122,12 +131,14 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private readonly stubOptions: StubOptions | null;
   private readonly logWideHops: number;
 
+  private readonly presplitHint: number;
   constructor(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}) {
     this.namespace = namespace;
     this.name = name;
     this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
     this.stubOptions = options.stubOptions ?? null;
     this.logWideHops = options.logWideHops ?? 0;
+    this.presplitHint = options.presplitHint ?? 0;
     this.identity = namespace.idFromName(nodeName(name, "")).toString();
   }
 
@@ -139,6 +150,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
         const oldest = knownSplits.keys().next().value!;
         knownSplits.delete(oldest);
         knownPresplit.delete(oldest);
+        hintRejected.delete(oldest);
         loadedFromCache.delete(oldest);
       }
     }
@@ -155,7 +167,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   /** The presplit depth known for this object (0: none known). */
   private get presplitTo(): number {
-    return knownPresplit.get(this.identity) ?? 0;
+    return knownPresplit.get(this.identity) ?? (hintRejected.has(this.identity) ? 0 : this.presplitHint);
   }
 
   /** Whether the node `bits` is known to be split: above the presplit depth, or seen splitting. */
@@ -315,6 +327,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private forget(): void {
     this.splits.clear();
     knownPresplit.delete(this.identity);
+    if (this.presplitHint > 0) hintRejected.add(this.identity);
     void this.saveCache();
   }
 
