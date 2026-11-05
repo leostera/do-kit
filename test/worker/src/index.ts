@@ -308,6 +308,13 @@ class CounterBase extends ShardedObject<Env, number> {
     return this.update(keys, () => ({ writes: new Map(keys.map((k, i) => [k, payloads[i] as number])), result: keys.length }));
   }
 
+  /** A scan that writes: adds `by` to every counter this shard owns; how many it changed. */
+  async bumpAll(by: number): Promise<number> {
+    const keys = [...this.allRows().keys()];
+    if (keys.length === 0) return 0;
+    return this.update(keys, (current) => ({ writes: new Map(keys.map((k) => [k, (current.get(k) ?? 0) + by])), result: keys.length }));
+  }
+
   /** Deletes these keys. */
   async remove(keys: readonly string[], _payloads: null): Promise<number> {
     return this.update(keys, () => ({ writes: new Map(keys.map((k) => [k, null])), result: keys.length }));

@@ -437,6 +437,20 @@ test("a write held by a slow split waits for it, however short the client's own 
   expect(await call<number[]>("m", name, "get", [key])).toEqual([2]);
 }, 60_000);
 
+test("a scan that writes to a half being copied waits for the split, then lands once", async () => {
+  const name = `scan-hold-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  await post("/slowHandOut", { cls: "m", name, bits: "", ms: 1500 });
+  const split = post<boolean>("/split", { cls: "m", name, bits: "" });
+  await Bun.sleep(100); // the split holds writes to the moving half now
+  // Counters answer a held write "not ready" at once (holdWaitMs 0): the scan backs off and
+  // visits again, where it finds the split done and reaches both halves.
+  const changed = await post<number[]>("/scan", { cls: "m", name, method: "bumpAll", args: [10] });
+  expect(changed.reduce((a, b) => a + b, 0)).toBe(KEYS.length);
+  expect(await split).toBe(true);
+  expect(await call<number[]>("m", name, "get", KEYS)).toEqual(KEYS.map(() => 11));
+}, 60_000);
+
 test("a shard keeps a record of its splits, and counts what it answered", async () => {
   const name = `records-${Date.now()}`;
   await call("m", name, "add", KEYS, KEYS.map(() => 1));

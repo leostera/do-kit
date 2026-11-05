@@ -613,6 +613,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       return { ok };
     } catch (error) {
       if (error instanceof Moved) return this.answered(this.moved(bits));
+      // A scan method that writes waits on a split as a call does; the client backs off and visits again.
+      if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
       throw error;
     }
   }
