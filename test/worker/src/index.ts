@@ -2,6 +2,7 @@
 //   POST /call {cls, name, method, keys, payloads}  POST /scan {cls, name, method}
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
+//   POST /tree {cls, name, presplitHint?}  (every shard, as its objects describe themselves)
 import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
@@ -596,6 +597,10 @@ export default {
           return Response.json(sharded(ns, body.name).knownSplits());
         case "/presplit":
           return Response.json(sharded(ns, body.name).knownPresplit());
+        case "/tree": {
+          const hint = (body as { presplitHint?: number }).presplitHint;
+          return Response.json(await sharded(ns, body.name, hint === undefined ? {} : { presplitHint: hint }).describeTree());
+        }
       }
       return new Response("not found", { status: 404 });
     } catch (error) {
