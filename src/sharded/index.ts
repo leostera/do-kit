@@ -16,9 +16,11 @@
 //
 // The protocol is modelled in specs/snapshot-split.ts and specs/lazy-presplit.ts.
 import { DurableObject } from "cloudflare:workers";
-import { createHash } from "node:crypto";
 
-export { SpansShards, ShardedClient, sharded, type ShardedClientOptions, type ShardResult } from "./client.js";
+import { hashBit, keyHash } from "./hash.js";
+
+export { hashBit, keyHash } from "./hash.js";
+export { SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 
 declare global {
   /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
@@ -210,16 +212,6 @@ export interface UpdateResult<V, R> {
   readonly result: R;
 }
 
-/** The first 64 bits of the key's SHA-256, as 16 hex digits: what ownership is decided on. */
-export function keyHash(key: string): string {
-  return createHash("sha256").update(key).digest("hex").slice(0, 16);
-}
-
-/** Bit `i` (0-based, most significant first) of a 16-hex-digit hash. */
-export function hashBit(hash: string, i: number): "0" | "1" {
-  const nibble = Number.parseInt(hash[i >> 2]!, 16);
-  return (nibble >> (3 - (i & 3))) & 1 ? "1" : "0";
-}
 
 function ownsHash(bits: string, hash: string): boolean {
   for (let i = 0; i < bits.length; i++) if (hashBit(hash, i) !== bits[i]) return false;

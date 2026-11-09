@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
 import type { NodeDescription } from "../src/index.ts";
+import { hashBit, keyHash } from "../src/sharded/hash.ts";
 import { call, describe, post, requestHeaders, shards, useWorker, workerUrl } from "./harness.ts";
 
 useWorker();
@@ -305,6 +306,27 @@ test("ownedRowsPage includes the empty key", async () => {
   const shards = await post<string[][]>("/scan", { cls: "m", name, method: "pagedKeys", args: [2] });
   expect(shards.flat().sort()).toEqual(["", "a", "b"]);
 }, 60_000);
+
+test("describeTree lists every shard of a presplit tree, ones never called and split ones included", async () => {
+  const name = `tree-${Date.now()}`;
+  const keyIn = (prefix: string) => KEYS.find((k) => [...prefix].every((bit, i) => hashBit(keyHash(k), i) === bit))!;
+  // Only shard "01" is called (and the root, "00", which a new shard asks for the tree's depth):
+  // "10" was never called, and a walk down from the root would stop there and miss "11".
+  await post("/call", { cls: "presplit", name, method: "add", keys: [keyIn("01")], payloads: [1], presplitHint: 2 });
+  const tree = await post<{ bits: string; state: string; rows: number }[]>("/tree", { cls: "presplit", name, presplitHint: 2 });
+  expect(tree.map((n) => [n.bits, n.state])).toEqual([["00", "shard"], ["01", "shard"], ["10", "new"], ["11", "new"]]);
+  await post("/call", { cls: "presplit", name, method: "add", keys: [keyIn("11")], payloads: [1], presplitHint: 2 });
+  const eleven = await post<{ bits: string; state: string }[]>("/tree", { cls: "presplit", name, presplitHint: 2 });
+  expect(eleven.map((n) => [n.bits, n.state])).toEqual([["00", "shard"], ["01", "shard"], ["10", "new"], ["11", "shard"]]);
+  // A split of "01": its halves are found by asking the objects.
+  await post("/call", { cls: "presplit", name, method: "add", keys: [keyIn("011")], payloads: [1], presplitHint: 2 });
+  expect(await post<boolean>("/split", { cls: "presplit", name, bits: "01" })).toBe(true);
+  const after = await post<{ bits: string; state: string; rows: number }[]>("/tree", { cls: "presplit", name });
+  expect(after.map((n) => n.bits)).toEqual(["00", "010", "011", "10", "11"]);
+  // The old root walk (the harness's `shards`) misses "11" behind the never-called "10".
+  expect(await shards("presplit", name)).not.toContain("11");
+  expect(after.find((n) => n.bits === "011")!.rows).toBe(1);
+});
 
 test("callOneShard with no keys says so", async () => {
   const response = await fetch(`${workerUrl()}/callOne`, { method: "POST", headers: requestHeaders(), body: JSON.stringify({ cls: "m", name: `one-empty-${Date.now()}`, method: "get", keys: [], payloads: null }) });

@@ -1,7 +1,8 @@
 // The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { hashBit, keyHash, shardObjectName, nodeName, type CallAnswer, type ShardedObject, type StubOptions } from "./index.js";
+import { hashBit, keyHash } from "./hash.js";
+import { shardObjectName, nodeName, type CallAnswer, type NodeDescription, type ShardedObject, type StubOptions } from "./index.js";
 
 /** One shard's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface ShardResult<R> {
@@ -341,6 +342,38 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     void this.saveCache();
   }
 
+  /**
+   * Every shard of this tree, as its objects describe themselves (for operators): each shard at
+   * the presplit depth (this client's, else the one the root reports), then down every split. A
+   * shard never called is described as "new", and the walk goes on past it: in a presplit tree,
+   * shard 10 may never have been called while 11 has, and a walk down from the root stops at 10.
+   * Asks the objects, not this client's map of splits, so it sees splits no client here has met.
+   */
+  async describeTree(): Promise<ShardDescription[]> {
+    const describe = async (bits: string): Promise<ShardDescription> => {
+      const id = this.namespace.idFromName(shardObjectName(this.name, bits));
+      const stub = (this.namespace as unknown as DurableObjectNamespace<ShardedObject<never, unknown>>).get(id);
+      const node = await stub.shardedDescribe();
+      return { ...node, bits: node.state === "new" ? bits : node.bits, object: id.toString() };
+    };
+    const out: ShardDescription[] = [];
+    // The object hosting `bits` hosts a deeper shard once `bits` has split: its left half stayed,
+    // and each right half along the way went to an object of its own.
+    const visit = async (bits: string): Promise<void> => {
+      const node = await describe(bits);
+      out.push(node);
+      if (node.state === "new") return;
+      const rights: string[] = [];
+      for (let i = bits.length; i < node.bits.length; i++) rights.push(`${node.bits.slice(0, i)}1`);
+      await Promise.all(rights.map(visit));
+    };
+    let depth = this.presplitTo;
+    if (depth === 0) depth = (await describe("")).presplit;
+    const leaves = Array.from({ length: 2 ** depth }, (_, i) => (depth === 0 ? "" : i.toString(2).padStart(depth, "0")));
+    await Promise.all(leaves.map(visit));
+    return out.sort((a, b) => (a.bits < b.bits ? -1 : a.bits > b.bits ? 1 : 0));
+  }
+
   private async loadCache(): Promise<void> {
     this.touch();
     if (loadedFromCache.has(this.identity) || typeof caches === "undefined") return;
@@ -365,6 +398,12 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       // the cache is an optimisation only
     }
   }
+}
+
+/** One shard of a tree, as its object describes itself, with the shard's bits and the object's ID. */
+export interface ShardDescription extends NodeDescription {
+  /** The object's Durable Object ID. */
+  readonly object: string;
 }
 
 export function sharded<T extends Rpc.DurableObjectBranded>(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}): ShardedClient<T> {
