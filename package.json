@@ -24,6 +24,10 @@
     "./indexed": {
       "types": "./dist/indexed/index.d.ts",
       "import": "./dist/indexed/index.js"
+    },
+    "./leased": {
+      "types": "./dist/leased/index.d.ts",
+      "import": "./dist/leased/index.js"
     }
   },
   "scripts": {

@@ -9,7 +9,8 @@ Everything is exported from `@leostera/do-kit`. Each layer also has its own path
 | **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, routing that follows splits. |
 | **Sharded table** (`ShardedTable`) | `@leostera/do-kit/table` | Typed rows on a sharded object: indexes in every shard, conditional writes on a version per row, counts, and sorted listings across shards with a cursor that survives splits. With no indexes, a key-value store. |
 | **Indexed table** (`IndexedTable`) | `@leostera/do-kit/indexed` (phase 1, [RFD0003](docs/rfds/RFD0003-indexed-table.md)) | Global indexes on shards of their own: lookups by another column, unique constraints, and listings within a partition that read one index shard per page. A write returns once its index entries are written. Not benchmarked yet. |
-| Events, cached reads | coming | Change feeds and watches, and reads cached in every data center. |
+| **Leased reads** (`ReadLeases`, `RelayReads`, `RelayPlan`) | `@leostera/do-kit/leased` | Reads of one object's hot keys spread over relays and isolates, never stale: the object leases a key to relays, which answer from the lease and hand isolates sub-leases inside it. A write commits at once and is acknowledged once the leases on its key are over or given back, so no read misses an acknowledged write. For a key too hot for one object to answer, which splitting can't help. |
+| Events | coming | Change feeds and watches. |
 
 To try one, run an [example](examples): small apps for each layer, each started with `bun dev` or `npm run dev`, with a page that shows its shards splitting live.
 
@@ -213,6 +214,35 @@ await t.list({ index: "byTeam", partition: ["core"], direction: "desc", limit: 5
 - **The rows stay the truth.** Index entries carry a copy of the row, so a lookup or page needs no second call. Every write rewrites its entries, so each global index costs one more write per row write, and a write with a unique index makes one more call before it.
 - Rows and index shards split by load, independently. Per-shard `indexes` and `counts` work as in `ShardedTable`. Custom methods that write rows use `indexedTransact`.
 - Not built yet: sorted listings across the whole table (range-partitioned indexes, phase 2), and adding a global index to a table that already has rows.
+
+## Leased reads: one hot key, read through relays
+
+Splitting spreads keys over objects, so it can't help one key that everyone reads: a ref,
+a config document, a feature flag. Leased reads let the object that holds the key (the source)
+lend it out for a second at a time, without ever serving a stale value.
+
+```
+writer ──► source: commit, holdUntil(changes) ──► held: reads see the value from before
+                     │  toRevoke ──► relays give their leases back (returned) ──► shown, acknowledged
+readers ──► isolate sub-lease ──► relay (lease from the source, renewed RENEW_MS early) ──► source
+```
+
+- **`ReadLeases<Row>`**, in the source: grants leases (1 s, ending 150 ms late by its own clock,
+  the holder ending 150 ms early by its own, so only clock rates must agree), holds a write to a
+  leased key until its leases are over or given back, and asks named holders to give them back.
+  Before granting, it stores how far its leases may reach, so a restarted source holds every
+  write until then. A key written in the last `WRITTEN_MS` (10 s) isn't leased to relays: they
+  read it through, so a lease never holds the next write.
+- **`RelayReads<V>`**, in a relay: answers from its lease and renews it early; without one, asks
+  share a source read that started after they arrived. `fresh()` is a value at least as new as
+  every write acknowledged before the ask, for writers checking the current value.
+- **`RelayPlan`**, in the source: when a key is hot (`HOT_READS` direct reads a second), how many
+  relays it gets (sized by the relays' reports, `RELAY_READS` each), and the tree they form
+  (`relayParent`: fanout 8, at most 584 relays, so the source answers at most 8).
+
+The layer is the logic a source and its relays embed. The objects, their storage of the horizon,
+and the calls between them are the app's. It was built for git refs read thousands of times a
+second while they are pushed.
 
 ## Install
 
