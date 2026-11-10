@@ -28,6 +28,10 @@
     "./workgraph": {
       "types": "./dist/workgraph/index.d.ts",
       "import": "./dist/workgraph/index.js"
+    },
+    "./leased": {
+      "types": "./dist/leased/index.d.ts",
+      "import": "./dist/leased/index.js"
     }
   },
   "scripts": {
