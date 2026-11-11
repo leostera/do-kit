@@ -18,6 +18,8 @@ const knownSplits = new Map();
  * above, one hop per level, for every path: the top ones are shared by all keys and overload.
  */
 const knownPresplit = new Map();
+/** Objects whose root said a client's `presplitHint` was wrong: they learn the depth from the root. */
+const hintRejected = new Set();
 const loadedFromCache = new Set();
 /**
  * Objects whose splits an isolate keeps, the most recently used: a Worker that reaches one object
@@ -84,12 +86,14 @@ export class ShardedClient {
     notReadyWaitMs;
     stubOptions;
     logWideHops;
+    presplitHint;
     constructor(namespace, name, options = {}) {
         this.namespace = namespace;
         this.name = name;
         this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
         this.stubOptions = options.stubOptions ?? null;
         this.logWideHops = options.logWideHops ?? 0;
+        this.presplitHint = options.presplitHint ?? 0;
         this.identity = namespace.idFromName(nodeName(name, "")).toString();
     }
     get splits() {
@@ -100,6 +104,7 @@ export class ShardedClient {
                 const oldest = knownSplits.keys().next().value;
                 knownSplits.delete(oldest);
                 knownPresplit.delete(oldest);
+                hintRejected.delete(oldest);
                 loadedFromCache.delete(oldest);
             }
         }
@@ -115,7 +120,7 @@ export class ShardedClient {
     }
     /** The presplit depth known for this object (0: none known). */
     get presplitTo() {
-        return knownPresplit.get(this.identity) ?? 0;
+        return knownPresplit.get(this.identity) ?? (hintRejected.has(this.identity) ? 0 : this.presplitHint);
     }
     /** Whether the node `bits` is known to be split: above the presplit depth, or seen splitting. */
     isSplit(bits) {
@@ -281,6 +286,8 @@ export class ShardedClient {
     forget() {
         this.splits.clear();
         knownPresplit.delete(this.identity);
+        if (this.presplitHint > 0)
+            hintRejected.add(this.identity);
         void this.saveCache();
     }
     learn(bits, presplit) {

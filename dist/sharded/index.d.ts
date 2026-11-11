@@ -328,6 +328,20 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private loadMeta;
     private saveMeta;
     private countCall;
+    /**
+     * Every LOAD_LOG_S seconds, a shard above half its split rate says how busy it is and what a
+     * split would wait on: why a busy shard does not split shows in the logs, not only in its callers'
+     * latency.
+     */
+    private logLoad;
+    private loadLoggedAt;
+    /**
+     * Whether a split would spread this shard's load (asked only once the load calls for one). A
+     * split halves the keys, not the load of any one key: a subclass whose load is one hot key,
+     * which it serves some other way, answers false, and the shard stays put rather than handing
+     * that key to a new object that knows nothing of it. True by default.
+     */
+    protected splittable(): boolean;
     /** Average calls/s over the last full `windowSeconds`. */
     private rate;
     /** Splits now if this object hosts the shard `bits` (also an operator's lever). */

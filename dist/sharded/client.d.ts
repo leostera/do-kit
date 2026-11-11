@@ -42,6 +42,13 @@ export interface ShardedClientOptions {
      * fan-out is rare, and these tell queued calls from one slow shard. Off by default.
      */
     readonly logWideHops?: number;
+    /**
+     * The object's `initialDepth`, if the caller knows it (the class's split policy, usually): the
+     * first call from a new isolate goes straight to that depth instead of to the root, which every
+     * new isolate's first call would otherwise reach at once. A wrong hint costs one "stale" answer;
+     * the client then learns the depth from the root, as without one.
+     */
+    readonly presplitHint?: number;
 }
 export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly namespace;
@@ -51,6 +58,7 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly notReadyWaitMs;
     private readonly stubOptions;
     private readonly logWideHops;
+    private readonly presplitHint;
     constructor(namespace: DurableObjectNamespace<T>, name: string, options?: ShardedClientOptions);
     private get splits();
     /** Marks this object as just used, so it is the last its isolate forgets. */

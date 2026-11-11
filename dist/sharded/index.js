@@ -113,6 +113,14 @@ class NotReady extends Error {
     }
 }
 const HOLD_WAIT_MS = 2_000;
+/**
+ * How long a split waits for its new object's first call before going ahead anyway. A first call
+ * can take seconds, and one that never returns must not leave the shard unable to split again:
+ * the split's own calls to the new object retry, or give up.
+ */
+const WARM_WAIT_MS = 5_000;
+/** How often a busy shard logs its load (`shard-load`). */
+const LOAD_LOG_S = 10;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS sharded_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sharded_rows (key TEXT PRIMARY KEY, hash TEXT NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
@@ -413,6 +421,9 @@ export class ShardedObject extends DurableObject {
         catch (error) {
             if (error instanceof Moved)
                 return this.answered(this.moved(bits));
+            // A scan method that writes waits on a split as a call does; the client backs off and visits again.
+            if (error instanceof NotReady)
+                return this.answered({ notReady: bits, until: error.until });
             throw error;
         }
     }
@@ -533,8 +544,34 @@ export class ShardedObject extends DurableObject {
                 if (s < second - this.policy.windowSeconds - 1)
                     this.calls.delete(s);
         }
-        if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond)
+        if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond && this.splittable())
             void this.split();
+        this.logLoad(second);
+    }
+    /**
+     * Every LOAD_LOG_S seconds, a shard above half its split rate says how busy it is and what a
+     * split would wait on: why a busy shard does not split shows in the logs, not only in its callers'
+     * latency.
+     */
+    logLoad(second) {
+        if (second - this.loadLoggedAt < LOAD_LOG_S)
+            return;
+        const rate = this.rate();
+        if (rate < this.policy.callsPerSecond / 2)
+            return;
+        this.loadLoggedAt = second;
+        const meta = this.meta;
+        console.log(JSON.stringify({ event: "shard-load", node: meta ? nodeName(meta.name, meta.bits) : "", rate: Math.round(rate), splitAt: this.policy.callsPerSecond, warming: this.warming ? 1 : 0, holding: this.hold ? 1 : 0, state: meta?.state ?? "", quietMs: Date.now() - this.quietUntil }));
+    }
+    loadLoggedAt = 0;
+    /**
+     * Whether a split would spread this shard's load (asked only once the load calls for one). A
+     * split halves the keys, not the load of any one key: a subclass whose load is one hot key,
+     * which it serves some other way, answers false, and the shard stays put rather than handing
+     * that key to a new object that knows nothing of it. True by default.
+     */
+    splittable() {
+        return true;
     }
     /** Average calls/s over the last full `windowSeconds`. */
     rate() {
@@ -563,13 +600,15 @@ export class ShardedObject extends DurableObject {
         // Start the new object before holding writes: a first call to an object can take seconds.
         this.warming = true;
         const warmStarted = Date.now();
+        let warmTimer;
         try {
-            await this.node(right).shardedWarm();
+            await Promise.race([this.node(right).shardedWarm(), new Promise((resolve) => (warmTimer = setTimeout(resolve, WARM_WAIT_MS)))]);
         }
         catch {
             // The split's own calls retry, or give up.
         }
         finally {
+            clearTimeout(warmTimer);
             this.warming = false;
         }
         const warm = Date.now() - warmStarted;
