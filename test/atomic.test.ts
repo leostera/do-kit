@@ -94,6 +94,20 @@ async function prepareAndStop(name: string, bits: string, key: string, delta: nu
   return tx;
 }
 
+test("a hold whose alarm was lost still ends, once anything reaches its shard", async () => {
+  const name = `atomic-lost-alarm-${unique()}`;
+  await call("counters", name, "add", ["a", "b"], [10, 10]);
+  const tx = await prepareAndStop(name, "", "b", 5, "a", 300);
+  await call("counters", name, "loseAlarm", ["a"]);
+  // Past the deadline, and past ALARM_CHECK_MS since that call (a shard checks its alarm at most that often).
+  await Bun.sleep(5_500);
+  // A read of another key: reads never wait on holds, and nothing else will come for this one.
+  expect(await values(name, ["a"])).toEqual([10]);
+  for (let i = 0; i < 40 && (await tables(name, "")).holds.length > 0; i++) await Bun.sleep(100);
+  expect((await tables(name, "")).holds).toEqual([]);
+  expect((await tables(name, "")).outcomes).toEqual([{ tx, outcome: "abort" }]);
+}, 30_000);
+
 test("a caller gone after the prepares: the hold ends at its deadline, aborted, and the waiting write applies", async () => {
   const name = `atomic-gone-prepared-${unique()}`;
   const { left, right } = keysByHalf(1);

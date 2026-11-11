@@ -317,6 +317,12 @@ class CounterBase extends ShardedObject<Env, number> {
     return storageReport(this.ctx.storage);
   }
 
+  /** Loses this shard's alarm, as a failed setAlarm or an alarm the runtime gave up on would. */
+  async loseAlarm(keys: readonly string[], _payloads: null): Promise<null[]> {
+    await this.ctx.storage.deleteAlarm();
+    return keys.map(() => null);
+  }
+
   /** The stub options this shard would make its stubs with now (see `stubOptions`). */
   async seenStubOptions(keys: readonly string[], _payloads: null): Promise<unknown[]> {
     return keys.map(() => this.stubOptions());

@@ -169,7 +169,10 @@ Tables, in every shard (created with the others):
    outcome (`outcome` step, routed by the primary key, so it reaches the primary's shard
    whatever split since). The primary answers the stored outcome, or records "abort" and answers it.
    The shard applies or drops, as in 5. A shard reached by a write that has waited a hold out past
-   its deadline runs recovery at once, rather than waiting for the alarm.
+   its deadline runs recovery at once, rather than waiting for the alarm. An alarm can be lost (a
+   failed `setAlarm`, or one the runtime stopped retrying), and reads do not wait on holds: so every
+   routed call that reaches a shard holding keys checks, at most every 5 s, that an alarm is set no
+   later than its earliest hold's deadline, as it does for a split's pending work.
 
 Deadline: `ATOMIC_HOLD_MS` (5 s) after the prepare. The whole call takes a few round trips,
 so a hold reaches its deadline only if its caller is gone or the primary is slow; then the hold's
