@@ -405,10 +405,12 @@ test("work a shard schedules much later does not hold back a split's cleanup", a
   await call("m", name, "scheduleWork", ["__recurring"], [0]);
   await Bun.sleep(200);
   expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
-  // And calls keep scheduling work a minute out, on both shards, while they clean up.
+  // And calls keep scheduling work a minute out, on both shards, while they clean up. Cleanup
+  // must end well before that work is due: by time, not by rounds, so a loaded machine passes.
   const left = many.find((k) => firstBit(k) === 0)!;
   const right = many.find((k) => firstBit(k) === 1)!;
-  for (let i = 0; i < 50; i++) {
+  const until = Date.now() + 30_000;
+  while (Date.now() < until) {
     await Promise.all([call("m", name, "scheduleWork", [left], [60_000]), call("m", name, "scheduleWork", [right], [60_000])]);
     const [l, r] = await Promise.all([describe("m", name, "0"), describe("m", name, "1")]);
     if (l.storedRows === l.rows && r.storedRows === r.rows) return;
