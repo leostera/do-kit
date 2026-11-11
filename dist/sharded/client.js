@@ -6,6 +6,22 @@ import { hostBits, shardObjectName, nodeName } from "./index.js";
 /** Keys that had to go to one shard belong to several (nothing was applied). */
 export class SpansShards extends Error {
 }
+/**
+ * The client and the object route keys differently (`routeOf`): nothing was called. Calls would
+ * otherwise reach shards that don't hold their keys once the tree splits.
+ */
+export class RouteMismatch extends Error {
+    key;
+    clientHash;
+    objectHash;
+    constructor(key, clientHash, objectHash) {
+        super(`key ${JSON.stringify(key)}: the client routes it to hash ${clientHash}, the object to ${objectHash}; declare the same routeOf on both`);
+        this.key = key;
+        this.clientHash = clientHash;
+        this.objectHash = objectHash;
+        this.name = "RouteMismatch";
+    }
+}
 /** v2: the splits and the presplit depth (v1 entries, splits only, are left to expire). */
 const CACHE_ORIGIN = "https://do-kit.invalid/v2/";
 /**
@@ -88,6 +104,7 @@ export class ShardedClient {
     stubOptions;
     logWideHops;
     presplitHint;
+    routeOf;
     constructor(namespace, name, options = {}) {
         this.namespace = namespace;
         this.name = name;
@@ -95,6 +112,7 @@ export class ShardedClient {
         this.stubOptions = options.stubOptions ?? null;
         this.logWideHops = options.logWideHops ?? 0;
         this.presplitHint = options.presplitHint ?? 0;
+        this.routeOf = options.routeOf ?? null;
         this.identity = namespace.idFromName(nodeName(name, "")).toString();
     }
     get splits() {
@@ -126,6 +144,15 @@ export class ShardedClient {
     /** Whether the node `bits` is known to be split: above the presplit depth, or seen splitting. */
     isSplit(bits) {
         return bits.length < this.presplitTo || this.splits.has(bits);
+    }
+    /** The hash a key is routed by: of its route, which is the key itself by default. */
+    routeHash(key) {
+        if (!this.routeOf)
+            return keyHash(key);
+        const route = this.routeOf(key);
+        if (typeof route !== "string")
+            throw new Error(`sharded ${this.name}: routeOf(${JSON.stringify(key)}) is not a string`);
+        return keyHash(route);
     }
     /** The deepest known node owning a hash. */
     shardFor(hash) {
@@ -160,7 +187,7 @@ export class ShardedClient {
         if (payloads && payloads.length !== keys.length)
             throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
         await this.loadCache();
-        const hashes = keys.map(keyHash);
+        const hashes = keys.map((key) => this.routeHash(key));
         const out = [];
         let pending = keys.map((_, i) => i);
         const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
@@ -187,10 +214,13 @@ export class ShardedClient {
                 const groupKeys = positions.map((i) => keys[i]);
                 const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
                 const called = Date.now();
-                const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo));
+                const groupHashes = positions.map((i) => hashes[i]);
+                const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo, groupHashes));
                 took.push(Date.now() - called);
                 if ("ok" in answer)
                     out.push({ keys: groupKeys, positions, result: answer.ok });
+                else if ("routeMismatch" in answer)
+                    throw new RouteMismatch(answer.routeMismatch.key, answer.routeMismatch.client, answer.routeMismatch.object);
                 else if ("moved" in answer) {
                     this.learn(answer.moved, answer.presplit);
                     retry.push(...positions);

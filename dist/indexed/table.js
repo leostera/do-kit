@@ -23,6 +23,12 @@ const CLEANUP_BATCH = 250;
  * Subclasses that override `onAlarm`, `afterClone` or `cleanupForeign` must call `super`.
  */
 export class IndexedTable extends ShardedTable {
+    constructor(ctx, env) {
+        super(ctx, env);
+        // Index shards reach row shards with a client of their own, which knows no routeOf.
+        if (!this.routesByKey())
+            throw new Error("an IndexedTable routes rows by their keys: routeOf is not supported");
+    }
     /** How long a write waits for its index entries before it returns `IndexPending`. */
     indexWaitMs = 5_000;
     indexMigrated = false;

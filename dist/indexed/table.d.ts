@@ -21,6 +21,7 @@ export type IndexedShardResult = WriteResult & {
  * Subclasses that override `onAlarm`, `afterClone` or `cleanupForeign` must call `super`.
  */
 export declare abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTable<Env, Row> {
+    constructor(ctx: DurableObjectState, env: Env);
     /** The binding of the GlobalIndex class holding this table's global indexes. */
     protected abstract indexNodes(): DurableObjectNamespace<any>;
     /** How long a write waits for its index entries before it returns `IndexPending`. */

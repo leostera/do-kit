@@ -42,6 +42,9 @@ export class IndexedTableClient extends TableClient {
     schema;
     globals;
     constructor(namespace, indexNamespace, name, schema, options = {}) {
+        // Index shards reach row shards with a client of their own, which knows no routeOf.
+        if (options.routeOf)
+            throw new Error(`indexed table ${name}: routeOf is not supported on an indexed table`);
         super(namespace, name, schema, options);
         this.schema = schema;
         this.globals = globalIndexes(schema);

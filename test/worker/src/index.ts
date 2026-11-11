@@ -3,7 +3,7 @@
 //   POST /split {cls, name, bits}                    POST /describe {cls, name, bits}
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
 //   POST /tree {cls, name, presplitHint?}  (every shard, as its objects describe themselves)
-import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
+import { MAX_KNOWN_OBJECTS, RouteMismatch } from "../../../src/sharded/client.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedListQuery } from "../../../src/indexed/index.ts";
@@ -15,6 +15,8 @@ interface Env extends GraphEnv {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
   readonly AUTO_COUNTERS: DurableObjectNamespace<AutoCounters>;
   readonly PRESPLIT_COUNTERS: DurableObjectNamespace<PresplitCounters>;
+  readonly ROUTED_COUNTERS: DurableObjectNamespace<RoutedCounters>;
+  readonly ROUTED_DOCS: DurableObjectNamespace<RoutedDocs>;
   readonly DOCS: DurableObjectNamespace<Docs>;
   readonly EVOLVING: DurableObjectNamespace<EvolvingDocs>;
   readonly FLAKY: DurableObjectNamespace<FlakyDocs>;
@@ -55,6 +57,19 @@ export class Docs extends ShardedTable<Env, Doc> {
   }
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.DOCS as never;
+  }
+}
+
+/** Git refs that can conflict (refs/heads/a and refs/heads/a/b) share their first 3 components. */
+export const refRoute = (key: string): string => key.split("/").slice(0, 3).join("/");
+
+/** Docs routed like refs: every doc under refs/x/y lives in one shard. */
+export class RoutedDocs extends Docs {
+  protected override routeOf(key: string): string {
+    return refRoute(key);
+  }
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.ROUTED_DOCS as never;
   }
 }
 
@@ -409,6 +424,11 @@ class CounterBase extends ShardedObject<Env, number> {
     this.ctx.abort("wiped");
   }
 
+  /** Every row's key and the hash it is stored under. */
+  async rowHashes(): Promise<{ key: string; hash: string }[]> {
+    return this.ctx.storage.sql.exec<{ key: string; hash: string }>("SELECT key, hash FROM sharded_rows ORDER BY key").toArray();
+  }
+
   async entries(): Promise<[string, number][]> {
     return [...this.allRows()];
   }
@@ -432,6 +452,38 @@ export class AutoCounters extends CounterBase {
   }
 }
 
+/** Counters routed like git refs, with refs created the way git refuses a file/folder conflict. */
+export class RoutedCounters extends CounterBase {
+  protected override splitPolicy: SplitPolicy = { ...DEFAULT_SPLIT_POLICY, holdWaitMs: 0 };
+  protected override routeOf(key: string): string {
+    return refRoute(key);
+  }
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
+    return this.env.ROUTED_COUNTERS as never;
+  }
+  /**
+   * Creates each ref unless one exists that it would be a file or folder of: refs/heads/a and
+   * refs/heads/a/b can't both exist. One transaction per ref, over the ref and its folders (each
+   * of at least 3 components, so in its route), and a look at what is below it, all in this shard.
+   */
+  async createRef(keys: readonly string[], payloads: readonly number[]): Promise<("created" | "conflict")[]> {
+    const out: ("created" | "conflict")[] = [];
+    for (const [i, key] of keys.entries()) {
+      const parts = key.split("/");
+      const folders = parts.slice(3).map((_, j) => parts.slice(0, 3 + j).join("/"));
+      out.push(
+        await this.update([key, ...folders], (current) => {
+          // Keys under `key/` sort between "key/" and "key0" ("0" follows "/").
+          const below = this.ctx.storage.sql.exec("SELECT key FROM sharded_rows WHERE key > ? AND key < ? LIMIT 1", `${key}/`, `${key}0`).toArray();
+          if (current.size > 0 || below.length > 0) return { writes: new Map(), result: "conflict" as const };
+          return { writes: new Map([[key, payloads[i]!]]), result: "created" as const };
+        }),
+      );
+    }
+    return out;
+  }
+}
+
 /** Splits to depth 2 while empty, never by load. */
 export class PresplitCounters extends CounterBase {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 4, initialDepth: 2 };
@@ -441,7 +493,7 @@ export class PresplitCounters extends CounterBase {
 }
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "users" ? env.USERS : cls === "userIndexes" ? env.USER_INDEXES : cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
+  return (cls === "users" ? env.USERS : cls === "userIndexes" ? env.USER_INDEXES : cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "routed" ? env.ROUTED_COUNTERS : cls === "routedTable" ? env.ROUTED_DOCS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
 }
 
 /** POST /indexed {name, op, args}: one call of the indexed table client, or a test hook. */
@@ -456,6 +508,13 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
     return out;
   };
   switch (body.op) {
+    case "withRouteOf":
+      try {
+        indexedTable(env.USERS, env.USER_INDEXES, body.name, users, { routeOf: refRoute });
+        return "made";
+      } catch (error) {
+        return (error as Error).message;
+      }
     case "all": {
       const out: unknown[] = [];
       for await (const row of t.all(body.args[0] as ListQuery)) out.push(row);
@@ -497,7 +556,7 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
 
 /** POST /table {cls, name, op, args}: one call of the table client. */
 async function tableOp(env: Env, body: { cls: string; name: string; op: string; args: unknown[] }): Promise<unknown> {
-  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never) as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, body.cls === "routedTable" ? { routeOf: refRoute } : {}) as unknown as Record<string, (...a: unknown[]) => unknown>;
   if (body.op === "all") {
     const rows: unknown[] = [];
     for await (const row of (t.all as (q: ListQuery) => AsyncGenerator<unknown>).call(t, body.args[0] as ListQuery)) rows.push(row);
@@ -527,7 +586,7 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     const ns = env.EVOLVING;
     return ns.get(ns.idFromName(shardObjectName(body.name, ""))).indexNames();
   }
-  if (body.op === "scan") return (sharded(namespace(env, body.cls) as never, body.name).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(...(body.args as [string, ...unknown[]]));
+  if (body.op === "scan") return (sharded(namespace(env, body.cls) as never, body.name, body.cls === "routedTable" ? { routeOf: refRoute } : {}).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(...(body.args as [string, ...unknown[]]));
   return t[body.op]!.call(t, ...body.args);
 }
 
@@ -543,15 +602,18 @@ export default {
         case "/call": {
           const wait = (body as { notReadyWaitMs?: number }).notReadyWaitMs;
           const hint = (body as { presplitHint?: number }).presplitHint;
-          const options = { ...(wait === undefined ? {} : { notReadyWaitMs: wait }), ...(body.stubOptions ? { stubOptions: body.stubOptions } : {}), ...(hint === undefined ? {} : { presplitHint: hint }) };
+          const routed = (body as { routeOf?: "refs" }).routeOf === "refs";
+          const options = { ...(wait === undefined ? {} : { notReadyWaitMs: wait }), ...(body.stubOptions ? { stubOptions: body.stubOptions } : {}), ...(hint === undefined ? {} : { presplitHint: hint }), ...(routed ? { routeOf: refRoute } : {}) };
           const results = await sharded(ns, body.name, options).call(body.keys, body.method as "get", (body.payloads ?? null) as null);
           // Back in the caller's order.
           const out: unknown[] = new Array(body.keys.length);
           for (const shard of results) shard.positions.forEach((p, j) => (out[p] = (shard.result as unknown[])[j]));
           return Response.json(out);
         }
-        case "/callOne":
-          return Response.json(await sharded(ns, body.name).callOneShard(body.keys, body.method as "get", (body.payloads ?? null) as null));
+        case "/callOne": {
+          const routed = (body as { routeOf?: "refs" }).routeOf === "refs";
+          return Response.json(await sharded(ns, body.name, routed ? { routeOf: refRoute } : {}).callOneShard(body.keys, body.method as "get", (body.payloads ?? null) as null));
+        }
         case "/checkPolicy":
           try {
             checkSplitPolicy((body as unknown as { policy: SplitPolicy }).policy);
@@ -604,6 +666,7 @@ export default {
       }
       return new Response("not found", { status: 404 });
     } catch (error) {
+      if (error instanceof RouteMismatch) return Response.json({ error: error.name, key: error.key }, { status: 409 });
       return new Response(String(error instanceof Error ? (error.stack ?? error.message) : error), { status: 500 });
     }
   },

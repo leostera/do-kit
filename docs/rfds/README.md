@@ -13,3 +13,4 @@ that capability belongs in it rather than in a layer above, or in the app.
 | [RFD0003](RFD0003-indexed-table.md) | Indexed tables: global indexes across shards | Draft (phase 1 built) |
 | [RFD0004](RFD0004-leased-reads.md) | Leased reads for hot keys | Draft |
 | [RFD0005](RFD0005-work-graphs.md) | Work graphs: incremental, parallel execution | Draft (built) |
+| [RFD0006](RFD0006-co-location.md) | Co-location: keys that share a shard | Implemented |

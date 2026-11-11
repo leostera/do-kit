@@ -1,6 +1,6 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
-import { keyHash, ShardedObject } from "../sharded/index.js";
+import { ShardedObject } from "../sharded/index.js";
 import { encodeIndexKey, encodeValue, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
 
 export * from "./schema.js";
@@ -169,7 +169,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       `INSERT INTO ${TABLE} (${names.map((n) => this.q(n)).join(", ")}, _hash, _version) VALUES (${names.map(() => "?").join(", ")}, ?, ?) ` +
         `ON CONFLICT (${this.q(this.table.primaryKey)}) DO UPDATE SET ${names.map((n) => `${this.q(n)} = excluded.${this.q(n)}`).join(", ")}, _version = excluded._version`,
       ...names.map((n) => stored[n]!),
-      keyHash(key),
+      this.routeHash(key),
       version,
     );
     if (current === 0) this.countRow(key, 1);
@@ -431,7 +431,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   private countGroups(key: string, before: Record<string, SqlValue> | null, after: Record<string, SqlValue> | null): void {
     const groups = Object.entries(this.table.counts ?? {}) as [string, string][];
     if (groups.length === 0) return;
-    const hash = keyHash(key);
+    const hash = this.routeHash(key);
     for (const [grp, col] of groups) {
       const from = before ? (before[col] ?? null) : undefined;
       const to = after ? (after[col] ?? null) : undefined;
@@ -450,7 +450,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   }
 
   private countRow(key: string, delta: number): void {
-    this.db.exec(`INSERT INTO ${COUNTS} (bucket, n) VALUES (?, ?) ON CONFLICT (bucket) DO UPDATE SET n = n + excluded.n`, keyHash(key).slice(0, BUCKET_DIGITS), delta);
+    this.db.exec(`INSERT INTO ${COUNTS} (bucket, n) VALUES (?, ?) ON CONFLICT (bucket) DO UPDATE SET n = n + excluded.n`, this.routeHash(key).slice(0, BUCKET_DIGITS), delta);
   }
 
   private checkKey(key: string, row: Row): Row {

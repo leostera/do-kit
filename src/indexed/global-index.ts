@@ -57,6 +57,12 @@ export interface GlobalIndexStats {
  * Subclasses that override `onAlarm` or `cleanupForeign` must call `super`.
  */
 export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // Entries are routed by their index route, by the table's clients: a routeOf here would misplace them.
+    if (!this.routesByKey()) throw new Error("a GlobalIndex routes entries by their index route: routeOf is not supported");
+  }
+
   /** The binding of the IndexedTable whose rows this indexes. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   protected abstract rowNodes(): DurableObjectNamespace<any>;

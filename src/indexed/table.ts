@@ -42,6 +42,12 @@ interface Batch {
  * Subclasses that override `onAlarm`, `afterClone` or `cleanupForeign` must call `super`.
  */
 export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTable<Env, Row> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // Index shards reach row shards with a client of their own, which knows no routeOf.
+    if (!this.routesByKey()) throw new Error("an IndexedTable routes rows by their keys: routeOf is not supported");
+  }
+
   /** The binding of the GlobalIndex class holding this table's global indexes. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   protected abstract indexNodes(): DurableObjectNamespace<any>;

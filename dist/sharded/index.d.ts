@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 export { hashBit, keyHash } from "./hash.js";
-export { SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
+export { RouteMismatch, SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 declare global {
     /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
     interface DurableObjectSnapshot {
@@ -80,6 +80,14 @@ export type CallAnswer<R> = {
     readonly until?: number;
 } | {
     readonly stale: string;
+}
+/** The client routed `key` by another `routeOf` than this object's: nothing was called. */
+ | {
+    readonly routeMismatch: {
+        readonly key: string;
+        readonly client: string;
+        readonly object: string;
+    };
 };
 /** An object's state, for tests and operators. */
 export interface NodeDescription {
@@ -201,6 +209,22 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      * because a binding's type names the subclass, which a base class cannot.
      */
     protected abstract nodes(): DurableObjectNamespace<any>;
+    /**
+     * The route of a key: keys with the same route always live in the same shard, so one
+     * transaction (`update`, `transact`) can read and write them all. Shards own routes by the
+     * SHA-256 of the route, as they own keys by theirs without this: the default is the key itself.
+     * Rows stay keyed by the full key.
+     *
+     * Declare the same function on the client (`sharded(ns, name, { routeOf })`): a call routed by
+     * another is refused with RouteMismatch. It must be pure, and fixed for the life of a tree: a
+     * tree written with one routeOf is not readable with another (use a new name). A route's keys
+     * can't be split apart, so a route that is hot or large is one key's worth of shard.
+     */
+    protected routeOf(key: string): string;
+    /** The hash a key is owned by: `keyHash(routeOf(key))`. */
+    protected routeHash(key: string): string;
+    /** Whether the subclass routes keys by something other than themselves. */
+    protected routesByKey(): boolean;
     /** `splitPolicy`, checked once (a subclass sets it after the constructor here runs). */
     private get policy();
     private checkedPolicy;
@@ -294,7 +318,7 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     /** What an update of these keys waits for, if any. */
     private holding;
     /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-    shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions?: StubOptions | null, presplitTo?: number): Promise<CallAnswer<unknown>>;
+    shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions?: StubOptions | null, presplitTo?: number, hashes?: readonly string[] | null): Promise<CallAnswer<unknown>>;
     /** A call to every shard: `method(...args)`, with no keys. */
     shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions?: StubOptions | null, presplitTo?: number): Promise<CallAnswer<unknown>>;
     /**

@@ -106,6 +106,7 @@ These are estimates from the [published prices](https://developers.cloudflare.co
 
 - **One object to write.** You write methods that read and update keys, and the base class runs them on whichever shard owns those keys.
 - **Splits under load, by itself.** A shard splits when its call rate stays above a threshold. There are no shard counts to choose up front.
+- **Keys that stay together.** `routeOf(key)` puts every key with the same route in one shard, so one transaction can check a rule across them, such as git refusing `refs/heads/a/b` while `refs/heads/a` exists ([RFD0006](docs/rfds/RFD0006-co-location.md)).
 - **Clients that find their way.** Workers learn about splits lazily, and share what they learn in the isolate and the colo cache. A stale map costs one extra hop, never a wrong answer, because splits are final.
 - **Correctness you can check.** The split protocol is an executable [Feynman](https://github.com/leostera/feynman) model, [`specs/snapshot-split.ts`](specs/snapshot-split.ts). It checks that no acknowledged write is lost or applied twice, that two objects never serve the same key, and that no read is stale, across lost messages and restarts.
 
@@ -115,7 +116,7 @@ These are estimates from the [published prices](https://developers.cloudflare.co
 
 **It does not help:**
 - **One hot key.** A key always lives on one shard, so the most popular key caps what a shard can serve. The split policy does not yet know this, and keeps splitting a shard that is hot because of one key.
-- **Cross-key transactions.** `update` is transactional within one shard, and `callOneShard` refuses (before applying anything) when keys span shards. Nothing spans shards.
+- **Cross-key transactions.** `update` is transactional within one shard, and `callOneShard` refuses (before applying anything) when keys span shards. Nothing spans shards. Keys that must be decided together can share a shard: declare a `routeOf(key)` on the class and the client, and keys with the same route stay in one shard through every split ([RFD0006](docs/rfds/RFD0006-co-location.md)). A client that routes differently from its object is refused with `RouteMismatch`.
 - **Small loads.** Below what one object can take, a plain Durable Object is simpler and as fast.
 
 ## Sharded tables: rows, indexes and listings

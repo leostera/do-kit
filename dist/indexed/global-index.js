@@ -22,6 +22,12 @@ const RESOLVE_BATCH = 50;
  * Subclasses that override `onAlarm` or `cleanupForeign` must call `super`.
  */
 export class GlobalIndex extends ShardedObject {
+    constructor(ctx, env) {
+        super(ctx, env);
+        // Entries are routed by their index route, by the table's clients: a routeOf here would misplace them.
+        if (!this.routesByKey())
+            throw new Error("a GlobalIndex routes entries by their index route: routeOf is not supported");
+    }
     /** How long a reservation may stay pending before the alarm asks its row shard. */
     reservationTimeoutMs = 5_000;
     /** How long an entry a row let go of is kept, so a late older change cannot bring it back. */

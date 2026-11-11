@@ -1,6 +1,6 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
-import { keyHash, ShardedObject } from "../sharded/index.js";
+import { ShardedObject } from "../sharded/index.js";
 import { encodeIndexKey, encodeValue, pageRequest, shortDigest } from "./schema.js";
 export * from "./schema.js";
 export { table, TableClient } from "./client.js";
@@ -136,7 +136,7 @@ export class ShardedTable extends ShardedObject {
         const names = Object.keys(stored);
         const version = (current === 0 ? this.deletedVersion() : current) + 1;
         this.db.exec(`INSERT INTO ${TABLE} (${names.map((n) => this.q(n)).join(", ")}, _hash, _version) VALUES (${names.map(() => "?").join(", ")}, ?, ?) ` +
-            `ON CONFLICT (${this.q(this.table.primaryKey)}) DO UPDATE SET ${names.map((n) => `${this.q(n)} = excluded.${this.q(n)}`).join(", ")}, _version = excluded._version`, ...names.map((n) => stored[n]), keyHash(key), version);
+            `ON CONFLICT (${this.q(this.table.primaryKey)}) DO UPDATE SET ${names.map((n) => `${this.q(n)} = excluded.${this.q(n)}`).join(", ")}, _version = excluded._version`, ...names.map((n) => stored[n]), this.routeHash(key), version);
         if (current === 0)
             this.countRow(key, 1);
         this.countGroups(key, before, stored);
@@ -408,7 +408,7 @@ export class ShardedTable extends ShardedObject {
         const groups = Object.entries(this.table.counts ?? {});
         if (groups.length === 0)
             return;
-        const hash = keyHash(key);
+        const hash = this.routeHash(key);
         for (const [grp, col] of groups) {
             const from = before ? (before[col] ?? null) : undefined;
             const to = after ? (after[col] ?? null) : undefined;
@@ -427,7 +427,7 @@ export class ShardedTable extends ShardedObject {
         return this.db.exec(`SELECT _version AS v FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).toArray()[0]?.v ?? 0;
     }
     countRow(key, delta) {
-        this.db.exec(`INSERT INTO ${COUNTS} (bucket, n) VALUES (?, ?) ON CONFLICT (bucket) DO UPDATE SET n = n + excluded.n`, keyHash(key).slice(0, BUCKET_DIGITS), delta);
+        this.db.exec(`INSERT INTO ${COUNTS} (bucket, n) VALUES (?, ?) ON CONFLICT (bucket) DO UPDATE SET n = n + excluded.n`, this.routeHash(key).slice(0, BUCKET_DIGITS), delta);
     }
     checkKey(key, row) {
         if (row[this.table.primaryKey] !== key)

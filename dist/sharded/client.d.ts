@@ -21,6 +21,16 @@ type Result<F> = F extends (...args: never[]) => infer R ? Awaited<R> : never;
 export declare class SpansShards extends Error {
 }
 /**
+ * The client and the object route keys differently (`routeOf`): nothing was called. Calls would
+ * otherwise reach shards that don't hold their keys once the tree splits.
+ */
+export declare class RouteMismatch extends Error {
+    readonly key: string;
+    readonly clientHash: string;
+    readonly objectHash: string;
+    constructor(key: string, clientHash: string, objectHash: string);
+}
+/**
  * Objects whose splits an isolate keeps, the most recently used: a Worker that reaches one object
  * per account would otherwise grow these for the isolate's life. A forgotten object costs a read
  * of the colo cache, or a few hops.
@@ -49,6 +59,12 @@ export interface ShardedClientOptions {
      * the client then learns the depth from the root, as without one.
      */
     readonly presplitHint?: number;
+    /**
+     * The object's `routeOf`: keys with the same route live in the same shard. The same function as
+     * the class's (the default, the key itself, if it declares none); a call routed by another is
+     * refused with RouteMismatch.
+     */
+    readonly routeOf?: (key: string) => string;
 }
 export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly namespace;
@@ -59,6 +75,7 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private readonly stubOptions;
     private readonly logWideHops;
     private readonly presplitHint;
+    private readonly routeOf;
     constructor(namespace: DurableObjectNamespace<T>, name: string, options?: ShardedClientOptions);
     private get splits();
     /** Marks this object as just used, so it is the last its isolate forgets. */
@@ -67,6 +84,8 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private get presplitTo();
     /** Whether the node `bits` is known to be split: above the presplit depth, or seen splitting. */
     private isSplit;
+    /** The hash a key is routed by: of its route, which is the key itself by default. */
+    private routeHash;
     /** The deepest known node owning a hash. */
     private shardFor;
     private stub;

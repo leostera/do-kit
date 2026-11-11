@@ -15,7 +15,8 @@ This is a snapshot RFD: it records the contract of `ShardedObject` as built in
 ## Summary
 
 A `ShardedObject` is a Durable Object class that splits itself when it gets busy. Keys are
-routed by the SHA-256 of the key. Each shard owns a hash prefix, and lives in an object named by
+routed by the SHA-256 of the key (or of its route, [RFD0006](RFD0006-co-location.md), so related keys share a
+shard). Each shard owns a hash prefix, and lives in an object named by
 that prefix. A busy shard hands the right half of its prefix to a new object, using a storage
 snapshot. It holds only the writes to that half while the copy is made. Clients find shards
 themselves and follow splits lazily. A stale view costs an extra hop, never a wrong answer.

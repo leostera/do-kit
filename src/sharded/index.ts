@@ -20,7 +20,7 @@ import { DurableObject } from "cloudflare:workers";
 import { hashBit, keyHash } from "./hash.js";
 
 export { hashBit, keyHash } from "./hash.js";
-export { SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
+export { RouteMismatch, SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 
 declare global {
   /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
@@ -104,7 +104,13 @@ export function checkSplitPolicy(policy: SplitPolicy): SplitPolicy {
 export type StubOptions = DurableObjectNamespaceGetDurableObjectOptions & { readonly version?: { readonly cohort?: string } };
 
 /** `presplit`, on "moved": the tree's initial depth, so the client routes to it directly. */
-export type CallAnswer<R> = { readonly ok: R } | { readonly moved: string; readonly presplit?: number } | { readonly notReady: string; readonly until?: number } | { readonly stale: string };
+export type CallAnswer<R> =
+  | { readonly ok: R }
+  | { readonly moved: string; readonly presplit?: number }
+  | { readonly notReady: string; readonly until?: number }
+  | { readonly stale: string }
+  /** The client routed `key` by another `routeOf` than this object's: nothing was called. */
+  | { readonly routeMismatch: { readonly key: string; readonly client: string; readonly object: string } };
 
 /** An object's state, for tests and operators. */
 export interface NodeDescription {
@@ -360,6 +366,34 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   protected abstract nodes(): DurableObjectNamespace<any>;
 
+  /**
+   * The route of a key: keys with the same route always live in the same shard, so one
+   * transaction (`update`, `transact`) can read and write them all. Shards own routes by the
+   * SHA-256 of the route, as they own keys by theirs without this: the default is the key itself.
+   * Rows stay keyed by the full key.
+   *
+   * Declare the same function on the client (`sharded(ns, name, { routeOf })`): a call routed by
+   * another is refused with RouteMismatch. It must be pure, and fixed for the life of a tree: a
+   * tree written with one routeOf is not readable with another (use a new name). A route's keys
+   * can't be split apart, so a route that is hot or large is one key's worth of shard.
+   */
+  protected routeOf(key: string): string {
+    return key;
+  }
+
+  /** The hash a key is owned by: `keyHash(routeOf(key))`. */
+  protected routeHash(key: string): string {
+    if (this.routeOf === ShardedObject.prototype.routeOf) return keyHash(key);
+    const route = this.routeOf(key);
+    if (typeof route !== "string") throw new Error(`routeOf(${JSON.stringify(key)}) is not a string`);
+    return keyHash(route);
+  }
+
+  /** Whether the subclass routes keys by something other than themselves. */
+  protected routesByKey(): boolean {
+    return this.routeOf === ShardedObject.prototype.routeOf;
+  }
+
   /** `splitPolicy`, checked once (a subclass sets it after the constructor here runs). */
   private get policy(): SplitPolicy {
     if (this.checkedPolicy !== this.splitPolicy) this.checkedPolicy = checkSplitPolicy(this.splitPolicy);
@@ -438,7 +472,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       const { writes, result } = decide(current);
       for (const [key, value] of writes) {
         if (value === null) this.sql.exec("DELETE FROM sharded_rows WHERE key = ?", key);
-        else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, keyHash(key), JSON.stringify(value));
+        else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), JSON.stringify(value));
       }
       return result;
     });
@@ -513,7 +547,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** Whether `key` is this shard's now. Keys of a split's moving half stay this shard's until it commits. */
   protected owns(key: string): boolean {
     if (!this.meta) throw new Error("node has no name yet");
-    return ownsHash(this.meta.bits, keyHash(key));
+    return ownsHash(this.meta.bits, this.routeHash(key));
   }
 
   /** This shard's name (`${name}#${bits}`), once it has one. */
@@ -537,7 +571,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private assertOwner(keys: readonly string[]): void {
     const meta = this.meta;
     if (meta?.state !== "shard") throw new Moved();
-    for (const key of keys) if (!ownsHash(meta.bits, keyHash(key))) throw new Moved();
+    for (const key of keys) if (!ownsHash(meta.bits, this.routeHash(key))) throw new Moved();
   }
 
   /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
@@ -589,20 +623,28 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private holding(keys: readonly string[]): Promise<void> | null {
     const hold = this.hold;
     if (!hold) return null;
-    for (const key of keys) if (ownsHash(hold.right, keyHash(key))) return hold.released;
+    for (const key of keys) if (ownsHash(hold.right, this.routeHash(key))) return hold.released;
     return null;
   }
 
   // ---- The routed call ----
 
   /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0): Promise<CallAnswer<unknown>> {
+  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0, hashes: readonly string[] | null = null): Promise<CallAnswer<unknown>> {
     this.assertNotWiped();
     this.callerStubOptions = stubOptions;
+    // Routed by another routeOf: even where it would land here (the root owns every key), the
+    // client would look for these keys elsewhere once the tree splits.
+    if (hashes) {
+      for (let i = 0; i < keys.length; i++) {
+        const own = this.routeHash(keys[i]!);
+        if (hashes[i] !== own) return { routeMismatch: { key: keys[i]!, client: hashes[i]!, object: own } };
+      }
+    }
     const answer = await this.arriveOrCreate(name, bits, presplitTo);
     if (answer) return this.answered(answer);
     this.counters.calls++;
-    for (const key of keys) if (!ownsHash(bits, keyHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
+    for (const key of keys) if (!ownsHash(bits, this.routeHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
     this.countCall(keys.length);
     const fn = this.routedMethod(method);
     try {
@@ -1171,7 +1213,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       if (deleted === 0) this.saveMeta({ ...this.meta!, cleanup: this.meta!.cleanup.slice(1) });
     } else if (meta.foreign) {
       const bits = meta.bits;
-      const deleted = this.ctx.storage.transactionSync(() => this.cleanupForeign((key) => ownsHash(bits, keyHash(key)), DELETE_BATCH_ROWS));
+      const deleted = this.ctx.storage.transactionSync(() => this.cleanupForeign((key) => ownsHash(bits, this.routeHash(key)), DELETE_BATCH_ROWS));
       if (deleted === 0) this.saveMeta({ ...this.meta!, foreign: false });
     }
   }
@@ -1282,7 +1324,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (!this.isUnclaimedCopy() || meta.bits !== parent || meta.splitting !== epoch) return false; // not this copy
     this.receiving = null; // claimed: no batch may change it now
     this.ctx.storage.transactionSync(() => {
-      this.afterClone((key) => ownsHash(bits, keyHash(key)));
+      this.afterClone((key) => ownsHash(bits, this.routeHash(key)));
       // The parent's meta (copied with its storage) gives the tree's presplit depth.
       this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, ...(meta.presplit ? { presplit: meta.presplit } : {}), parent, splitAt: Date.now() });
     });

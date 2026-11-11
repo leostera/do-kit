@@ -24,6 +24,7 @@ export interface GlobalIndexStats {
  * Subclasses that override `onAlarm` or `cleanupForeign` must call `super`.
  */
 export declare abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
+    constructor(ctx: DurableObjectState, env: Env);
     /** The binding of the IndexedTable whose rows this indexes. */
     protected abstract rowNodes(): DurableObjectNamespace<any>;
     /** How long a reservation may stay pending before the alarm asks its row shard. */

@@ -23,6 +23,21 @@ type Result<F> = F extends (...args: never[]) => infer R ? Awaited<R> : never;
 /** Keys that had to go to one shard belong to several (nothing was applied). */
 export class SpansShards extends Error {}
 
+/**
+ * The client and the object route keys differently (`routeOf`): nothing was called. Calls would
+ * otherwise reach shards that don't hold their keys once the tree splits.
+ */
+export class RouteMismatch extends Error {
+  constructor(
+    readonly key: string,
+    readonly clientHash: string,
+    readonly objectHash: string,
+  ) {
+    super(`key ${JSON.stringify(key)}: the client routes it to hash ${clientHash}, the object to ${objectHash}; declare the same routeOf on both`);
+    this.name = "RouteMismatch";
+  }
+}
+
 /** v2: the splits and the presplit depth (v1 entries, splits only, are left to expire). */
 const CACHE_ORIGIN = "https://do-kit.invalid/v2/";
 /**
@@ -81,6 +96,12 @@ export interface ShardedClientOptions {
    * the client then learns the depth from the root, as without one.
    */
   readonly presplitHint?: number;
+  /**
+   * The object's `routeOf`: keys with the same route live in the same shard. The same function as
+   * the class's (the default, the key itself, if it declares none); a call routed by another is
+   * refused with RouteMismatch.
+   */
+  readonly routeOf?: (key: string) => string;
 }
 /**
  * After waiting this long on shards that are not ready, a call forgets the splits it knows of this
@@ -133,6 +154,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private readonly logWideHops: number;
 
   private readonly presplitHint: number;
+  private readonly routeOf: ((key: string) => string) | null;
   constructor(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}) {
     this.namespace = namespace;
     this.name = name;
@@ -140,6 +162,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     this.stubOptions = options.stubOptions ?? null;
     this.logWideHops = options.logWideHops ?? 0;
     this.presplitHint = options.presplitHint ?? 0;
+    this.routeOf = options.routeOf ?? null;
     this.identity = namespace.idFromName(nodeName(name, "")).toString();
   }
 
@@ -176,6 +199,14 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     return bits.length < this.presplitTo || this.splits.has(bits);
   }
 
+  /** The hash a key is routed by: of its route, which is the key itself by default. */
+  private routeHash(key: string): string {
+    if (!this.routeOf) return keyHash(key);
+    const route = this.routeOf(key);
+    if (typeof route !== "string") throw new Error(`sharded ${this.name}: routeOf(${JSON.stringify(key)}) is not a string`);
+    return keyHash(route);
+  }
+
   /** The deepest known node owning a hash. */
   private shardFor(hash: string): string {
     let bits = "";
@@ -210,7 +241,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private async route<M extends KeyMethods<T>>(oneShard: boolean, keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, args: Rest<T[M]>): Promise<ShardResult<Result<T[M]>>[]> {
     if (payloads && payloads.length !== keys.length) throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
     await this.loadCache();
-    const hashes = keys.map(keyHash);
+    const hashes = keys.map((key) => this.routeHash(key));
     const out: ShardResult<Result<T[M]>>[] = [];
     let pending = keys.map((_, i) => i);
     const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
@@ -235,9 +266,11 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           const groupKeys = positions.map((i) => keys[i]!);
           const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
           const called = Date.now();
-          const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo)) as CallAnswer<Result<T[M]>>;
+          const groupHashes = positions.map((i) => hashes[i]!);
+          const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo, groupHashes)) as CallAnswer<Result<T[M]>>;
           took.push(Date.now() - called);
           if ("ok" in answer) out.push({ keys: groupKeys, positions, result: answer.ok });
+          else if ("routeMismatch" in answer) throw new RouteMismatch(answer.routeMismatch.key, answer.routeMismatch.client, answer.routeMismatch.object);
           else if ("moved" in answer) {
             this.learn(answer.moved, answer.presplit);
             retry.push(...positions);
