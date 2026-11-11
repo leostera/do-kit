@@ -167,6 +167,11 @@ export class ShardedObject extends DurableObject {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     atomic = {};
     /**
+     * How long a primary keeps an atomic call's outcome that nobody forgot (a caller gone after the
+     * commit), and a split half its copies: far longer than any hold lives. The alarm purges them.
+     */
+    atomicOutcomeTtlMs = ATOMIC_OUTCOME_TTL_MS;
+    /**
      * The share (0 to 1) of new shards that log a `shard-created` JSON line on their first call,
      * with how long the root took to confirm the tree's depth (`rootMs`). Off by default.
      */
@@ -522,12 +527,18 @@ export class ShardedObject extends DurableObject {
                 return this.atomicSolo(step.method, keys, payloads, args);
             case "prepare":
                 return this.atomicPrepare(step, keys, payloads, args);
-            case "commit":
-                return this.atomicCommit(step.tx, step.method, keys, payloads, args);
+            case "commit": {
+                const answer = await this.atomicCommit(step.tx, step.method, keys, payloads, args);
+                await this.armOutcomeExpiry();
+                return answer;
+            }
             case "abort":
-            case "outcome":
+            case "outcome": {
                 this.assertOwner(keys);
-                return { outcome: this.recordOutcome(step.tx, "abort") };
+                const outcome = this.recordOutcome(step.tx, "abort");
+                await this.armOutcomeExpiry();
+                return { outcome };
+            }
             case "forget":
                 this.assertOwner(keys);
                 if (this.hasAtomicTables())
@@ -620,9 +631,25 @@ export class ShardedObject extends DurableObject {
         this.ensureAtomicSchema();
         const now = Date.now();
         this.sql.exec("INSERT INTO sharded_atomic_outcomes (tx, outcome, at) VALUES (?, ?, ?)", tx, outcome, now);
-        // Outcomes nobody forgot (a caller that died after the commit) go long after any hold could ask.
-        this.sql.exec("DELETE FROM sharded_atomic_outcomes WHERE at < ?", now - ATOMIC_OUTCOME_TTL_MS);
         return outcome;
+    }
+    /** When the oldest outcome kept here expires, or null if none is kept. */
+    outcomeExpiry() {
+        if (!this.hasAtomicTables())
+            return null;
+        const oldest = this.sql.exec("SELECT min(at) AS at FROM sharded_atomic_outcomes").one().at;
+        return oldest === null ? null : oldest + this.atomicOutcomeTtlMs;
+    }
+    /** Outcomes nobody forgot go once their TTL passes, by the alarm: asks for it then. */
+    async armOutcomeExpiry() {
+        const expiry = this.outcomeExpiry();
+        if (expiry !== null)
+            await this.armAlarm(expiry);
+    }
+    /** Deletes the outcomes past their TTL. */
+    purgeOutcomes() {
+        if (this.hasAtomicTables())
+            this.sql.exec("DELETE FROM sharded_atomic_outcomes WHERE at <= ?", Date.now() - this.atomicOutcomeTtlMs);
     }
     /** A share prepared here: applied (commit) or dropped (abort), and its keys released, in one transaction. */
     async atomicResolve(tx, outcome) {
@@ -1382,8 +1409,9 @@ export class ShardedObject extends DurableObject {
             failed = true;
             console.error(JSON.stringify({ event: "split-cleanup-failed", node: this.nodeLabel(), error: String(error) }));
         }
-        // Atomic holds past their deadline ask their primary (RFD0008).
+        // Atomic holds past their deadline ask their primary, and outcomes past their TTL go (RFD0008).
         try {
+            this.purgeOutcomes();
             await this.recoverHolds();
         }
         catch (error) {
@@ -1426,6 +1454,9 @@ export class ShardedObject extends DurableObject {
         const holdDue = this.nextHoldDeadline();
         if (holdDue !== null)
             times.push(holdDue <= Date.now() ? Date.now() + ALARM_RETRY_MS : holdDue);
+        const outcomesDue = this.outcomeExpiry();
+        if (outcomesDue !== null)
+            times.push(Math.max(outcomesDue, Date.now() + ALARM_RETRY_MS));
         // After onAlarm the alarm is its retry's: set it to what is due next, or clear it.
         if (ran)
             return times.length > 0 ? this.ctx.storage.setAlarm(Math.min(...times)) : this.ctx.storage.deleteAlarm();

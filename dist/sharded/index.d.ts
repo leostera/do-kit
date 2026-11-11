@@ -207,6 +207,11 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      */
     protected atomic: Readonly<Record<string, AtomicMethod<V, any, any, any, any>>>;
     /**
+     * How long a primary keeps an atomic call's outcome that nobody forgot (a caller gone after the
+     * commit), and a split half its copies: far longer than any hold lives. The alarm purges them.
+     */
+    protected atomicOutcomeTtlMs: number;
+    /**
      * The share (0 to 1) of new shards that log a `shard-created` JSON line on their first call,
      * with how long the root took to confirm the tree's depth (`rootMs`). Off by default.
      */
@@ -371,6 +376,12 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private outcomeOf;
     /** Records `outcome` for `tx` unless one is recorded; returns the one that is. */
     private recordOutcome;
+    /** When the oldest outcome kept here expires, or null if none is kept. */
+    private outcomeExpiry;
+    /** Outcomes nobody forgot go once their TTL passes, by the alarm: asks for it then. */
+    private armOutcomeExpiry;
+    /** Deletes the outcomes past their TTL. */
+    private purgeOutcomes;
     /** A share prepared here: applied (commit) or dropped (abort), and its keys released, in one transaction. */
     private atomicResolve;
     /** Holds past their deadline: asks each one's primary for the outcome, and resolves it. */
