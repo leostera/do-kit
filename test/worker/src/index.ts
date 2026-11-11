@@ -23,6 +23,8 @@ interface Env extends GraphEnv {
   readonly OLD_ALARM: DurableObjectNamespace<OldAlarm>;
   readonly USERS: DurableObjectNamespace<Users>;
   readonly USER_INDEXES: DurableObjectNamespace<UserIndexes>;
+  readonly EVOLVING_USERS: DurableObjectNamespace<EvolvingUsers>;
+  readonly EVOLVING_USER_INDEXES: DurableObjectNamespace<EvolvingUserIndexes>;
   /** Set when deployed: every request carries it as a bearer token (the routes can delete data). */
   readonly TEST_TOKEN?: string;
 }
@@ -129,10 +131,45 @@ export class UserIndexes extends GlobalIndex<Env> {
     this.ctx.storage.sql.exec("DELETE FROM test_apply");
     this.ctx.storage.sql.exec("INSERT INTO test_apply (fail) VALUES (?)", fail ? 1 : 0);
   }
-  override async indexApply(...args: Parameters<GlobalIndex<Env>["indexApply"]>): Promise<null[]> {
+  override async indexApply(...args: Parameters<GlobalIndex<Env>["indexApply"]>): ReturnType<GlobalIndex<Env>["indexApply"]> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_apply (fail INTEGER NOT NULL)");
     if (this.ctx.storage.sql.exec("SELECT fail FROM test_apply WHERE fail = 1").toArray().length) throw new Error("test: apply failed");
     return super.indexApply(...args);
+  }
+}
+
+/** Users listed by team, then (after `upgrade`) also unique by email: an index added to a table that has rows. */
+const usersV1 = defineTable<User>({ primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "createdAt"], partition: 1 } } });
+
+export class EvolvingUsers extends IndexedTable<Env, User> {
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
+  protected get table(): TableSchema<User> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
+    const version = this.ctx.storage.sql.exec<{ version: number }>("SELECT version FROM test_schema").toArray()[0]?.version ?? 1;
+    return version === 2 ? users : usersV1;
+  }
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.EVOLVING_USERS as never;
+  }
+  protected indexNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.EVOLVING_USER_INDEXES as never;
+  }
+  /** A deploy of the new schema: records it and restarts, so the next call migrates. */
+  async upgrade(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_schema");
+    this.ctx.storage.sql.exec("INSERT INTO test_schema (version) VALUES (2)");
+    await this.ctx.storage.sync();
+    this.ctx.abort("upgrade");
+  }
+}
+
+export class EvolvingUserIndexes extends GlobalIndex<Env> {
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.EVOLVING_USER_INDEXES as never;
+  }
+  protected rowNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.EVOLVING_USERS as never;
   }
 }
 
@@ -147,6 +184,8 @@ const docsV2 = defineTable<DocV2>({
 });
 
 export class EvolvingDocs extends ShardedTable<Env, DocV2> {
+  /** A new index is built over a few hundred rows a call, so tests see it take several. */
+  protected override indexBuildRows = 300;
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
   protected get table(): TableSchema<DocV2> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
@@ -526,10 +565,16 @@ function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
 }
 
 /** POST /indexed {name, op, args}: one call of the indexed table client, or a test hook. */
-async function indexedOp(env: Env, body: { name: string; op: string; args: unknown[] }): Promise<unknown> {
-  const t = indexedTable(env.USERS, env.USER_INDEXES, body.name, users);
-  const rows = sharded(env.USERS, body.name);
-  const indexes = sharded(env.USER_INDEXES, body.name);
+async function indexedOp(env: Env, body: { name: string; op: string; args: unknown[]; cls?: "evolving" }): Promise<unknown> {
+  // "evolving": the table that gains its unique index after `upgrade` (args[0]: which schema the client has).
+  if (body.cls === "evolving" && body.op === "upgrade") {
+    for (const bits of body.args as string[]) await env.EVOLVING_USERS.get(env.EVOLVING_USERS.idFromName(shardObjectName(body.name, bits))).upgrade().catch(() => {});
+    return null;
+  }
+  const [rowNs, indexNs] = body.cls === "evolving" ? [env.EVOLVING_USERS as unknown as typeof env.USERS, env.EVOLVING_USER_INDEXES as unknown as typeof env.USER_INDEXES] : [env.USERS, env.USER_INDEXES];
+  const t = indexedTable(rowNs, indexNs, body.name, users);
+  const rows = sharded(rowNs, body.name);
+  const indexes = sharded(indexNs, body.name);
   const untyped = (client: unknown) => client as { call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{ positions: number[]; result: unknown[] }[]>; scan(method: string, ...a: unknown[]): Promise<unknown[]> };
   const flat = async (groups: Promise<{ positions: number[]; result: unknown[] }[]>) => {
     const out: unknown[] = [];
@@ -573,7 +618,7 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
     case "outbox":
       return (await untyped(rows).scan("outboxSize")).reduce((a: number, b) => a + (b as number), 0);
     case "split": // [side, bits]
-      return (body.args[0] === "rows" ? env.USERS : env.USER_INDEXES).get((body.args[0] === "rows" ? env.USERS : env.USER_INDEXES).idFromName(shardObjectName(body.name, body.args[1] as string))).shardedSplit(body.name, body.args[1] as string);
+      return (body.args[0] === "rows" ? rowNs : indexNs).get((body.args[0] === "rows" ? rowNs : indexNs).idFromName(shardObjectName(body.name, body.args[1] as string))).shardedSplit(body.name, body.args[1] as string);
     case "failApply": // [fail, bits]
       return env.USER_INDEXES.get(env.USER_INDEXES.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).failApply(body.args[0] as boolean);
   }

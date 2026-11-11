@@ -291,11 +291,24 @@ changes go through the client, which reserves first.
 ### Compatibility and migration
 
 - `IndexedTable` is a new class, and `ShardedTable` is unchanged.
-- Turning a `ShardedTable` into an `IndexedTable` keeps its storage. Adding a global index to a
-  table with rows needs a backfill: each row shard pages its rows into the outbox, and the index
-  is not used for lookups until every shard reports done. The backfill has to reserve unique
-  values like any write, and reports rows that conflict.
-- Removing a global index drops its entries.
+- Turning a `ShardedTable` into an `IndexedTable` keeps its storage.
+- **Adding a global index to a table that has rows** builds it in the background. Each row shard
+  records the global indexes it has seen (`indexed_globals`). One it has not seen is built over
+  its own rows from its alarm: 200 rows at a time, each row's entry put in the outbox and
+  delivered like a write's, with how far it got stored. A split copies that, and each side goes on
+  over its own rows. Writes meanwhile index the row as usual, so the two meet by version.
+  - `indexStatus()` on the client says which indexes are still `building`. Until one is not, its
+    lookups and pages may miss rows. The first time a shard records any index, it takes the
+    schema's as built: they are as old as its table.
+  - A **unique** index cannot reserve for rows that are already there. A row whose value another
+    row has is not put in the index, and is reported in `indexStatus().duplicates` with the row
+    that has the value. Which of the two is in the index is whichever reached it first. Nothing
+    is changed in the rows: the app decides. Writing the reported row with a free value settles
+    it. From the moment the index is declared it is enforced for writes, against the rows indexed
+    so far, so a write can take a value that a row not yet reached also has; that row is then the
+    one reported.
+- Removing a global index leaves its entries on the index shards (not cleaned up yet). Redefining
+  one under the same name builds it again.
 
 ### Security, privacy, and observability
 
@@ -422,7 +435,7 @@ Phase 1 is built with the first answer to each, so each can still change before 
 - How long a reservation waits before the alarm resolves it. Built: 5 s (`reservationTimeoutMs`).
 - Batching outbox delivery per index shard. Built: coalesced across writes (see Deliver), each
   call split per index shard by the sharded client.
-- Not built yet: the backfill of a global index added to a table that has rows.
+- Not built yet: dropping the entries of a global index that was removed.
 
 ### Out of scope
 

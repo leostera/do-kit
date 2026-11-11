@@ -246,3 +246,31 @@ test("splits of the rows and of the index while writing: every row is found thro
   }
   expect(await op<number>(t, "outbox")).toBe(0);
 }, 120_000);
+
+test("a unique index added to a table that has rows is built over them, and reports the rows that share a value", async () => {
+  const t = fresh("evolving-users");
+  const evolve = <T>(operation: string, ...args: unknown[]) => post<T>("/indexed", { cls: "evolving", name: t, op: operation, args });
+  // 450 users under the first schema (no index on email), two of them with the same email. Split
+  // once, so the index is built by two shards, each over its own rows.
+  const people = Array.from({ length: 450 }, (_, i) => user(`p-${i}`, i === 7 ? "p-3@example.com" : `p-${i}@example.com`));
+  for (let i = 0; i < people.length; i += 90) await evolve("putMany", people.slice(i, i + 90).map((row) => ({ row })));
+  expect(await evolve("split", "rows", "")).toBe(true);
+  await evolve("upgrade", "", "1");
+  type Status = { building: string[]; duplicates: { index: string; key: string; owner: string }[] };
+  const status = await eventually(() => ok(evolve<Result<Status>>("indexStatus")), (s) => s.building.length === 0, 60_000);
+  // One of the two rows with the email has it; the other is reported, with the row that has it.
+  expect(status.duplicates.length).toBe(1);
+  const [dup] = status.duplicates;
+  expect(dup!.index).toBe("byEmail");
+  expect([dup!.key, dup!.owner].sort()).toEqual(["p-3", "p-7"]);
+  const find = (email: string) => ok(evolve<Result<Versioned | null>>("lookup", "byEmail", [email]));
+  expect((await find("p-3@example.com"))?.row.id).toBe(dup!.owner);
+  // Every other row is found by its email, at the version it has.
+  for (const i of [0, 1, 100, 249, 449]) expect((await find(`p-${i}@example.com`))?.row.id).toBe(`p-${i}`);
+  expect((await evolve<{ entries: number }[]>("indexStats")).reduce((n, s) => n + s.entries, 0)).toBe(2 * people.length - 1);
+  // The unique index is enforced from here on, and writing the reported row with a free value settles it.
+  expect(await ok(evolve<Result<WriteResult>>("put", user("new", "p-100@example.com"), { ifVersion: 0 }))).toMatchObject({ ok: false, conflict: "byEmail" });
+  expect(await ok(evolve<Result<WriteResult>>("patch", dup!.key, { email: "free@example.com" }))).toMatchObject({ ok: true });
+  expect((await find("free@example.com"))?.row.id).toBe(dup!.key);
+  expect((await ok(evolve<Result<Status>>("indexStatus"))).duplicates).toEqual([]);
+}, 120_000);

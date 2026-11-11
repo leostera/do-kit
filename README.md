@@ -214,7 +214,8 @@ await t.list({ index: "byTeam", partition: ["core"], direction: "desc", limit: 5
 - **Unique values are reserved with fencing tokens.** A reservation left behind by a writer that never wrote is resolved by asking the row's shard, which fences the token so that writer's write cannot land later. The protocol is model-checked in [`specs/indexed-write.ts`](specs/indexed-write.ts): at most one row has a value, a write that returned is found, and the indexes converge to the rows, across lost calls, timeouts and late deliveries.
 - **The rows stay the truth.** Index entries carry a copy of the row, so a lookup or page needs no second call. Every write rewrites its entries, so each global index costs one more write per row write, and a write with a unique index makes one more call before it.
 - Rows and index shards split by load, independently. Per-shard `indexes` and `counts` work as in `ShardedTable`. Custom methods that write rows use `indexedTransact`.
-- A global index lists rows within one partition value, not sorted across the whole table, and is declared with the table: it is not added to a table that already has rows.
+- A global index lists rows within one partition value, not sorted across the whole table. One added to a table that already has rows is built in the background, shard by shard: `indexStatus()` says which are still building, and which rows a new unique index could not take because another row has their value.
+- A local index (`indexes`) added to a table that has rows is built a slice per call: the shard answers "not ready" (the client retries) until every row is in it, so building it never needs more CPU than a call has.
 
 ## Work graphs: work too big for one invocation
 

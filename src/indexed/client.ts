@@ -3,7 +3,7 @@
 import { sharded, type ShardedClientOptions } from "../sharded/client.js";
 import { TableClient, type Untyped } from "../table/client.js";
 import { decodeCursor, encodeCursor, encodeValue, pageRequest, queryFingerprint, type Condition, type ListPage, type ListQuery, type RowShape, type TableSchema, type Versioned, type WriteResult } from "../table/schema.js";
-import { entryOf, globalIndexes, routeOf, type EntryAddress, type GlobalIndexInfo, type IndexPage, type ReserveAnswer } from "./entries.js";
+import { entryOf, globalIndexes, routeOf, type EntryAddress, type GlobalIndexInfo, type IndexPage, type IndexStatus, type ReserveAnswer } from "./entries.js";
 import type { IndexedShardResult } from "./table.js";
 
 /** Times a write is tried again when a reservation was given up before the row was written. */
@@ -133,6 +133,17 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
     const results = await this.byPosition<IndexedShardResult>([key], "tableDelete", [options]);
     this.settle([0], results, out, WRITE_ATTEMPTS, () => key);
     return out[0]!;
+  }
+
+  /**
+   * How far the global indexes are built. One added to a table that has rows is built in the
+   * background, shard by shard: until it is no longer `building`, its lookups and pages may miss
+   * rows. `duplicates` are rows that were there before a unique index and share a value with
+   * another row: they are not in the index until they are written again with a free value.
+   */
+  async indexStatus(): Promise<IndexStatus> {
+    const shards = (await this.client.scan("indexBuildStatus")) as IndexStatus[];
+    return { building: [...new Set(shards.flatMap((s) => s.building))].sort(), duplicates: shards.flatMap((s) => s.duplicates) };
   }
 
   /** The row whose values of a unique global index are `values`, in one call to one index shard. */

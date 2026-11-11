@@ -5,7 +5,7 @@
 import { keyHash, sharded, ShardedObject } from "../sharded/index.js";
 import type { Untyped } from "../table/client.js";
 import type { Condition, RowShape, SqlValue, Versioned } from "../table/schema.js";
-import type { IndexOp, IndexPage, IndexPageRequest, ReserveAnswer, ResolveAnswer } from "./entries.js";
+import type { ApplyAnswer, IndexOp, IndexPage, IndexPageRequest, ReserveAnswer, ResolveAnswer } from "./entries.js";
 
 const ENTRIES = "global_index_entries";
 const META = "global_index_meta";
@@ -87,14 +87,12 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
   }
 
   /** Applies changes delivered by row shards, idempotently and by version. */
-  async indexApply(routes: readonly string[], ops: readonly IndexOp[]): Promise<null[]> {
+  async indexApply(routes: readonly string[], ops: readonly IndexOp[]): Promise<ApplyAnswer[]> {
     this.migrate();
     const now = Date.now();
-    await this.transact(routes, () => {
-      for (const op of ops) this.apply(op, now);
-    });
+    const answers = await this.transact(routes, () => ops.map((op) => this.apply(op, now)));
     if (ops.some((op) => op.kind === "remove")) await this.wake(now + this.tombstoneMs);
-    return ops.map(() => null);
+    return answers;
   }
 
   /** The rows of unique entries (null: none, or only reserved). */
@@ -192,7 +190,11 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
 
   // ---- Delivered changes ----
 
-  private apply(op: IndexOp, now: number): void {
+  private apply(op: IndexOp, now: number): ApplyAnswer {
+    return this.applied(op, now) ?? null;
+  }
+
+  private applied(op: IndexOp, now: number): ApplyAnswer | void {
     const e = this.get(op.route, op.entry);
     if (op.kind === "put") {
       if (!e) {
@@ -200,6 +202,14 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
           `INSERT INTO ${ENTRIES} (route, entry, hash, owner, version, row, pending, issued, removed, floor, fenced, at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0, 0, 0, ?)`,
           op.route, op.entry, keyHash(op.route), op.owner, op.version, JSON.stringify(op.row), op.token ?? 0, now,
         );
+        this.stats.applied++;
+        return;
+      }
+      if (e.owner !== op.owner && op.backfill) {
+        // A row from before its unique index, whose value another row has: it is reported, not
+        // indexed. Unless that row let go of the value: then this one has it.
+        if (!(e.removed && e.pending === null)) return { taken: e.owner };
+        this.db.exec(`UPDATE ${ENTRIES} SET owner = ?, version = ?, row = ?, pending = NULL, issued = 0, removed = 0, floor = 0, fenced = 0, at = ? WHERE route = ? AND entry = ?`, op.owner, op.version, JSON.stringify(op.row), now, op.route, op.entry);
         this.stats.applied++;
         return;
       }
