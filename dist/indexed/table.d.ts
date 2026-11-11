@@ -29,8 +29,12 @@ export declare abstract class IndexedTable<Env, Row extends RowShape> extends Sh
     private indexMigrated;
     private batch;
     private indexClient;
-    /** Outbox entries being delivered now. */
-    private readonly delivering;
+    /** Outbox entries queued or being sent, and who waits for them. */
+    private readonly waiting;
+    /** Outbox entries queued, not sent yet, oldest first. */
+    private readonly queued;
+    /** Calls to the index shards in flight. */
+    private sends;
     private wakeAt;
     /**
      * Whether row `key` has an entry a reservation is pending for. If not, fences `token`, so no
@@ -57,18 +61,34 @@ export declare abstract class IndexedTable<Env, Row extends RowShape> extends Sh
     protected rowWritten(key: string, before: Row | null, after: Row | null, version: number): void;
     /** Delivers these outbox entries; true if they all were within `ms` (they go on being delivered either way). */
     private deliverWithin;
-    /**
-     * Sends outbox entries to their index shards, and deletes them once applied. Entries being sent
-     * by another delivery are waited for, not sent twice.
-     */
+    /** Delivers these outbox entries: queues them (once), and resolves when every one is applied. */
     private deliver;
-    /** Waits while another delivery sends some of these entries; throws if they are still in the outbox after. */
-    private waitDelivered;
-    /** Delivers what is left in the outbox. Call `super.onAlarm()`. */
+    /** Starts sends while there is something queued and room for another call. */
+    private pump;
+    /** One call: sends these entries to their index shards, and deletes them once applied. */
+    private send;
+    /**
+     * The changes to send for these outbox entries. A put goes with the row as it is now, if it is
+     * still at the put's version. If a later write superseded it (or deleted the row), that write's
+     * changes cover the entries: the put goes as a confirm of its token, or not at all.
+     */
+    private onTheWire;
+    /**
+     * Delivers what writes left in the outbox: entries older than DELIVERY_RETRY_MS that no delivery
+     * is sending (a write that crashed, or gave up waiting and failed). Younger entries belong to
+     * writes still delivering them. Call `super.onAlarm()`.
+     */
     protected onAlarm(): Promise<void>;
-    /** The copy drops the outbox: the original goes on delivering all of it. Call `super.afterClone`. */
+    /**
+     * The copy keeps the outbox entries of its own keys, and delivers them: it has those rows from
+     * here on, and a put is sent with its row. The rest are the original's. Call `super.afterClone`.
+     */
     protected afterClone(owns: (key: string) => boolean): void;
-    /** Drops the fences of keys given away (never the outbox: see afterClone). Call `super.cleanupForeign`. */
+    /**
+     * Drops the outbox entries and fences of keys given away: the copy has them (see afterClone). An
+     * entry a write here is still sending stays until it is sent, and so do the rows given away, since
+     * a put is sent with its row. Call `super.cleanupForeign`.
+     */
     protected cleanupForeign(owns: (key: string) => boolean, limit: number): number;
     protected migrate(): void;
     private fence;

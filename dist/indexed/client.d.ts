@@ -38,8 +38,12 @@ export declare class IndexedTableClient<Row extends RowShape> extends TableClien
         ifVersion?: number;
     }): Promise<IndexedWriteResult>;
     /**
-     * Writes whole rows. Reserves each row's unique values first: a value another row has fails that
-     * write with `conflict`. Returns once every index has the rows, or throws IndexPending.
+     * Writes whole rows. A unique value another row has fails that write with `conflict`. Returns
+     * once every index has the rows, or throws IndexPending.
+     *
+     * A create (`ifVersion: 0`) reserves its unique values first. Any other put is sent without
+     * reservations: if it keeps the row's unique values, it needs none, and if the row shard refuses
+     * it because one changes, it is reserved and sent again.
      */
     putMany(writes: readonly Write<Row>[]): Promise<IndexedWriteResult[]>;
     /** Changes some columns of an existing row; reserves the unique values it changes first. */

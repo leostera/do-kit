@@ -147,7 +147,7 @@ export class GlobalIndex extends ShardedObject {
         if (token < e.issued)
             return;
         this.stats.aborted++;
-        this.db.exec(`UPDATE ${ENTRIES} SET pending = NULL, removed = 1, fenced = 1, floor = max(floor, ?), at = ? WHERE route = ? AND entry = ?`, answer.version, Date.now(), route, entry);
+        this.db.exec(`UPDATE ${ENTRIES} SET pending = NULL, removed = 1, row = NULL, fenced = 1, floor = max(floor, ?), at = ? WHERE route = ? AND entry = ?`, answer.version, Date.now(), route, entry);
     }
     // ---- Delivered changes ----
     apply(op, now) {
@@ -173,6 +173,14 @@ export class GlobalIndex extends ShardedObject {
                 this.stats.ignored++;
             return;
         }
+        if (op.kind === "confirm") {
+            // A put a later write superseded: only its reservation is confirmed.
+            if (e && e.owner === op.owner && e.pending !== null && op.token >= e.pending)
+                this.db.exec(`UPDATE ${ENTRIES} SET pending = NULL WHERE route = ? AND entry = ?`, op.route, op.entry);
+            else
+                this.stats.ignored++;
+            return;
+        }
         if (!e) {
             // A remove before its put: a tombstone, so the put is ignored when it comes.
             this.db.exec(`INSERT INTO ${ENTRIES} (route, entry, hash, owner, version, row, pending, issued, removed, floor, fenced, at) VALUES (?, ?, ?, ?, 0, NULL, NULL, 0, 1, ?, 0, ?)`, op.route, op.entry, keyHash(op.route), op.owner, op.version, now);
@@ -181,7 +189,8 @@ export class GlobalIndex extends ShardedObject {
         }
         if (e.owner !== op.owner || op.version <= e.version)
             return void this.stats.ignored++;
-        this.db.exec(`UPDATE ${ENTRIES} SET removed = 1, floor = max(floor, ?), at = ? WHERE route = ? AND entry = ?`, op.version, now, op.route, op.entry);
+        // A tombstone keeps no copy of the row.
+        this.db.exec(`UPDATE ${ENTRIES} SET removed = 1, row = NULL, floor = max(floor, ?), at = ? WHERE route = ? AND entry = ?`, op.version, now, op.route, op.entry);
         this.stats.applied++;
     }
     // ---- Listings ----

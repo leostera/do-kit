@@ -26,8 +26,9 @@ export declare function entriesOf<Row extends RowShape>(schema: TableSchema<Row>
 export declare function addressKey(e: Pick<EntryAddress, "route" | "entry">): string;
 /**
  * A change a row shard delivers to an index shard: a put (the row's entry at `version`, with a
- * copy of the row; with the reservation token it was written with, for a unique index) or a
- * remove (the row no longer has the entry since `version`).
+ * copy of the row; with the reservation token it was written with, for a unique index), a remove
+ * (the row no longer has the entry since `version`), or a confirm (a put a later write superseded:
+ * only its token, which clears the reservation).
  */
 export type IndexOp = {
     readonly kind: "put";
@@ -43,6 +44,26 @@ export type IndexOp = {
     readonly entry: string;
     readonly owner: string;
     readonly version: number;
+} | {
+    readonly kind: "confirm";
+    readonly route: string;
+    readonly entry: string;
+    readonly owner: string;
+    readonly version: number;
+    readonly token: number;
+};
+/** An index change as the outbox keeps it: a put without the row, which is read when it is sent. */
+export type StoredOp = Exclude<IndexOp, {
+    kind: "put";
+} | {
+    kind: "confirm";
+}> | {
+    readonly kind: "put";
+    readonly route: string;
+    readonly entry: string;
+    readonly owner: string;
+    readonly version: number;
+    readonly token: number | null;
 };
 /** What reserving a unique value answered. */
 export type ReserveAnswer = {

@@ -54,27 +54,38 @@ export class IndexedTableClient extends TableClient {
         return (await this.putMany([{ row, ...options }]))[0];
     }
     /**
-     * Writes whole rows. Reserves each row's unique values first: a value another row has fails that
-     * write with `conflict`. Returns once every index has the rows, or throws IndexPending.
+     * Writes whole rows. A unique value another row has fails that write with `conflict`. Returns
+     * once every index has the rows, or throws IndexPending.
+     *
+     * A create (`ifVersion: 0`) reserves its unique values first. Any other put is sent without
+     * reservations: if it keeps the row's unique values, it needs none, and if the row shard refuses
+     * it because one changes, it is reserved and sent again.
      */
     async putMany(writes) {
         const out = new Array(writes.length);
+        const reserve = new Set(writes.flatMap((w, i) => (w.ifVersion === 0 ? [i] : [])));
         let todo = writes.map((_, i) => i);
+        // One more attempt than WRITE_ATTEMPTS: an optimistic put's refusal is not a lost reservation.
         for (let attempt = 1; todo.length > 0; attempt++) {
-            const reserved = await this.reserveAll(todo.map((i) => ({ key: this.keyOf(writes[i].row), row: writes[i].row })));
-            const go = [];
-            todo.forEach((i, j) => {
+            const reserving = todo.filter((i) => reserve.has(i));
+            const reserved = await this.reserveAll(reserving.map((i) => ({ key: this.keyOf(writes[i].row), row: writes[i].row })));
+            const tokens = new Map();
+            reserving.forEach((i, j) => {
                 const r = reserved[j];
                 if ("conflict" in r)
                     out[i] = { ok: false, version: 0, conflict: r.conflict };
                 else
-                    go.push({ i, tokens: r.tokens });
+                    tokens.set(i, r.tokens);
             });
+            const go = todo.filter((i) => !reserve.has(i) || tokens.has(i));
             if (go.length === 0)
                 break;
-            const payloads = go.map(({ i, tokens }) => ({ row: writes[i].row, ...(writes[i].ifVersion === undefined ? {} : { ifVersion: writes[i].ifVersion }), tokens }));
-            const results = await this.byPosition(go.map(({ i }) => this.keyOf(writes[i].row)), "tablePut", payloads);
-            todo = this.settle(go.map(({ i }) => i), results, out, attempt, (i) => this.keyOf(writes[i].row));
+            const payloads = go.map((i) => ({ row: writes[i].row, ...(writes[i].ifVersion === undefined ? {} : { ifVersion: writes[i].ifVersion }), ...(tokens.has(i) ? { tokens: tokens.get(i) } : {}) }));
+            const results = await this.byPosition(go.map((i) => this.keyOf(writes[i].row)), "tablePut", payloads);
+            const optimistic = new Set(go.filter((i) => !reserve.has(i)));
+            todo = this.settle(go, results, out, attempt, (i) => this.keyOf(writes[i].row), optimistic);
+            for (const i of todo)
+                reserve.add(i);
         }
         return out;
     }
@@ -156,11 +167,11 @@ export class IndexedTableClient extends TableClient {
         return { rows, cursor: after === null ? null : encodeCursor(fingerprint, after) };
     }
     /** Results back in `out` at `positions`; returns the positions to write again (their reservation was given up). */
-    settle(positions, results, out, attempt, keyAt) {
+    settle(positions, results, out, attempt, keyAt, optimistic = new Set()) {
         const again = [];
         positions.forEach((i, j) => {
             const r = results[j];
-            if (r.refused !== undefined && attempt < WRITE_ATTEMPTS)
+            if (r.refused !== undefined && (optimistic.has(i) || attempt < WRITE_ATTEMPTS))
                 return void again.push(i);
             if (r.refused !== undefined)
                 throw new IndexContended(keyAt(i), r.refused);

@@ -8,9 +8,34 @@ const OUTBOX = "indexed_outbox";
 const FENCES = "indexed_fences";
 /** How soon the alarm delivers what a write could not, after it started. */
 const DELIVERY_RETRY_MS = 2_000;
-/** Outbox entries delivered per call to the index shards. */
+/** Outbox entries the alarm picks up at a time. */
 const DELIVERY_BATCH = 200;
+/**
+ * Deliveries are coalesced: writes queue their outbox entries, and up to MAX_SENDS calls to the
+ * index shards send what is queued, up to SEND_BATCH entries each. Under load, one call carries
+ * the entries of many writes.
+ */
+const MAX_SENDS = 4;
+const SEND_BATCH = 500;
+function waiter() {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+    // A write that stopped waiting (IndexPending) leaves nobody to see the failure: the alarm retries.
+    promise.catch(() => { });
+    return { promise, resolve, reject };
+}
 const CLEANUP_BATCH = 250;
+/** Ids per `IN (…)`: SQLite in a Durable Object takes at most 100 bound parameters. */
+const IDS_PER_QUERY = 90;
+/** `ids` in slices that fit one query. */
+function slices(ids) {
+    const out = [];
+    for (let i = 0; i < ids.length; i += IDS_PER_QUERY)
+        out.push(ids.slice(i, i + IDS_PER_QUERY));
+    return out;
+}
+const marks = (ids) => ids.map(() => "?").join(", ");
 /**
  * Extend with `protected table = defineTable({ ..., globalIndexes })`, `nodes()` (this class's
  * binding) and `indexNodes()` (the binding of its GlobalIndex class). The client
@@ -34,8 +59,12 @@ export class IndexedTable extends ShardedTable {
     indexMigrated = false;
     batch = null;
     indexClient = null;
-    /** Outbox entries being delivered now. */
-    delivering = new Set();
+    /** Outbox entries queued or being sent, and who waits for them. */
+    waiting = new Map();
+    /** Outbox entries queued, not sent yet, oldest first. */
+    queued = [];
+    /** Calls to the index shards in flight. */
+    sends = 0;
     wakeAt = null;
     // ---- Called by GlobalIndex ----
     /**
@@ -126,13 +155,15 @@ export class IndexedTable extends ShardedTable {
                 // Used: an older write carrying it, or an older token, cannot land after this one.
                 this.raiseFence(key, e.route, e.entry, given);
             }
-            ops.push({ kind: "put", route: e.route, entry: e.entry, owner: key, version, row: after, token });
+            // No copy of the row: it is read when the put is sent (see send).
+            ops.push({ kind: "put", route: e.route, entry: e.entry, owner: key, version, token });
             had.delete(id);
         }
         for (const e of had.values())
             ops.push({ kind: "remove", route: e.route, entry: e.entry, owner: key, version });
         const now = Date.now();
-        const ids = ops.map((op) => this.store.exec(`INSERT INTO ${OUTBOX} (key, op, at) VALUES (?, ?, ?) RETURNING id`, key, JSON.stringify(op), now).one().id);
+        const hash = keyHash(key);
+        const ids = ops.map((op) => this.store.exec(`INSERT INTO ${OUTBOX} (key, hash, op, at) VALUES (?, ?, ?, ?) RETURNING id`, key, hash, JSON.stringify(op), now).one().id);
         if (this.batch && ids.length)
             this.batch.ops.set(key, [...(this.batch.ops.get(key) ?? []), ...ids]);
     }
@@ -149,69 +180,141 @@ export class IndexedTable extends ShardedTable {
         clearTimeout(timer);
         return done;
     }
-    /**
-     * Sends outbox entries to their index shards, and deletes them once applied. Entries being sent
-     * by another delivery are waited for, not sent twice.
-     */
-    async deliver(ids) {
-        const mine = ids.filter((id) => !this.delivering.has(id));
-        if (mine.length === 0)
-            return this.waitDelivered(ids);
-        for (const id of mine)
-            this.delivering.add(id);
+    /** Delivers these outbox entries: queues them (once), and resolves when every one is applied. */
+    deliver(ids) {
+        const waits = ids.map((id) => {
+            let w = this.waiting.get(id);
+            if (!w) {
+                this.waiting.set(id, (w = waiter()));
+                this.queued.push(id);
+            }
+            return w.promise;
+        });
+        this.pump();
+        return Promise.all(waits).then(() => undefined);
+    }
+    /** Starts sends while there is something queued and room for another call. */
+    pump() {
+        while (this.sends < MAX_SENDS && this.queued.length > 0) {
+            const batch = this.queued.splice(0, SEND_BATCH);
+            this.sends++;
+            void this.send(batch).finally(() => {
+                this.sends--;
+                this.pump();
+            });
+        }
+    }
+    /** One call: sends these entries to their index shards, and deletes them once applied. */
+    async send(ids) {
         try {
-            const rows = mine.length ? this.store.exec(`SELECT id, op FROM ${OUTBOX} WHERE id IN (${mine.map(() => "?").join(", ")})`, ...mine).toArray() : [];
+            const rows = slices(ids).flatMap((part) => this.store.exec(`SELECT id, op FROM ${OUTBOX} WHERE id IN (${marks(part)})`, ...part).toArray());
             if (rows.length) {
-                const ops = rows.map((r) => JSON.parse(r.op));
-                await this.indexShards().call(ops.map((op) => op.route), "indexApply", ops);
+                const ops = this.onTheWire(rows.map((r) => JSON.parse(r.op)));
+                if (ops.length)
+                    await this.indexShards().call(ops.map((op) => op.route), "indexApply", ops);
                 // Not fenced by a split: a copy drops the outbox it gets (see afterClone), so a delete
                 // the copy misses changes nothing.
-                this.store.exec(`DELETE FROM ${OUTBOX} WHERE id IN (${rows.map(() => "?").join(", ")})`, ...rows.map((r) => r.id));
+                for (const part of slices(rows.map((r) => r.id)))
+                    this.store.exec(`DELETE FROM ${OUTBOX} WHERE id IN (${marks(part)})`, ...part);
             }
+            // Entries not found were delivered already (by an earlier send).
+            for (const id of ids)
+                this.waiting.get(id)?.resolve();
+        }
+        catch (error) {
+            for (const id of ids)
+                this.waiting.get(id)?.reject(error);
         }
         finally {
-            for (const id of mine)
-                this.delivering.delete(id);
+            for (const id of ids)
+                this.waiting.delete(id);
         }
-        await this.waitDelivered(ids);
     }
-    /** Waits while another delivery sends some of these entries; throws if they are still in the outbox after. */
-    async waitDelivered(ids) {
-        while (ids.some((id) => this.delivering.has(id)))
-            await new Promise((resolve) => setTimeout(resolve, 5));
-        const left = this.store.exec(`SELECT COUNT(*) AS n FROM ${OUTBOX} WHERE id IN (${ids.map(() => "?").join(", ")})`, ...ids).one().n;
-        if (left > 0)
-            throw new Error(`${left} index change(s) not delivered`);
+    /**
+     * The changes to send for these outbox entries. A put goes with the row as it is now, if it is
+     * still at the put's version. If a later write superseded it (or deleted the row), that write's
+     * changes cover the entries: the put goes as a confirm of its token, or not at all.
+     */
+    onTheWire(stored) {
+        const rows = new Map();
+        const out = [];
+        for (const op of stored) {
+            if (op.kind !== "put") {
+                out.push(op);
+                continue;
+            }
+            if (!rows.has(op.owner))
+                rows.set(op.owner, this.getRow(op.owner));
+            const current = rows.get(op.owner);
+            if (current && current.version === op.version)
+                out.push({ ...op, row: current.row });
+            else if (op.token !== null)
+                out.push({ kind: "confirm", route: op.route, entry: op.entry, owner: op.owner, version: op.version, token: op.token });
+        }
+        return out;
     }
-    /** Delivers what is left in the outbox. Call `super.onAlarm()`. */
+    /**
+     * Delivers what writes left in the outbox: entries older than DELIVERY_RETRY_MS that no delivery
+     * is sending (a write that crashed, or gave up waiting and failed). Younger entries belong to
+     * writes still delivering them. Call `super.onAlarm()`.
+     */
     async onAlarm() {
         this.migrate();
         this.wakeAt = null;
+        // This shard's own keys only. Entries of keys a split gave away went with the copy, which
+        // sends them from the rows as they are now; this shard's rows of those keys stopped changing
+        // at the split, and a put sent from one much later could bring back an entry its row has let
+        // go of since.
+        const [lo, hi] = this.ownedHashRange();
         for (;;) {
-            const ids = this.store.exec(`SELECT id FROM ${OUTBOX} ORDER BY id LIMIT ?`, DELIVERY_BATCH).toArray().map((r) => r.id);
+            const old = Date.now() - DELIVERY_RETRY_MS;
+            const ids = this.store
+                .exec(`SELECT id FROM ${OUTBOX} WHERE at <= ? AND hash >= ? AND hash <= ? ORDER BY id LIMIT ?`, old, lo, hi, DELIVERY_BATCH + this.waiting.size)
+                .toArray()
+                .map((r) => r.id)
+                .filter((id) => !this.waiting.has(id))
+                .slice(0, DELIVERY_BATCH);
             if (ids.length === 0)
-                return;
+                break;
             try {
                 await this.deliver(ids);
             }
             catch (error) {
                 console.error(JSON.stringify({ event: "index-delivery-failed", node: this.nodeLabel(), error: String(error) }));
-                await this.wake(Date.now() + DELIVERY_RETRY_MS);
-                return;
+                break;
             }
         }
+        // Whatever is still there: due once it is old enough (and in flight now, most likely).
+        const oldest = this.store.exec(`SELECT min(at) AS at FROM ${OUTBOX} WHERE hash >= ? AND hash <= ?`, lo, hi).one().at;
+        if (oldest !== null)
+            await this.wake(Math.max(oldest + DELIVERY_RETRY_MS, Date.now() + DELIVERY_RETRY_MS));
     }
     // ---- Splits ----
-    /** The copy drops the outbox: the original goes on delivering all of it. Call `super.afterClone`. */
+    /**
+     * The copy keeps the outbox entries of its own keys, and delivers them: it has those rows from
+     * here on, and a put is sent with its row. The rest are the original's. Call `super.afterClone`.
+     */
     afterClone(owns) {
         this.migrate();
-        this.store.exec(`DELETE FROM ${OUTBOX}`);
+        for (const { key } of this.store.exec(`SELECT DISTINCT key FROM ${OUTBOX}`).toArray())
+            if (!owns(key))
+                this.store.exec(`DELETE FROM ${OUTBOX} WHERE key = ?`, key);
         super.afterClone(owns);
     }
-    /** Drops the fences of keys given away (never the outbox: see afterClone). Call `super.cleanupForeign`. */
+    /**
+     * Drops the outbox entries and fences of keys given away: the copy has them (see afterClone). An
+     * entry a write here is still sending stays until it is sent, and so do the rows given away, since
+     * a put is sent with its row. Call `super.cleanupForeign`.
+     */
     cleanupForeign(owns, limit) {
         this.migrate();
         const [lo, hi] = this.ownedHashRange();
+        const given = this.store.exec(`SELECT id FROM ${OUTBOX} WHERE hash < ? OR hash > ? ORDER BY id LIMIT ?`, lo, hi, Math.min(limit, CLEANUP_BATCH)).toArray().map((r) => r.id);
+        const idle = given.filter((id) => !this.waiting.has(id));
+        for (const part of slices(idle))
+            this.store.exec(`DELETE FROM ${OUTBOX} WHERE id IN (${marks(part)})`, ...part);
+        if (given.length > 0)
+            return given.length; // not done: more to drop, or some still being sent
         const deleted = this.store.exec(`DELETE FROM ${FENCES} WHERE rowid IN (SELECT rowid FROM ${FENCES} WHERE hash < ? OR hash > ? LIMIT ?)`, lo, hi, Math.min(limit, CLEANUP_BATCH)).rowsWritten;
         return deleted + super.cleanupForeign(owns, limit);
     }
@@ -220,7 +323,13 @@ export class IndexedTable extends ShardedTable {
         super.migrate();
         if (this.indexMigrated)
             return;
-        this.store.exec(`CREATE TABLE IF NOT EXISTS ${OUTBOX} (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, op TEXT NOT NULL, at INTEGER NOT NULL)`);
+        this.store.exec(`CREATE TABLE IF NOT EXISTS ${OUTBOX} (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, hash TEXT NOT NULL DEFAULT '', op TEXT NOT NULL, at INTEGER NOT NULL)`);
+        // An outbox from before entries had their key's hash: filled in once.
+        if (!this.store.exec(`PRAGMA table_info(${OUTBOX})`).toArray().some((c) => c.name === "hash"))
+            this.store.exec(`ALTER TABLE ${OUTBOX} ADD COLUMN hash TEXT NOT NULL DEFAULT ''`);
+        for (const { key } of this.store.exec(`SELECT DISTINCT key FROM ${OUTBOX} WHERE hash = ''`).toArray())
+            this.store.exec(`UPDATE ${OUTBOX} SET hash = ? WHERE key = ? AND hash = ''`, keyHash(key), key);
+        this.store.exec(`CREATE INDEX IF NOT EXISTS ${OUTBOX}_hash ON ${OUTBOX} (hash)`);
         this.store.exec(`CREATE TABLE IF NOT EXISTS ${FENCES} (key TEXT NOT NULL, route TEXT NOT NULL, entry TEXT NOT NULL, hash TEXT NOT NULL, token INTEGER NOT NULL, PRIMARY KEY (key, route, entry))`);
         this.store.exec(`CREATE INDEX IF NOT EXISTS ${FENCES}_hash ON ${FENCES} (hash)`);
         this.indexMigrated = true;
