@@ -1320,16 +1320,20 @@ export class ShardedObject extends DurableObject {
             await this.ctx.storage.setAlarm(time);
     }
     /**
-     * While a split's work is pending here (a sibling to activate, rows to clear), makes sure an
-     * alarm will do it, at most every ALARM_CHECK_MS: an alarm can be lost, and nothing else would
-     * activate the sibling. Called on routed calls, which keep reaching a shard that has split.
+     * While a split's work is pending here (a sibling to activate, rows to clear) or an atomic call
+     * holds keys, makes sure an alarm will come for it, at most every ALARM_CHECK_MS: an alarm can be
+     * lost, and nothing else would activate the sibling or end a hold (reads do not wait on holds).
+     * Called on routed calls, which keep reaching the shard.
      */
     checkAlarm() {
         const meta = this.meta;
-        if (!meta || !(meta.activate || meta.cleanup.length > 0 || meta.foreign) || Date.now() - this.alarmCheckedAt < ALARM_CHECK_MS)
+        if (!meta || Date.now() - this.alarmCheckedAt < ALARM_CHECK_MS)
+            return;
+        const due = meta.activate || meta.cleanup.length > 0 || meta.foreign ? Date.now() : this.nextHoldDeadline();
+        if (due === null)
             return;
         this.alarmCheckedAt = Date.now();
-        void this.ctx.storage.getAlarm().then((at) => (at === null ? this.ctx.storage.setAlarm(Date.now()) : undefined));
+        void this.ctx.storage.getAlarm().then((at) => (at === null || at > due ? this.ctx.storage.setAlarm(due) : undefined));
     }
     alarmCheckedAt = 0;
     /** While onAlarm runs: the earliest time it (or a call meanwhile) asked for, or null. Else undefined. */
