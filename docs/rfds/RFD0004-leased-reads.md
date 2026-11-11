@@ -431,6 +431,14 @@ either accept stale reads or build this themselves.
 
 ### During implementation
 
+- **A held write across a restart.** The built pieces (`ReadLeases`) commit a write at once and
+  keep the row from before it in memory until the leases on its key end: the overlay alternative,
+  not the waiting write this RFD proposes. A source restarted while a write is held loses that
+  row. It then shows the write, while relays whose leases were granted before the restart still
+  answer with the row from before it: for up to one lease, a read can go back. Either the rows
+  from before held writes are stored (with the horizon), or reads wait out the horizon after a
+  restart, as writes do. Not fixed yet: it needs the source's integration to choose.
+
 - How a `LeaseRelay` subclass reads values of a `ShardedTable`: decoded rows, or the stored form.
 - Whether the client fixes one `draw` per isolate, or one per key, to spread isolates better over
   the relays of several hot keys.

@@ -151,3 +151,19 @@ describe("a ref being pushed is read through", () => {
     expect(leases.grant(["main"], 4)).toBe(READ_LEASE_MS);
   });
 });
+
+test("keys whose leases are over are forgotten, not kept for as long as the source runs", () => {
+  at(0);
+  const leases = leaf();
+  for (let i = 0; i < 1_000; i++) leases.grant([`ref-${i}`]);
+  expect(leases.leasedKeys).toBe(1_000);
+  at(READ_LEASE_MS + READ_LEASE_MARGIN_MS + 1);
+  leases.grant(["main"]);
+  expect(leases.leasedKeys).toBe(1);
+  // A lease still running is kept.
+  at(READ_LEASE_MS + READ_LEASE_MARGIN_MS + 500);
+  leases.grant(["other"]);
+  at(2 * (READ_LEASE_MS + READ_LEASE_MARGIN_MS) + 2);
+  leases.grant(["third"]);
+  expect(leases.leasedKeys).toBe(2);
+});
