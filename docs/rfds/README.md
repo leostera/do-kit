@@ -15,3 +15,4 @@ that capability belongs in it rather than in a layer above, or in the app.
 | [RFD0005](RFD0005-work-graphs.md) | Work graphs: incremental, parallel execution | Draft (built) |
 | [RFD0006](RFD0006-co-location.md) | Co-location: keys that share a shard | Implemented |
 | [RFD0007](RFD0007-open-runs.md) | Open runs: adding to a work graph while it runs | Draft |
+| [RFD0008](RFD0008-atomic-calls-across-shards.md) | Atomic calls across shards | Implemented |

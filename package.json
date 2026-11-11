@@ -38,7 +38,7 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json",
     "test": "bun test",
-    "specs:check": "feynman check call-one-shard scan-visibility snapshot-split table-listing && feynman check lazy-presplit --instances Client=2 && feynman check leased-reads --instances Reader=1 --max-states 20000000 --time-limit 600 && feynman check indexed-write --set repeats=1 --set crashes=1 --no-rules --max-states 40000000 --time-limit 1200 && feynman check work-graph-run --depth 60 --max-states 4000000 --time-limit 600 && feynman check work-graph-run --depth 60 --set faults=0 --set crashes=1 --no-rules --max-states 40000000 --time-limit 1200",
+    "specs:check": "feynman check call-one-shard scan-visibility snapshot-split table-listing && feynman check lazy-presplit --instances Client=2 && feynman check leased-reads --instances Reader=1 --max-states 20000000 --time-limit 600 && feynman check indexed-write --set repeats=1 --set crashes=1 --no-rules --max-states 40000000 --time-limit 1200 && feynman check work-graph-run --depth 60 --max-states 4000000 --time-limit 600 && feynman check work-graph-run --depth 60 --set faults=0 --set crashes=1 --no-rules --max-states 40000000 --time-limit 1200 && feynman check atomic-across-shards --instances Other=2 --no-rules --max-states 3000000 && feynman check atomic-across-shards --set repeats=2 --max-states 20000000 --time-limit 1200 && feynman check atomic-across-shards --set faults=2 --no-rules",
     "bench:run": "bun bench/run.ts",
     "bench:plot": "bun bench/plot.ts"
   },
