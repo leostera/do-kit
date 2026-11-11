@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { burn, graphOf, TASKS, type Shape } from "./graphs.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY } from "../../../src/sharded/index.ts";
-import { planWorkGraph, runnerName, workGraphRun, WorkGraphCoordinator, WorkGraphResults, WorkGraphRunner } from "../../../src/workgraph/index.ts";
+import { encodeBody, planWorkGraph, runnerName, workGraphRun, WorkGraphCoordinator, WorkGraphResults, WorkGraphRunner } from "../../../src/workgraph/index.ts";
 
 interface Env {
   readonly COORDINATORS: DurableObjectNamespace<BenchCoordinator>;
@@ -86,6 +86,9 @@ interface StartRequest {
   chunkMs: number;
   replayMs?: number;
   maxUnitsPerChunk?: number;
+  /** Bytes of entries per slice (slices, bodies). */
+  bytes?: number;
+  identity?: "inputs" | "key";
   leaseMs?: number;
   faults?: Faults;
 }
@@ -114,14 +117,14 @@ export default {
         case "/start": {
           const r = body as unknown as StartRequest;
           const planned = Date.now();
-          const g = graphOf(r.shape, r.units, r.unitMs, r.itersPerMs, r.run);
-          const plan = planWorkGraph(g, { chunkMs: r.chunkMs, ...(r.replayMs !== undefined ? { replayMs: r.replayMs } : {}), ...(r.maxUnitsPerChunk ? { maxUnitsPerChunk: r.maxUnitsPerChunk } : {}) });
+          const g = graphOf(r.shape, r.units, r.unitMs, r.itersPerMs, r.run, r.bytes ?? 0);
+          const plan = planWorkGraph(g, { chunkMs: r.chunkMs, ...(r.replayMs !== undefined ? { replayMs: r.replayMs } : {}), ...(r.maxUnitsPerChunk ? { maxUnitsPerChunk: r.maxUnitsPerChunk } : {}), ...(r.identity ? { identity: r.identity } : {}) });
           const planMs = Date.now() - planned;
           if (r.faults) await Promise.all(Array.from({ length: r.runners }, (_, i) => env.RUNNERS.get(env.RUNNERS.idFromName(runnerName(r.run, i))).benchFaults(r.run, r.faults!)));
           const run = workGraphRun(env.COORDINATORS, r.run);
           await run.submit(plan);
           const status = await run.start({ runners: r.runners, results: `results-${r.run}`, ...(r.leaseMs ? { leaseMs: r.leaseMs } : {}) });
-          return Response.json({ chunks: plan.chunks.length, units: g.units.length, work: plan.work, span: plan.span, chunkSpan: plan.chunkSpan, replayed: plan.replayed, planMs, status });
+          return Response.json({ chunks: plan.chunks.length, units: g.units.length, work: plan.work, span: plan.span, chunkSpan: plan.chunkSpan, bodyBytes: Math.max(...plan.chunks.map((c) => encodeBody(c).byteLength)), replayed: plan.replayed, planMs, status });
         }
         case "/status":
           return Response.json(await workGraphRun(env.COORDINATORS, String(body.run)).status());

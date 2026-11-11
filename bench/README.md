@@ -62,7 +62,8 @@ Results depend on placement, load, runtime version and the day. Run more than on
 
 - **Calibration.** Rounds per millisecond, timed by the Worker around a call to a runner object, less an empty call. Pin it with `BENCH_ITERS_PER_MS` so runs from separate invocations do the same work: it varies by machine. Each point records the value it used.
 - **A run** is a new graph (inputs salted by the run's name), coordinator, runners and results store: nothing is reused, and every object starts cold. Its time is the coordinator's, from `graphStart` to the last chunk done, so it includes starting the runners and every read and write of the results store.
-- **Suites** (`BENCH_SUITES`): `scaling`, three shapes on 1 to 64 runners (`BENCH_SHAPES`, `BENCH_RUNNERS`, repeatable: `1,1` runs twice); `faults`, evictions and lost runners on 16 (`BENCH_FAULTS`); `ceiling`, chunks that cost nothing on up to 1,024 runners (`BENCH_CEILING_RUNNERS`).
+- **Suites** (`BENCH_SUITES`): `scaling`, three shapes on 1 to 64 runners (`BENCH_SHAPES`, `BENCH_RUNNERS`, repeatable: `1,1` runs twice); `faults`, evictions and lost runners on 16 (`BENCH_FAULTS`); `ceiling`, chunks that cost nothing on up to 1,024 runners (`BENCH_CEILING_RUNNERS`); `overhead`, units that cost nothing on one runner; `slices`, coarse units with binary inputs on 4 to 64 runners (`BENCH_SLICE_RUNNERS`); `bodies`, chunk bodies of 10 MiB.
+- **The slices bound** comes from each run's own work: `T₁` is its `busyMs`, the runners' time on chunks, and `T∞` the plan's chunk span scaled by the same ratio of measured to planned time. A 1-runner run of that shape would take over an hour.
 - **The bound** is drawn from the median single-runner time and the plan's chunk span, computed by planning the same shape (its structure is seeded).
 
 ```sh

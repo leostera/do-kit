@@ -19,6 +19,8 @@ interface Point {
   computed: number;
   expired: number;
   faults?: { evict?: number; lose?: number; leaseMs?: number };
+  busyMs?: number;
+  chunkSpan?: number;
 }
 
 const data = JSON.parse(await readFile(join(import.meta.dir, "..", "results", "workgraph.json"), "utf8")) as { points: Point[] };
@@ -177,6 +179,30 @@ if (faults.length) {
     .filter(([k]) => of(k!))
     .map(([k, label, color]) => ({ label: label!, color: color!, value: of(k!)!.elapsedMs / 1000 }));
   graphs["workgraph-faults"] = bars("Faults during a run", "40,000 units of 5 ms in trees of 5, on 16 runners. Every run computes every unit", "seconds", items);
+}
+
+// Coarse units: each run's bound from its own measured work. T₁ is its busyMs (the runners' time on
+// chunks), T∞ the plan's chunk span scaled by the same ratio of measured to planned time.
+const sliced = data.points.filter((p) => p.suite === "slices" && p.busyMs);
+if (sliced.length) {
+  const xs = [...new Set(sliced.map((p) => p.runners))].sort((a, b) => a - b);
+  const at = (n: number) => sliced.filter((p) => p.runners === n).at(-1)!;
+  const bound = (p: Point) => (p.busyMs! / p.runners + p.chunkSpan! * (p.busyMs! / p.work)) / 1000;
+  graphs["workgraph-slices"] = chart(
+    "Coarse units: 437 slices of about 10 s",
+    "400 independent slices with 64 KiB of binary input each, and 6 big trees cut into 2 to 10 pieces; chunks of 30 s",
+    "Runners",
+    "seconds",
+    xs,
+    [
+      { label: "measured", color: "#2e86ab", points: xs.map((n) => [n, at(n).elapsedMs / 1000]) },
+      { label: "T₁/N + T∞, from each run's measured work", color: "#2e86ab", dash: "8 7", points: xs.map((n) => [n, bound(at(n))]) },
+    ],
+  );
+  for (const n of xs) {
+    const p = at(n);
+    console.log(`slices N=${n}: ${(p.elapsedMs / 1000).toFixed(1)} s, bound ${bound(p).toFixed(1)} s, busy ${(p.busyMs! / 1000).toFixed(0)} s of ${(p.work / 1000).toFixed(0)} s planned, ${(p.busyMs! / p.elapsedMs).toFixed(1)} runners busy on average`);
+  }
 }
 
 for (const [name, svg] of Object.entries(graphs)) await writeFile(join(out, `${name}.svg`), svg);

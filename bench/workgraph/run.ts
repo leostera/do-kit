@@ -36,6 +36,7 @@ interface Status {
   failures: number;
   error: string | null;
   elapsedMs: number | null;
+  busyMs?: number;
 }
 
 interface Point {
@@ -60,6 +61,14 @@ interface Point {
   faults?: { evict?: number; lose?: number; leaseMs?: number };
   state: string;
   run: string;
+  /** The runners' time on chunks (ms): this run's measured work. */
+  busyMs?: number;
+  /** The plan's chunk span (ms), and its biggest chunk body (bytes). */
+  chunkSpan?: number;
+  bodyBytes?: number;
+  /** Bytes of entries per slice, and the plan's identity. */
+  bytes?: number;
+  identity?: string;
   /** The rounds per ms its units burned. */
   itersPerMs: number;
   startedAt: string;
@@ -114,9 +123,9 @@ async function calibrate(): Promise<number> {
   return samples[1]!;
 }
 
-async function measure(suite: string, p: { shape: string; units: number; unitMs: number; chunkMs: number; runners: number; maxUnitsPerChunk?: number; leaseMs?: number; faults?: { evict?: number; lose?: number } }): Promise<Point> {
+async function measure(suite: string, p: { shape: string; units: number; unitMs: number; chunkMs: number; runners: number; maxUnitsPerChunk?: number; leaseMs?: number; faults?: { evict?: number; lose?: number }; bytes?: number; identity?: "inputs" | "key" }): Promise<Point> {
   const run = `${suite}-${p.shape}-${p.runners}-${Date.now().toString(36)}`;
-  const started = await post<{ chunks: number; units: number; work: number; span: number; replayed: number; planMs: number }>("/start", { run, itersPerMs: results.itersPerMs, ...p });
+  const started = await post<{ chunks: number; units: number; work: number; span: number; chunkSpan: number; bodyBytes: number; replayed: number; planMs: number }>("/start", { run, itersPerMs: results.itersPerMs, ...p });
   const timeout = Date.now() + 30 * 60_000;
   let status: Status;
   for (;;) {
@@ -125,7 +134,7 @@ async function measure(suite: string, p: { shape: string; units: number; unitMs:
     if (status.state === "done" || status.state === "failed") break;
     if (Date.now() > timeout) throw new Error(`${run} did not finish: ${JSON.stringify(status)}`);
   }
-  const point: Point = { suite, shape: p.shape, runners: p.runners, units: started.units, chunks: started.chunks, unitMs: p.unitMs, chunkMs: p.chunkMs, work: started.work, span: started.span, replayed: started.replayed, planMs: started.planMs, elapsedMs: status.elapsedMs ?? 0, computed: status.units.computed, expired: status.expired, woken: status.woken, failures: status.failures, state: status.state, run, itersPerMs: results.itersPerMs, startedAt: new Date(parseInt(run.split("-").at(-1)!, 36)).toISOString(), ...(p.faults || p.leaseMs ? { faults: { ...p.faults, ...(p.leaseMs ? { leaseMs: p.leaseMs } : {}) } } : {}) };
+  const point: Point = { suite, shape: p.shape, runners: p.runners, units: started.units, chunks: started.chunks, unitMs: p.unitMs, chunkMs: p.chunkMs, work: started.work, span: started.span, replayed: started.replayed, planMs: started.planMs, elapsedMs: status.elapsedMs ?? 0, computed: status.units.computed, expired: status.expired, woken: status.woken, failures: status.failures, state: status.state, run, itersPerMs: results.itersPerMs, chunkSpan: started.chunkSpan, bodyBytes: started.bodyBytes, busyMs: status.busyMs ?? 0, ...(p.bytes ? { bytes: p.bytes } : {}), ...(p.identity ? { identity: p.identity } : {}), startedAt: new Date(parseInt(run.split("-").at(-1)!, 36)).toISOString(), ...(p.faults || p.leaseMs ? { faults: { ...p.faults, ...(p.leaseMs ? { leaseMs: p.leaseMs } : {}) } } : {}) };
   results.points.push(point);
   await save();
   console.log(`${suite} ${p.shape} N=${p.runners}: ${(point.elapsedMs / 1000).toFixed(1)} s, ${point.chunks} chunks, ${point.computed}/${point.units} computed, expired ${point.expired}, failures ${point.failures}, ${point.state}`);
@@ -152,5 +161,17 @@ if (SUITES.includes("faults")) {
   if (FAULTS.includes("evict")) await measure("faults", { ...base, faults: { evict: 0.2 } });
   if (FAULTS.includes("lose")) await measure("faults", { ...base, faults: { lose: 4 }, leaseMs: 10_000 });
 }
+
+// The framework's own cost per unit: units that cost nothing, 5,000 to a chunk, on one runner.
+if (SUITES.includes("overhead"))
+  for (const identity of ["inputs", "key"] as const) await measure("overhead", { shape: "tiny", units: 40_000, unitMs: 0, chunkMs: 1_000, maxUnitsPerChunk: 5_000, runners: 1, identity });
+
+// Coarse units, as an app that slices its own work would give: 400 slices of about 10 s with 64 KiB
+// of binary entries each, and 6 big trees cut into pieces, in chunks of 30 s.
+const SLICE_RUNNERS = (process.env.BENCH_SLICE_RUNNERS ?? "4,8,16,32,64").split(",").map(Number);
+if (SUITES.includes("slices")) for (const runners of SLICE_RUNNERS) await measure("slices", { shape: "slices", units: 400, unitMs: 10_000, chunkMs: 30_000, runners, bytes: 64 * 1024, identity: "key" });
+
+// Bodies over a row's 8 MB: 4 slices of 2.5 MiB to a chunk, a body of 10 MiB in parts.
+if (SUITES.includes("bodies")) await measure("bodies", { shape: "bodies", units: 8, unitMs: 1, chunkMs: 4, runners: 2, bytes: 2.5 * 1024 * 1024, identity: "key" });
 
 if (SUITES.includes("ceiling")) for (const runners of CEILING_RUNNERS) await measure("ceiling", { shape: "tiny", units: 40_000, unitMs: 0, chunkMs: 1, maxUnitsPerChunk: 2, runners });
