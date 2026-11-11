@@ -2,12 +2,13 @@
 // results store. Runs named with "evict" throw after computing each chunk once (as an eviction
 // would, before the results are written); in runs named with "lose", runner 0 abandons the first
 // chunk it leases and never runs again.
+import { encodeBody } from "../../../src/workgraph/body.ts";
 import { planWorkGraph } from "../../../src/workgraph/plan.ts";
 import { WorkGraphCoordinator } from "../../../src/workgraph/coordinator.ts";
 import { WorkGraphRunner } from "../../../src/workgraph/runner.ts";
 import { WorkGraphResults } from "../../../src/workgraph/results.ts";
 import { workGraphResults, workGraphRun } from "../../../src/workgraph/client.ts";
-import { forest, TASKS, type Shape } from "../../workgraph-fixture.ts";
+import { forest, slices, TASKS, type Shape, type Slices } from "../../workgraph-fixture.ts";
 
 export interface GraphEnv {
   readonly GRAPH_COORDINATORS: DurableObjectNamespace<GraphCoordinators>;
@@ -53,7 +54,10 @@ export interface GraphRequest {
   op: "start" | "status" | "results";
   run: string;
   results: string;
-  shape: Shape;
+  shape?: Shape;
+  /** Instead of a forest: slices of bytes. */
+  slices?: Slices;
+  identity?: "inputs" | "key";
   runners?: number;
   chunkMs?: number;
   replayMs?: number;
@@ -65,8 +69,8 @@ export interface GraphRequest {
 export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unknown> {
   const run = workGraphRun(env.GRAPH_COORDINATORS, body.run);
   if (body.op === "status") return run.status();
-  const { g } = forest(body.shape);
-  const plan = planWorkGraph(g, { ...(body.chunkMs ? { chunkMs: body.chunkMs } : {}), ...(body.replayMs !== undefined ? { replayMs: body.replayMs } : {}) });
+  const { g } = body.slices ? slices(body.slices) : forest(body.shape!);
+  const plan = planWorkGraph(g, { ...(body.chunkMs ? { chunkMs: body.chunkMs } : {}), ...(body.replayMs !== undefined ? { replayMs: body.replayMs } : {}), ...(body.identity ? { identity: body.identity } : {}) });
   if (body.op === "results") {
     const keys = g.units.map((u) => u.key);
     const values = await workGraphResults(env.GRAPH_RESULTS, body.results).many(plan, keys.map((key) => ({ key, task: "" })));
@@ -74,5 +78,5 @@ export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unk
   }
   await run.submit(plan);
   const status = await run.start({ runners: body.runners ?? 4, results: body.results, ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}), ...(body.tickMs ? { tickMs: body.tickMs } : {}), ...(body.wakeAfterMs ? { wakeAfterMs: body.wakeAfterMs } : {}) });
-  return { chunks: plan.chunks.length, work: plan.work, span: plan.span, units: g.units.length, status };
+  return { chunks: plan.chunks.length, work: plan.work, span: plan.span, units: g.units.length, bodyBytes: plan.chunks.map((c) => encodeBody(c).byteLength), status };
 }

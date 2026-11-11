@@ -217,43 +217,41 @@ await t.list({ index: "byTeam", partition: ["core"], direction: "desc", limit: 5
 
 ## Work graphs: work too big for one invocation
 
-An invocation gets at most 5 minutes of CPU. Some work is a graph of many small pure pieces with far more than that in total: resolving the deltas of a large git pack, rebuilding a derived index, an import of many objects. You write the graph; do-kit cuts it into **chunks** that each fit one invocation, and **runners** (Durable Objects) pull them from a **coordinator**, one chunk per alarm. Each unit's result is stored under a hash of its inputs, so a retried chunk, a runner evicted partway, and a later run over a changed graph all do the same thing: compute what is missing.
+An invocation gets at most 5 minutes of CPU. Some work is a graph of pure pieces with far more than that in total: resolving the deltas of a large git pack, rebuilding a derived index, an import of many objects. You write the graph; do-kit cuts it into **chunks** that each fit one invocation, and **runners** (Durable Objects) pull them from a **coordinator**, one chunk per alarm. Each unit's result is stored before its chunk counts as done, under a hash of its inputs (or of its key), so a retried chunk, a runner evicted partway, and a later run all do the same thing: compute what is missing.
 
 ```ts
 import { defineTask, planWorkGraph, workGraphOf, workGraphResults, workGraphRun } from "@leostera/do-kit";
 
 // A task is a pure function: (input, parent's value, results it runs after) → { result, value }.
-const base = defineTask({
-  name: "base", version: "1",
-  async compute(input: { offset: number }, _parent: null, _after: {}, { env }) {
-    const bytes = await readObject(env, input.offset);
-    return { result: { id: await sha1(bytes) }, value: bytes };
-  },
-});
-const delta = defineTask({
-  name: "delta", version: "1",
-  async compute(input: { offset: number }, parent: Uint8Array, _after: {}, { env }) {
-    const bytes = applyDelta(parent, await readDelta(env, input.offset));
-    return { result: { id: await sha1(bytes) }, value: bytes };
+// This one resolves a slice of a pack's delta forest: whole trees, about 10 s of CPU. It writes its
+// rows to the app's own storage, under its own key (so a retry overwrites, not duplicates), and
+// returns a small receipt.
+const slice = defineTask({
+  name: "slice", version: "1",
+  async compute(input: { pack: string; trees: Uint8Array }, _parent: null, _after: {}, { env }) {
+    const rows = await resolveTrees(env, input.pack, input.trees); // the app's code
+    await env.INDEX.put(`${input.pack}/${sliceKey(input.trees)}`, encodeRows(rows));
+    return { result: { objects: rows.length, digest: await digestOf(rows) }, value: null };
   },
 });
 
-// The graph's types follow its edges: a delta's parent must produce bytes.
-const g = workGraphOf({ base, delta });
-const a = g.add(base, "obj-0", { offset: 0 }, { cost: 2 });       // cost: estimated CPU ms
-const b = g.add(delta, "obj-1", { offset: 812 }, { cost: 3, parent: a });
-g.add(delta, "obj-2", { offset: 990 }, { cost: 3 });               // type error: a delta needs a parent
+// The graph's types follow its edges: a slice takes no parent, so passing one does not compile.
+const g = workGraphOf({ slice });
+const refs = slicesOf(pack).map((s, i) => g.add(slice, `pack-1234/slice-${i}`, { pack: "pack-1234", trees: s.trees }, { cost: s.estimatedMs }));
 
-const plan = planWorkGraph(g, { chunkMs: 30_000 });
+// Every pack is new: identify results by key, and skip hashing inputs.
+const plan = planWorkGraph(g, { chunkMs: 30_000, identity: "key" });
 const run = workGraphRun(env.GRAPH_COORDINATORS, "pack-1234");
 await run.submit(plan);
 await run.start({ runners: 32, results: "packs" });
-// ...later: { state: "done", units: { computed, reused, replayed }, ... }
-await run.status();
-await workGraphResults(env.GRAPH_RESULTS, "packs").get(plan, b); // { id } | undefined, typed
+await run.status(); // later: { state: "done", units: { computed, reused }, busyMs, ... }
+await workGraphResults(env.GRAPH_RESULTS, "packs").get(plan, refs[0]); // { objects, digest } | undefined
 ```
 
-The runner, coordinator and results classes are a few lines each: see [RFD0005](docs/rfds/RFD0005-work-graphs.md#guide-level-explanation).
+- **Make units coarse.** Running a unit costs the layer about 0.11 to 0.12 ms of wall time on the edge (its result read and written, and its share of its chunk's calls), and planning it about 0.03 ms more (measured locally). So a unit should cost at least about 10 ms, for an overhead near 1%: batch fine-grained work, such as one delta of 0.1 ms, into one unit. Hundreds to tens of thousands of units per run is the range it is built for.
+- **Keep outputs in your storage**, written by `compute` under the unit's own key, and return a receipt: results and values are capped at 1 MiB, as JSON.
+- **Inputs may be bytes.** A `Uint8Array` anywhere in an input travels and is stored as raw bytes, up to 16 MiB per chunk. The whole graph, inputs included, is planned in one invocation (128 MB of memory), so put bulk inputs in your storage, and a pointer to them in the input.
+- **Units can take a parent's value** (a tree edge) or other units' results (`after`), typed the same way; a tree too big for one chunk is cut, and the piece below either replays the path above it or loads its stored value. See [RFD0005](docs/rfds/RFD0005-work-graphs.md#guide-level-explanation) for that, and for the runner, coordinator and results classes, a few lines each.
 
 ### How close to the bound, measured
 
@@ -272,6 +270,7 @@ A graph's time on N runners is bounded by `T₁/N + T∞`: its work over N, plus
 - A forest of small trees spreads across runners almost perfectly. One big tree is cut into pieces that replay the short path above them, so they need no other chunk, and it spreads too, at about 1.5× the bound. A chain is its own span: no runner count helps it.
 - On one runner, the same 200 s of planned work took 179 s to 266 s across six runs, depending on the machine the runner landed on. The table uses the median. This is also why the forest beats N× at 8 and 16 runners: its median single-runner run was a slow one.
 - **Faults cost what they redo.** On 16 runners, 13.6 s without faults; 21.9 s with 20% of chunks evicted once after computing (each is computed again on the alarm's retry); 16.8 s with 4 of the 16 runners lost for good, holding leases of 10 s that run out and pass on. Every unit is computed either way.
+- **Coarse units come within 1.02× of the bound.** 437 slices of about 10 s with binary inputs, and a few big trees cut into pieces, in 176 chunks of 30 s: 981 s on 4 runners, 514 s on 8, 250 s on 16, 147 s on 32, and 76 s on 64, each at or under `T₁/N + T∞` from that run's own measured work ([graph](docs/bench/workgraph-slices.svg)).
 - **One coordinator hands out about 450 to 630 chunks a second**, from 64 to 1,024 runners, measured with chunks that cost nothing. With chunks of 30 s that is room for over 10,000 runners on one run, and each run has its own coordinator.
 
 Raw data in [bench/results/workgraph.json](bench/results/workgraph.json), more graphs ([time](docs/bench/workgraph-time.svg), [faults](docs/bench/workgraph-faults.svg), [coordinator](docs/bench/workgraph-ceiling.svg)), and the method in [bench/README.md](bench/README.md#work-graphs).

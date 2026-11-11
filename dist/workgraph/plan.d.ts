@@ -6,6 +6,15 @@ export interface PlanOptions {
     readonly maxUnitsPerChunk?: number;
     /** A cut replays the path to it if that path costs at most this (default chunkMs / 4). */
     readonly replayMs?: number;
+    /**
+     * What identifies a unit's result. "inputs" (the default): a hash of its task, version, input,
+     * and its inputs' hashes, so a later run reuses every result whose inputs did not change.
+     * "key": a hash of its task, version and key only, with no input hashed. Retries stay
+     * idempotent, and a later run with the same key finds the result already there whatever the
+     * input: name keys by what they compute (`pack-1234/slice-17`), and use a new store or new keys
+     * for new work.
+     */
+    readonly identity?: "inputs" | "key";
 }
 /** A unit as a chunk holds it. */
 export interface PlannedUnit {
@@ -58,8 +67,13 @@ export interface WorkGraphPlan {
     readonly replayed: number;
     readonly rounds: number;
 }
-/** The hash of a unit: its task and version, input, parent's hash, and its after units' hashes by name. */
+/**
+ * The hash of a unit: its task and version, input, parent's hash, and its after units' hashes by
+ * name. Uint8Arrays in the input are hashed as their bytes.
+ */
 export declare function unitHash(task: string, version: string, input: unknown, parent: string | null, after: Readonly<Record<string, string>>): string;
+/** The hash of a unit identified by its key: its task, version and key. */
+export declare function unitKeyHash(task: string, version: string, key: string): string;
 /**
  * Plans a graph into chunks. Throws on a duplicate key, a parent or after unit that is not in the
  * graph, or a cycle (a graph built with `add` has none of these).

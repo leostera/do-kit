@@ -3,7 +3,7 @@
 // chunk the runner finished and leases it the next. A lease that runs out goes back to ready, and a
 // runner that has gone quiet is woken, from the alarm.
 import { DurableObject } from "cloudflare:workers";
-import type { Chunk } from "./plan.js";
+import { MAX_BODY_BYTES } from "./body.js";
 import type { WorkGraphRunner } from "./runner.js";
 
 /** A finished chunk, as its runner reports it. */
@@ -12,7 +12,7 @@ export type Finished =
   | { readonly chunk: number; readonly attempt: number; readonly error: string };
 
 /** What a runner is told to do next. */
-export type NextAnswer = { readonly chunk: number; readonly attempt: number; readonly body: string } | { readonly wait: number } | { readonly done: true } | { readonly failed: string };
+export type NextAnswer = { readonly chunk: number; readonly attempt: number; readonly body: Uint8Array } | { readonly wait: number } | { readonly done: true } | { readonly failed: string };
 
 export interface StartOptions {
   /** How many runners pull chunks. */
@@ -49,6 +49,11 @@ export interface RunStatus {
   readonly startedAt: number | null;
   readonly finishedAt: number | null;
   readonly elapsedMs: number | null;
+  /**
+   * The runners' time on the chunks done: each chunk's wall time, from lease to results written, on
+   * its first completion. Over `elapsedMs`, how many runners were busy on average.
+   */
+  readonly busyMs: number;
 }
 
 interface Meta {
@@ -64,6 +69,7 @@ interface Meta {
   computed: number;
   reused: number;
   replayed: number;
+  busyMs: number;
   expired: number;
   woken: number;
   failures: number;
@@ -74,17 +80,31 @@ interface Meta {
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS graph_chunks (
-  id INTEGER PRIMARY KEY, round INTEGER NOT NULL, cost REAL NOT NULL, body TEXT NOT NULL,
+  id INTEGER PRIMARY KEY, round INTEGER NOT NULL, cost REAL NOT NULL,
   state TEXT NOT NULL DEFAULT 'waiting', needs INTEGER NOT NULL DEFAULT 0,
   runner INTEGER, lease_until INTEGER, attempts INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS graph_chunks_ready ON graph_chunks (state, round, id);
 CREATE INDEX IF NOT EXISTS graph_chunks_runner ON graph_chunks (runner) WHERE state = 'leased';
 -- (needed chunk, chunk that needs it)
+-- Each chunk's body (body.ts), in parts: a body may be bigger than a row (8 MB at most).
+CREATE TABLE IF NOT EXISTS graph_bodies (chunk INTEGER NOT NULL, part INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (chunk, part)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS graph_needs (needed INTEGER NOT NULL, chunk INTEGER NOT NULL, PRIMARY KEY (needed, chunk)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS graph_runners (runner INTEGER PRIMARY KEY, seen_at INTEGER NOT NULL, waiting INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
+
+/** Bytes per row of a chunk's body. */
+const BODY_PART_BYTES = 1024 * 1024;
+
+/** A chunk as submitted: its body encoded (encodeBody). */
+export interface SubmittedChunk {
+  readonly id: number;
+  readonly round: number;
+  readonly cost: number;
+  readonly needs: readonly number[];
+  readonly body: Uint8Array;
+}
 
 /** The object name of runner `index` of a run. */
 export const runnerName = (run: string, index: number): string => `${run}/runner/${index}`;
@@ -107,13 +127,17 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     this.meta = row ? (JSON.parse(row.value) as Meta) : null;
   }
 
-  /** Adds chunks to a run being submitted (idempotent per chunk id). */
-  async graphSubmit(name: string, chunks: readonly Chunk[]): Promise<void> {
+  /** Adds chunks to a run being submitted (idempotent per chunk id, and once sealed, a no-op). */
+  async graphSubmit(name: string, chunks: readonly SubmittedChunk[]): Promise<void> {
     const meta = this.metaFor(name);
-    if (meta.state !== "submitting") throw new Error(`run ${name} is ${meta.state}: it takes no more chunks`);
+    // Sealed: every chunk is in already, and this is a retry of the same submission (a run's name
+    // stands for its plan). Submitting again is harmless.
+    if (meta.state !== "submitting") return;
     this.ctx.storage.transactionSync(() => {
       for (const c of chunks) {
-        this.sql.exec("INSERT OR IGNORE INTO graph_chunks (id, round, cost, body) VALUES (?, ?, ?, ?)", c.id, c.round, c.cost, JSON.stringify({ units: c.units, exports: c.exports }));
+        if (c.body.byteLength > MAX_BODY_BYTES) throw new Error(`chunk ${c.id}'s body is ${c.body.byteLength} bytes, over ${MAX_BODY_BYTES}`);
+        if (this.sql.exec("INSERT OR IGNORE INTO graph_chunks (id, round, cost) VALUES (?, ?, ?)", c.id, c.round, c.cost).rowsWritten === 0) continue;
+        for (let at = 0, part = 0; at < c.body.byteLength || part === 0; at += BODY_PART_BYTES, part++) this.sql.exec("INSERT INTO graph_bodies (chunk, part, data) VALUES (?, ?, ?)", c.id, part, c.body.subarray(at, at + BODY_PART_BYTES));
         for (const needed of c.needs) this.sql.exec("INSERT OR IGNORE INTO graph_needs (needed, chunk) VALUES (?, ?)", needed, c.id);
       }
     });
@@ -169,18 +193,31 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     return this.meta ? this.status() : null;
   }
 
+  /** A chunk's body, from its parts. */
+  private body(chunk: number): Uint8Array {
+    const parts = this.sql.exec<{ data: ArrayBuffer }>("SELECT data FROM graph_bodies WHERE chunk = ? ORDER BY part", chunk).toArray().map((r) => new Uint8Array(r.data));
+    if (parts.length === 1) return parts[0]!;
+    const out = new Uint8Array(parts.reduce((sum, p) => sum + p.byteLength, 0));
+    let at = 0;
+    for (const p of parts) {
+      out.set(p, at);
+      at += p.byteLength;
+    }
+    return out;
+  }
+
   /** The runner's own lease back (it was evicted while computing it), or the next ready chunk. */
   private lease(runner: number, now: number): NextAnswer {
     const meta = this.meta!;
-    const own = this.sql.exec<{ id: number; attempts: number; body: string }>("SELECT id, attempts, body FROM graph_chunks WHERE state = 'leased' AND runner = ? LIMIT 1", runner).toArray()[0];
+    const own = this.sql.exec<{ id: number; attempts: number }>("SELECT id, attempts FROM graph_chunks WHERE state = 'leased' AND runner = ? LIMIT 1", runner).toArray()[0];
     if (own) {
       this.sql.exec("UPDATE graph_chunks SET lease_until = ? WHERE id = ?", now + meta.leaseMs, own.id);
-      return { chunk: own.id, attempt: own.attempts, body: own.body };
+      return { chunk: own.id, attempt: own.attempts, body: this.body(own.id) };
     }
-    const next = this.sql.exec<{ id: number; attempts: number; body: string }>("SELECT id, attempts, body FROM graph_chunks WHERE state = 'ready' ORDER BY round, id LIMIT 1").toArray()[0];
+    const next = this.sql.exec<{ id: number; attempts: number }>("SELECT id, attempts FROM graph_chunks WHERE state = 'ready' ORDER BY round, id LIMIT 1").toArray()[0];
     if (next) {
       this.sql.exec("UPDATE graph_chunks SET state = 'leased', runner = ?, lease_until = ?, attempts = attempts + 1 WHERE id = ?", runner, now + meta.leaseMs, next.id);
-      return { chunk: next.id, attempt: next.attempts + 1, body: next.body };
+      return { chunk: next.id, attempt: next.attempts + 1, body: this.body(next.id) };
     }
     this.sql.exec("UPDATE graph_runners SET waiting = 1 WHERE runner = ?", runner);
     return { wait: Math.min(2_000, meta.tickMs) };
@@ -200,7 +237,7 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
       // Counted by the rows returned: rowsWritten also counts the writes to the indexes.
       readied = this.sql.exec("UPDATE graph_chunks SET state = 'ready' WHERE state = 'waiting' AND needs = 0 AND id IN (SELECT chunk FROM graph_needs WHERE needed = ?) RETURNING id", f.chunk).toArray().length;
       const m = this.meta!;
-      this.save({ ...m, computed: m.computed + f.computed, reused: m.reused + f.reused, replayed: m.replayed + f.replayed });
+      this.save({ ...m, computed: m.computed + f.computed, reused: m.reused + f.reused, replayed: m.replayed + f.replayed, busyMs: (m.busyMs ?? 0) + f.wallMs });
       this.finishIfDone();
     });
     if (this.meta!.logChunks) console.log(JSON.stringify({ event: "graph-chunk", run: this.meta!.name, chunk: f.chunk, attempt: f.attempt, computed: f.computed, reused: f.reused, replayed: f.replayed, wallMs: f.wallMs }));
@@ -268,7 +305,7 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
       if (this.meta.name !== name) throw new Error(`this coordinator runs ${this.meta.name}, not ${name}`);
       return this.meta;
     }
-    const meta: Meta = { name, state: "submitting", runners: 0, results: "", leaseMs: 0, maxAttempts: 0, wakeAfterMs: 0, tickMs: 0, logChunks: false, computed: 0, reused: 0, replayed: 0, expired: 0, woken: 0, failures: 0, error: null, startedAt: null, finishedAt: null };
+    const meta: Meta = { name, state: "submitting", runners: 0, results: "", leaseMs: 0, maxAttempts: 0, wakeAfterMs: 0, tickMs: 0, logChunks: false, computed: 0, reused: 0, replayed: 0, busyMs: 0, expired: 0, woken: 0, failures: 0, error: null, startedAt: null, finishedAt: null };
     this.save(meta);
     return meta;
   }
@@ -296,6 +333,7 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
       startedAt: m.startedAt,
       finishedAt: m.finishedAt,
       elapsedMs: m.startedAt !== null ? (m.finishedAt ?? Date.now()) - m.startedAt : null,
+      busyMs: m.busyMs ?? 0,
     };
   }
 }

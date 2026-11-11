@@ -56,12 +56,12 @@
     "src/table/index.ts#ShardedTable.tablePage": "4c3f95575761",
     "src/table/schema.ts#pageRequest": "c129ce2d7ccb",
     "src/workgraph/coordinator.ts#WorkGraphCoordinator.alarm": "3617d505fc64",
-    "src/workgraph/coordinator.ts#WorkGraphCoordinator.complete": "72466a8f15d7",
+    "src/workgraph/coordinator.ts#WorkGraphCoordinator.complete": "5bffb24e466a",
     "src/workgraph/coordinator.ts#WorkGraphCoordinator.graphNext": "aae6a7b8449b",
-    "src/workgraph/coordinator.ts#WorkGraphCoordinator.lease": "08c30783b7cf",
+    "src/workgraph/coordinator.ts#WorkGraphCoordinator.lease": "c3b06a762c68",
     "src/workgraph/results.ts#WorkGraphResults.graphGet": "895951a8a6ff",
     "src/workgraph/results.ts#WorkGraphResults.graphPut": "e7cac5501692",
-    "src/workgraph/runner.ts#WorkGraphRunner.alarm": "23bb1255ce20",
+    "src/workgraph/runner.ts#WorkGraphRunner.alarm": "184d15182247",
     "src/workgraph/runner.ts#WorkGraphRunner.chunkStarting": "99bae0e7b7f9",
     "src/workgraph/runner.ts#WorkGraphRunner.runChunk": "b9bd3be707ba"
   }

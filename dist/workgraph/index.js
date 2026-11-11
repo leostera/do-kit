@@ -3,8 +3,9 @@
 // edges), plan it into chunks, and run it: runners pull chunks from a coordinator and write each
 // unit's result to a store keyed by a hash of its inputs, which later runs reuse.
 export { defineTask, workGraphOf, WorkGraph } from "./graph.js";
-export { planWorkGraph, unitHash } from "./plan.js";
+export { unitKeyHash, planWorkGraph, unitHash } from "./plan.js";
 export { ComputeFailed, executeChunk, keysToRead } from "./execute.js";
+export { decodeBody, encodeBody, MAX_BODY_BYTES } from "./body.js";
 export { decodeStored, encodeStored, MAX_STORED_BYTES, resultKey, valueKey } from "./stored.js";
 export { WorkGraphResults } from "./results.js";
 export { runnerName, WorkGraphCoordinator } from "./coordinator.js";

@@ -3,12 +3,24 @@
 // together; a tree too big for a chunk is cut at subtrees, and each cut either replays the path
 // to it or loads the value its parent's chunk stored. Pure: it runs wherever the graph is.
 import { createHash } from "node:crypto";
-/** The hash of a unit: its task and version, input, parent's hash, and its after units' hashes by name. */
+import { jsonWithBinaries } from "./body.js";
+/**
+ * The hash of a unit: its task and version, input, parent's hash, and its after units' hashes by
+ * name. Uint8Arrays in the input are hashed as their bytes.
+ */
 export function unitHash(task, version, input, parent, after) {
     const named = Object.keys(after)
         .sort()
         .map((name) => [name, after[name]]);
-    return createHash("sha256").update(JSON.stringify([task, version, input, parent, named])).digest("hex");
+    const binaries = [];
+    const hash = createHash("sha256").update(jsonWithBinaries([task, version, input, parent, named], binaries));
+    for (const b of binaries)
+        hash.update(`\0${b.length}\0`).update(b);
+    return hash.digest("hex");
+}
+/** The hash of a unit identified by its key: its task, version and key. */
+export function unitKeyHash(task, version, key) {
+    return createHash("sha256").update(JSON.stringify(["key", task, version, key])).digest("hex");
 }
 /**
  * Plans a graph into chunks. Throws on a duplicate key, a parent or after unit that is not in the
@@ -21,13 +33,16 @@ export function planWorkGraph(graph, options = {}) {
     const replayMs = options.replayMs ?? chunkMs / 4;
     if (!(chunkMs > 0) || !(maxUnits > 1) || !(replayMs >= 0) || !(replayMs < chunkMs))
         throw new Error("chunkMs must be positive, maxUnitsPerChunk over 1, and replayMs at least 0 and under chunkMs");
+    const byKey = options.identity === "key";
+    if (options.identity !== undefined && options.identity !== "inputs" && !byKey)
+        throw new Error('identity must be "inputs" or "key"');
     const nodes = indexUnits(units);
     const order = topological(nodes);
     // Hashes, rounds and the span, parents and after units first.
     const chainCost = new Map();
     let span = 0;
     for (const n of order) {
-        n.hash = unitHash(n.unit.task, n.unit.version, n.unit.input, n.parent?.hash ?? null, Object.fromEntries(n.after.map((a) => [a.name, a.node.hash])));
+        n.hash = byKey ? unitKeyHash(n.unit.task, n.unit.version, n.unit.key) : unitHash(n.unit.task, n.unit.version, n.unit.input, n.parent?.hash ?? null, Object.fromEntries(n.after.map((a) => [a.name, a.node.hash])));
         n.round = Math.max(n.parent?.round ?? 0, ...n.after.map((a) => a.node.round + 1));
         const before = Math.max(n.parent ? chainCost.get(n.parent) : 0, ...n.after.map((a) => chainCost.get(a.node)));
         chainCost.set(n, before + n.unit.cost);

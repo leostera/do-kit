@@ -101,40 +101,50 @@ The app describes its work as a graph, and do-kit executes it. Think of a build 
 writes the build graph, and the engine runs it in parallel, skipping what is already built.
 
 A **task** is a pure function. It takes a unit's input, optionally its **parent**'s value (a tree
-edge: the unit transforms what its parent produced), and optionally the results of units it runs
-**after** (cross edges: it reads what they produced). It returns a **result**, which is kept, and a
-**value**, which is passed to its children:
+edge: the unit continues from what its parent produced), and optionally the results of units it
+runs **after** (cross edges: it reads what they produced). It returns a **result**, which is kept,
+and a **value**, which is passed to its children.
+
+A unit is coarse: seconds of work, not microseconds (see Unit size). Indexing a git pack, for
+example, is resolving a forest of delta trees. The app slices the forest into groups of whole
+trees of about 10 s each, and cuts a tree too big for one slice at a subtree, below a slice that
+resolves the path down to it:
 
 ```ts
 import { defineTask, workGraphOf, type TaskContext } from "@leostera/do-kit";
 
-// A base object: no parent, and nothing it runs after.
-const base = defineTask({
-  name: "base",
+// A slice of whole trees: no parent, nothing it runs after. It writes its rows to the app's own
+// storage under its own key, so a retry overwrites them, and returns a receipt.
+const slice = defineTask({
+  name: "slice",
   version: "1", // changing it invalidates this task's results
-  async compute(input: { offset: number }, _parent: null, _after: {}, { env }: TaskContext<Env>) {
-    const bytes = await readObject(env, input.offset);
-    return { result: { id: await sha1(bytes), offset: input.offset }, value: bytes };
+  async compute(input: { pack: string; trees: Uint8Array }, _parent: null, _after: {}, { env }: TaskContext<Env>) {
+    const { rows, path } = await resolveTrees(env, input.pack, input.trees);
+    await writeRows(env, input.pack, input.trees, rows);
+    return { result: { objects: rows.length, digest: await digestOf(rows) }, value: path };
   },
 });
-// A delta: transforms its parent's bytes.
-const delta = defineTask({
-  name: "delta",
+// A piece of a big tree, cut below a slice: it continues from the bases the slice resolved.
+const piece = defineTask({
+  name: "piece",
   version: "1",
-  async compute(input: { offset: number }, parent: Uint8Array, _after: {}, { env }: TaskContext<Env>) {
-    const bytes = applyDelta(parent, await readDelta(env, input.offset));
-    return { result: { id: await sha1(bytes), offset: input.offset }, value: bytes };
+  async compute(input: { pack: string; trees: Uint8Array }, parent: PathState, _after: {}, { env }: TaskContext<Env>) {
+    const { rows } = await resolveTrees(env, input.pack, input.trees, parent);
+    await writeRows(env, input.pack, input.trees, rows);
+    return { result: { objects: rows.length, digest: await digestOf(rows) }, value: null };
   },
 });
-// A summary: reads two results, by name, across trees.
-const pair = defineTask({
-  name: "pair",
+// A summary: reads receipts, by name, once their slices are done.
+const check = defineTask({
+  name: "check",
   version: "1",
-  compute(_input: null, _parent: null, after: { left: ObjectEntry; right: ObjectEntry }) {
-    return { result: after.left.id < after.right.id, value: null };
+  compute(input: { expected: number }, _parent: null, after: { first: Receipt; second: Receipt }) {
+    const objects = after.first.objects + after.second.objects;
+    if (objects !== input.expected) throw new Error(`${objects} objects, ${input.expected} expected`);
+    return { result: objects, value: null };
   },
 });
-export const TASKS = { base, delta, pair };
+export const TASKS = { slice, piece, check };
 ```
 
 The graph is built with these tasks, and its types follow from them. `add` returns a handle typed
@@ -142,11 +152,11 @@ by the task's result and value, and checks each edge against what the unit's tas
 
 ```ts
 const g = workGraphOf(TASKS);
-const a = g.add(base, "obj-0", { offset: 0 }, { cost: 2 });
-const b = g.add(delta, "obj-1", { offset: 812 }, { cost: 3, parent: a });      // a's value is bytes: fits
-g.add(pair, "pair-0-1", null, { cost: 1, after: { left: a, right: b } });     // results are ObjectEntry: fit
-g.add(delta, "obj-2", { offset: 990 }, { cost: 3 });                           // type error: a delta needs a parent
-g.add(base, "obj-3", { offset: 1200 }, { cost: 2, parent: a });                // type error: a base takes none
+const a = g.add(slice, "pack-1234/slice-0", { pack: "pack-1234", trees: s0 }, { cost: 9_800 }); // cost: estimated CPU ms
+const b = g.add(piece, "pack-1234/piece-0", { pack: "pack-1234", trees: p0 }, { cost: 10_400, parent: a }); // a's value is a PathState: fits
+g.add(check, "pack-1234/check", { expected: 41_337 }, { cost: 1, after: { first: a, second: b } });         // both results are receipts: fit
+g.add(piece, "pack-1234/piece-1", { pack: "pack-1234", trees: p1 }, { cost: 10_100 });                       // type error: a piece needs a parent
+g.add(slice, "pack-1234/slice-1", { pack: "pack-1234", trees: s1 }, { cost: 9_900, parent: a });             // type error: a slice takes none
 ```
 
 The planner cuts the graph into chunks, and a run executes them on N runners. The app writes one
@@ -166,30 +176,34 @@ export class GraphResults extends WorkGraphResults<Env> {
 }
 ```
 
-A Worker plans the graph, submits it as a run, and starts runners:
+A Worker plans the graph, submits it as a run, and starts runners. Every pack is new, so results
+are identified by the units' keys, and no input is hashed (see Identity):
 
 ```ts
-const plan = planWorkGraph(g, { chunkMs: 30_000 });
+const plan = planWorkGraph(g, { chunkMs: 30_000, identity: "key" });
 const run = workGraphRun(env.GRAPH_COORDINATORS, "pack-1234");
 await run.submit(plan);
 await run.start({ runners: 32, results: "packs" });
 
 // Later, or polled:
-await run.status(); // { state: "done", chunks: { done: 418, ... }, units: { computed, reused }, ... }
-const entry = await workGraphResults(env.GRAPH_RESULTS, "packs").get(plan, b); // ObjectEntry | undefined
+await run.status(); // { state: "done", chunks: { done: 176, ... }, units: { computed, reused }, busyMs, ... }
+const receipt = await workGraphResults(env.GRAPH_RESULTS, "packs").get(plan, b); // Receipt | undefined
 ```
 
 What happens:
-1. `planWorkGraph` hashes every unit (its task's name and version, its input, its parent's hash,
-   and the hashes of the units it runs after, by name). It packs whole trees into chunks of about
-   `chunkMs`, and cuts trees bigger than that at subtrees.
+1. `planWorkGraph` hashes every unit: by default its task's name and version, its input, its
+   parent's hash, and the hashes of the units it runs after, by name; with `identity: "key"`, its
+   task, version and key. It packs whole trees of units into chunks of about `chunkMs`, and cuts
+   trees bigger than that at subtrees.
 2. The coordinator stores the chunks. Each chunk waits for the chunks it needs.
 3. Each runner's alarm leases a chunk, computes it, writes its results, and completes it. The same
    call leases the next chunk. One chunk is one alarm invocation, with its own CPU budget.
 4. Once every chunk is done, the run is done, and every unit's result is in `WorkGraphResults`.
 
-A later run over a pack that shares most deltas plans the same hashes for them. Its runners find
-those results already stored, and compute only the units that are new.
+With the default identity, a later run over a graph that shares most units plans the same hashes
+for them. Its runners find those results already stored, and compute only the units that are new.
+A build whose inputs change a little at a time, such as a derived index rebuilt each day, gets
+that for free; work that is new every time, such as a pack, turns it off.
 
 ### Diagram
 
@@ -220,9 +234,43 @@ A unit is `{ key, task, version, cost, input, parent, after }`, where `after` ma
 task reads to unit keys. The typed graph (above) builds these; `planWorkGraph` also takes them as a
 plain array, for graphs built elsewhere.
 
-A unit's **hash** is the SHA-256 of `[task, version, input, parent's hash, its after units' hashes
-by name]`. It is the key of its result. Two units with the same inputs, in any run, have one hash
-and one result. A unit whose parent changed has a new hash, and so has every unit below it.
+A unit's **hash** is the key of its result. It depends on the plan's `identity`:
+- **`"inputs"`** (the default): the SHA-256 of `[task, version, input, parent's hash, its after
+  units' hashes by name]`, with any `Uint8Array` in the input hashed as its bytes. Two units with
+  the same inputs, in any run, have one hash and one result. A unit whose parent changed has a new
+  hash, and so has every unit below it. This is what makes later runs incremental.
+- **`"key"`**: the SHA-256 of `[task, version, key]`. No input is hashed, so large inputs cost
+  nothing to identify, and retries are as idempotent as before. A later run that uses the same
+  keys in the same results store finds their results already there, whatever its inputs: keys
+  name what a unit computes (`pack-1234/slice-17`), and work that is new gets new keys or a new
+  store. Apps whose work is new every time use this.
+
+### Unit size
+
+Each unit costs the layer something besides its own work: its hash and its share of planning
+(about 0.03 ms each, measured locally), its input in the chunk's body, its result encoded,
+written and read back, and its share of its chunk's calls to the coordinator. On one runner on the
+edge, units that do nothing, 5,000 to a chunk, took 0.11 to 0.12 ms of wall time each. So:
+- A unit should cost at least about **10 ms**, which keeps the overhead near 1%. Fine-grained
+  work goes into one unit: one delta (about 0.1 ms) per unit would more than double the CPU,
+  while a slice of whole trees (seconds) does not notice.
+- A run is built for **hundreds to tens of thousands of units**. The whole graph is planned in
+  one invocation, inputs included, and an isolate has 128 MB of memory.
+- A chunk holds at most `maxUnitsPerChunk` units (5,000), so with units much smaller than
+  `chunkMs / 5,000` the chunks come out small, and the overhead per chunk grows with them: a
+  lease, a read and a write of the results store, and an alarm. With 16 runners on chunks that
+  cost nothing, each runner completed about 14 a second, about 70 ms of wall time a chunk.
+
+### Inputs
+
+Inputs are JSON values, and may hold `Uint8Array`s anywhere. A chunk's **body**, its units and
+what it exports, is encoded as JSON with each `Uint8Array` as raw bytes after it, not as base64
+text, so binary inputs travel and are stored at their own size. The coordinator stores each body
+in rows of 1 MiB (a row holds at most 8 MB), and a body may be up to 16 MiB, since it travels to
+its runner in one call. `submit` refuses a bigger one, with the chunk's id.
+
+Inputs should describe work, not carry it: a few hundred KiB per unit at most, and bulk data in the
+app's storage behind a pointer (an R2 key and a range). The planner holds every input at once.
 
 The graph refuses a unit whose task is not in its set, a duplicate key, and a parent or after unit
 not yet added, so a graph built with `add` has no cycles. The planner checks the same of a plain
@@ -267,16 +315,18 @@ increase along these edges, so the graph of chunk needs has no cycles.
 
 One `WorkGraphCoordinator` object per run, named by the run. Its SQLite holds:
 - `graph_chunks`:
-  - `id`, `round`, `cost`, and the chunk's body (its units, as JSON);
+  - `id`, `round` and `cost`;
   - `state`: `waiting`, `ready`, `leased` or `done`;
   - `needs`: how many of its needed chunks are not done;
   - `runner`, `lease_until` and `attempts`.
+- `graph_bodies`: each chunk's body, in parts of 1 MiB.
 - `graph_needs`: (chunk, needed chunk) pairs.
 - `graph_runners`: each runner's index and when it last called.
 - `graph_meta`: the run's state, runner count, `leaseMs`, counters, and the first error.
 
 Methods:
-- `graphSubmit(chunks)` adds chunks in batches, and is idempotent per chunk id. `graphSeal()` ends
+- `graphSubmit(chunks)` adds chunks in batches, with their bodies encoded. It is idempotent per
+  chunk id, and a no-op once the run is sealed, so a retried submission is harmless. `graphSeal()` ends
   submission, and checks that every needed chunk exists.
 - `graphStart(runners)` records the runner count, wakes each runner, and arms the alarm.
 - `graphNext(runner, finished)` completes the runner's `finished` chunk, if any (with its counts or
@@ -346,8 +396,14 @@ chunk, finds the results already written, and computes only what is missing.
 sharing is what makes later runs incremental. Its keys are `r:` and `v:` and the unit's hash, for a
 result and an exported value, and each is written once. It splits by load, like any sharded object.
 Results and values are JSON, with `Uint8Array` encoded as base64. `workGraphResults(ns, name)`
-reads them by node, typed: `.get(plan, node)` and `.many(plan, nodes)`. A value over 1 MiB is refused with an error that names it: large
-values belong in the app's storage, behind a small result.
+reads them by node, typed: `.get(plan, node)` and `.many(plan, nodes)`. A result or value over
+1 MiB fails its chunk, with an error that names it.
+
+**Outputs belong in the app's storage.** A task writes what it produces itself, from `compute`
+(which has `env`), under a name that its unit determines, so that running it twice overwrites
+rather than duplicates. It returns a **receipt**: a count and a digest, say, which the store keeps.
+`WorkGraphResults` then holds receipts, not data. This needs no hook: the layer runs a unit at
+least once, and an output written under the unit's own name is as idempotent as the result is.
 
 ### Invariants
 
@@ -432,6 +488,23 @@ bound is the plan's **chunk span**, the longest chain of chunks, since runners t
   four on 32 and 64.
 - Faults, on 16 runners: 13.6 s without; 21.9 s with 20% of chunks evicted once after computing;
   16.8 s with 4 runners lost for good, holding leases of 10 s (4 expired, every unit computed).
+- **Coarse units**, the shape this layer is for: 400 independent slices of 8 to 12 s, each with
+  64 KiB of binary input, and 6 big trees of a slice and 2 to 10 pieces of 10 s that load its
+  value; 437 units in 176 chunks of 30 s, identified by key. Each run's bound is from its own
+  measured work (`busyMs`, 3,634 to 3,867 s against 4,339 s planned):
+
+  | Runners | 4 | 8 | 16 | 32 | 64 |
+  |---|---|---|---|---|---|
+  | Measured | 981 s | 514 s | 250 s | 147 s | 76 s |
+  | `T₁/N + T∞` | 1,002 s | 507 s | 273 s | 152 s | 90 s |
+  | Runners busy, on average | 3.9 | 7.4 | 15.2 | 25.5 | 47.7 |
+
+  Within 1.02× of the bound at every runner count. At 64, 176 chunks are under three rounds of
+  runners, and the cut trees need two chunks in turn, so runners go idle at the end.
+- Units that do nothing, 40,000 of them 5,000 to a chunk, ran in 4.4 to 4.7 s on one runner: about
+  0.11 to 0.12 ms each (see Unit size).
+- Bodies of 10 MiB, four slices of 2.5 MiB a chunk, ran on the edge in parts. Stored as one row
+  each, the same bodies are refused (`SQLITE_TOOBIG`).
 - One coordinator completed 226 chunks a second with 16 runners, and 411 to 629 from 64 to 1,024
   runners, with chunks that cost nothing (a lease, a read and a write of the results store, and a
   completion each). At 30 s a chunk, that is room for over 10,000 runners.
@@ -508,8 +581,6 @@ budget.
 
 - **Cost units.** Estimated CPU milliseconds are concrete, but apps have to calibrate them. The
   alternative is arbitrary units, with `chunkCost` in the same units.
-- **Values.** Should stored values go to the app's storage through a hook (R2), rather than
-  `WorkGraphResults`?
 
 ### Decided during implementation
 
@@ -521,6 +592,12 @@ budget.
 - A unit whose task the runner lacks, or whose result or value cannot be stored (over 1 MiB, or not
   JSON), fails its chunk like a compute that throws: it would fail the same way on every attempt.
 - Logs are opt-in: `logChunks`, off by default.
+- Values go to the app's storage from `compute` itself, with receipts as results (see Results),
+  rather than through a storage hook: a hook would be a second write path with the same need to be
+  idempotent.
+- `identity: "key"`, for work that is new every time (see Units and hashes).
+- `graphStatus()` reports `busyMs`, the runners' time on the chunks done, so a run measures its own
+  work: `busyMs / elapsedMs` is how many runners were busy on average.
 
 ### Out of scope
 

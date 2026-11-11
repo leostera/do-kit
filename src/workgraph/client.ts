@@ -1,7 +1,8 @@
 // The Worker side of work graphs (RFD0005): submitting a plan as a run, starting its runners,
 // watching it, and reading results, typed by the graph's nodes.
 import { sharded, type ShardedClientOptions } from "../sharded/client.js";
-import type { RunStatus, StartOptions, WorkGraphCoordinator } from "./coordinator.js";
+import { encodeBody, MAX_BODY_BYTES } from "./body.js";
+import type { RunStatus, StartOptions, SubmittedChunk, WorkGraphCoordinator } from "./coordinator.js";
 import type { NodeRef } from "./graph.js";
 import type { WorkGraphPlan } from "./plan.js";
 import type { WorkGraphResults } from "./results.js";
@@ -20,19 +21,23 @@ export class WorkGraphRun {
     return this.coordinators.get(this.coordinators.idFromName(this.name));
   }
 
-  /** Submits the plan's chunks and seals the run. Submitting again is harmless. */
+  /**
+   * Submits the plan's chunks and seals the run. Submitting again is harmless. Each chunk's body
+   * (its units' inputs, mostly) must encode to at most MAX_BODY_BYTES (16 MiB).
+   */
   async submit(plan: WorkGraphPlan): Promise<RunStatus> {
-    let batch: (typeof plan.chunks)[number][] = [];
+    let batch: SubmittedChunk[] = [];
     let bytes = 0;
     for (const chunk of plan.chunks) {
-      const size = JSON.stringify(chunk).length;
-      if (batch.length > 0 && bytes + size > SUBMIT_BATCH_BYTES) {
+      const body = encodeBody(chunk);
+      if (body.byteLength > MAX_BODY_BYTES) throw new Error(`chunk ${chunk.id}'s inputs are ${body.byteLength} bytes encoded, over ${MAX_BODY_BYTES}: put bulk inputs in your own storage, and a pointer to them in the input`);
+      if (batch.length > 0 && bytes + body.byteLength > SUBMIT_BATCH_BYTES) {
         await this.coordinator.graphSubmit(this.name, batch);
         batch = [];
         bytes = 0;
       }
-      batch.push(chunk);
-      bytes += size;
+      batch.push({ id: chunk.id, round: chunk.round, cost: chunk.cost, needs: chunk.needs, body });
+      bytes += body.byteLength;
     }
     if (batch.length > 0) await this.coordinator.graphSubmit(this.name, batch);
     return (await this.coordinator.graphSeal(this.name)) as RunStatus;

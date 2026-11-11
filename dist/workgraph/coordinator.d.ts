@@ -1,5 +1,4 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Chunk } from "./plan.js";
 import type { WorkGraphRunner } from "./runner.js";
 /** A finished chunk, as its runner reports it. */
 export type Finished = {
@@ -18,7 +17,7 @@ export type Finished = {
 export type NextAnswer = {
     readonly chunk: number;
     readonly attempt: number;
-    readonly body: string;
+    readonly body: Uint8Array;
 } | {
     readonly wait: number;
 } | {
@@ -69,6 +68,19 @@ export interface RunStatus {
     readonly startedAt: number | null;
     readonly finishedAt: number | null;
     readonly elapsedMs: number | null;
+    /**
+     * The runners' time on the chunks done: each chunk's wall time, from lease to results written, on
+     * its first completion. Over `elapsedMs`, how many runners were busy on average.
+     */
+    readonly busyMs: number;
+}
+/** A chunk as submitted: its body encoded (encodeBody). */
+export interface SubmittedChunk {
+    readonly id: number;
+    readonly round: number;
+    readonly cost: number;
+    readonly needs: readonly number[];
+    readonly body: Uint8Array;
 }
 /** The object name of runner `index` of a run. */
 export declare const runnerName: (run: string, index: number) => string;
@@ -81,8 +93,8 @@ export declare abstract class WorkGraphCoordinator<Env = unknown> extends Durabl
     private meta;
     protected abstract runners(): DurableObjectNamespace<WorkGraphRunner<any>>;
     constructor(ctx: DurableObjectState, env: Env);
-    /** Adds chunks to a run being submitted (idempotent per chunk id). */
-    graphSubmit(name: string, chunks: readonly Chunk[]): Promise<void>;
+    /** Adds chunks to a run being submitted (idempotent per chunk id, and once sealed, a no-op). */
+    graphSubmit(name: string, chunks: readonly SubmittedChunk[]): Promise<void>;
     /** Ends submission: every needed chunk must exist. Chunks that need nothing are ready. */
     graphSeal(name: string): Promise<RunStatus>;
     /** Starts the runners, and the alarm that watches them. */
@@ -90,6 +102,8 @@ export declare abstract class WorkGraphCoordinator<Env = unknown> extends Durabl
     /** Records what runner `runner` finished, if anything, and tells it what to do next. */
     graphNext(runner: number, finished: Finished | null): Promise<NextAnswer>;
     graphStatus(): Promise<RunStatus | null>;
+    /** A chunk's body, from its parts. */
+    private body;
     /** The runner's own lease back (it was evicted while computing it), or the next ready chunk. */
     private lease;
     /**

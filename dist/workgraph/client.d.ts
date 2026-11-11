@@ -8,7 +8,10 @@ export declare class WorkGraphRun {
     readonly name: string;
     constructor(coordinators: DurableObjectNamespace<WorkGraphCoordinator<any>>, name: string);
     private get coordinator();
-    /** Submits the plan's chunks and seals the run. Submitting again is harmless. */
+    /**
+     * Submits the plan's chunks and seals the run. Submitting again is harmless. Each chunk's body
+     * (its units' inputs, mostly) must encode to at most MAX_BODY_BYTES (16 MiB).
+     */
     submit(plan: WorkGraphPlan): Promise<RunStatus>;
     /** Starts `runners` runners. */
     start(options: StartOptions): Promise<RunStatus>;

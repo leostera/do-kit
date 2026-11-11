@@ -5,6 +5,7 @@
 // partway, the platform retries its alarm, which leases the same chunk again.
 import { DurableObject } from "cloudflare:workers";
 import { sharded } from "../sharded/client.js";
+import { decodeBody } from "./body.js";
 import { ComputeFailed, executeChunk, keysToRead } from "./execute.js";
 /** Keys per call to the results store, and bytes per write. */
 const READ_BATCH = 2_000;
@@ -53,7 +54,7 @@ export class WorkGraphRunner extends DurableObject {
             return void (await this.ctx.storage.put("state", { ...state, stopped: true }));
         if ((await this.chunkStarting(state.run, state.index, answer.chunk, answer.attempt)) === "abandon")
             return void (await this.ctx.storage.put("state", { ...state, stopped: true }));
-        const report = await this.runChunk(state, answer.chunk, answer.attempt, JSON.parse(answer.body));
+        const report = await this.runChunk(state, answer.chunk, answer.attempt, decodeBody(answer.body));
         await this.ctx.storage.put("finished", report);
         await this.ctx.storage.setAlarm(Date.now());
     }

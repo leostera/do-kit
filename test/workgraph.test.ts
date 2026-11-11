@@ -5,7 +5,7 @@ import { expect, test } from "bun:test";
 import { planWorkGraph } from "../src/workgraph/plan.ts";
 import type { RunStatus } from "../src/workgraph/coordinator.ts";
 import { post, useWorker } from "./harness.ts";
-import { forest, type Shape } from "./workgraph-fixture.ts";
+import { forest, slices as fixtureSlices, type Shape } from "./workgraph-fixture.ts";
 
 useWorker();
 
@@ -45,7 +45,11 @@ test("a forest of small trees: every unit gets its result", async () => {
   expect(started.chunks).toBeGreaterThan(4);
   const status = await finished(run);
   expect(status).toMatchObject({ state: "done", chunks: { done: started.chunks, total: started.chunks }, units: { computed: started.units, reused: 0 }, failures: 0 });
+  expect(status.busyMs).toBeGreaterThanOrEqual(0);
   await expectResults(run, shape, run, { chunkMs: 40 });
+  // Submitting and starting again, as a retried request would, changes nothing.
+  const again = await start(run, shape, { runners: 4, chunkMs: 40 });
+  expect(again.status).toMatchObject({ state: "done", chunks: { done: started.chunks, total: started.chunks }, units: { computed: started.units } });
 }, 90_000);
 
 test("big trees cut into chunks, with replayed and stored cuts, and joins across trees", async () => {
@@ -120,3 +124,35 @@ test("a unit that always fails fails the run, after three attempts", async () =>
   expect(status.error).toContain("unit boom: boom");
   expect(status.failures).toBe(3);
 }, 90_000);
+
+test("binary inputs, in chunk bodies of several parts, reach their units as bytes", async () => {
+  const run = `bytes-${unique()}`;
+  // Units of 10 in chunks of 45: four slices of 700 KiB a chunk, a body of about 2.8 MB, stored in
+  // parts of 1 MiB. (Rows hold at most 8 MB on Cloudflare, and cf dev does not enforce it: the
+  // bench's bodies suite runs bodies of 10 MiB on the edge.) The
+  // pieces load their root's stored value (its path costs 10, over replayMs).
+  const slices = { count: 8, bytes: 700 * 1024, pieces: 3, seed: 1 };
+  const options = { chunkMs: 45, replayMs: 5, identity: "key" as const };
+  const started = await post<Started & { bodyBytes: number[] }>("/workgraph", { op: "start", run, results: run, slices, runners: 3, ...options });
+  expect(Math.max(...started.bodyBytes)).toBeGreaterThan(2 * 1024 * 1024);
+  // Bytes as bytes: under 1% over the inputs themselves.
+  expect(started.bodyBytes.reduce((a, b) => a + b, 0)).toBeLessThan(1.01 * 12 * 700 * 1024);
+  const status = await finished(run);
+  expect(status).toMatchObject({ state: "done", units: { computed: 12 }, failures: 0 });
+  const stored = await post<Record<string, unknown>>("/workgraph", { op: "results", run, results: run, slices, ...options });
+  expect(stored).toEqual(Object.fromEntries(fixtureSlices(slices).expected));
+}, 120_000);
+
+test("identity by key: a later run with the same keys reuses them, whatever their inputs; by inputs, it computes what changed", async () => {
+  const results = `identity-${unique()}`;
+  const before = { count: 6, bytes: 1024, pieces: 2, seed: 2 };
+  const after = { ...before, changed: "s3" };
+  const runOf = async (slices: typeof before, identity: "key" | "inputs") => {
+    const run = `${results}-${identity}-${unique()}`;
+    await post("/workgraph", { op: "start", run, results: `${results}-${identity}`, slices, runners: 2, chunkMs: 25, identity });
+    return finished(run);
+  };
+  for (const identity of ["key", "inputs"] as const) expect((await runOf(before, identity)).units.computed).toBe(9);
+  expect((await runOf(after, "key")).units).toMatchObject({ computed: 0, reused: 9 });
+  expect((await runOf(after, "inputs")).units).toMatchObject({ computed: 1, reused: 8 });
+}, 120_000);

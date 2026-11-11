@@ -3,11 +3,13 @@
 // store, and every unit's result compared with evaluating the graph directly.
 import { describe, expect, test } from "bun:test";
 // The pure modules: the barrel also exports the object classes, which need cloudflare:workers.
+import { createHash } from "node:crypto";
+import { decodeBody, encodeBody } from "../src/workgraph/body.ts";
 import { ComputeFailed, executeChunk } from "../src/workgraph/execute.ts";
 import { defineTask, workGraphOf, type NodeRef, type ResultOfNode } from "../src/workgraph/graph.ts";
-import { planWorkGraph, type Chunk, type WorkGraphPlan } from "../src/workgraph/plan.ts";
+import { planWorkGraph, unitHash, type Chunk, type WorkGraphPlan } from "../src/workgraph/plan.ts";
 import { resultKey } from "../src/workgraph/stored.ts";
-import { calls, count, forest as fixtureForest, join, random, seed, step, TASKS, type Shape } from "./workgraph-fixture.ts";
+import { bytesOf, calls, count, forest as fixtureForest, join, random, seed, slices, step, TASKS, type Shape } from "./workgraph-fixture.ts";
 
 const TASKS_IN_TYPES = { seed, step, join, count };
 
@@ -253,5 +255,48 @@ describe("chunks that cannot run", () => {
     const missing = executeChunk(chunk, {}, new Map(), {});
     await expect(missing).rejects.toBeInstanceOf(ComputeFailed);
     await expect(missing).rejects.toThrow("its task huge is not one of this runner's tasks");
+  });
+});
+
+describe("binary inputs and identity", () => {
+  test("a chunk's body keeps bytes as bytes, wherever they are in an input", () => {
+    const big = bytesOf(300 * 1024, 1);
+    const plan = planWorkGraph(slices({ count: 2, bytes: 300 * 1024, pieces: 1, seed: 1 }).g, { chunkMs: 1_000 });
+    const body = { units: [...plan.chunks[0]!.units, { ...plan.chunks[0]!.units[0]!, key: "nested", input: { entries: [big, big.subarray(10, 20)], n: 2 } }], exports: ["e"] };
+    const encoded = encodeBody(body);
+    const decoded = decodeBody(encoded);
+    expect(decoded).toEqual(body);
+    expect((decoded.units.at(-1)!.input as { entries: Uint8Array[] }).entries[1]).toBeInstanceOf(Uint8Array);
+    // No base64: the body is its inputs, plus a little JSON.
+    const inputs = (plan.chunks[0]!.units.length + 1) * 300 * 1024 + 10;
+    expect(encoded.byteLength).toBeGreaterThan(inputs);
+    expect(encoded.byteLength).toBeLessThan(inputs + 4 * 1024);
+  });
+
+  test("hashes of JSON inputs are unchanged; bytes are hashed by their contents", () => {
+    const before = (task: string, version: string, input: unknown, parent: string | null, after: Record<string, string>) =>
+      createHash("sha256")
+        .update(JSON.stringify([task, version, input, parent, Object.keys(after).sort().map((k) => [k, after[k]])]))
+        .digest("hex");
+    for (const input of [null, { salt: "a" }, [1, "two", { three: 3 }], "s"]) expect(unitHash("t", "1", input, "p", { b: "x", a: "y" })).toBe(before("t", "1", input, "p", { b: "x", a: "y" }));
+    const a = bytesOf(1024, 1);
+    expect(unitHash("t", "1", a, null, {})).toBe(unitHash("t", "1", a.slice(), null, {}));
+    const b = a.slice();
+    b[1000]! ^= 1;
+    expect(unitHash("t", "1", b, null, {})).not.toBe(unitHash("t", "1", a, null, {}));
+    // Not the same as the object JSON would make of the bytes.
+    expect(unitHash("t", "1", a, null, {})).not.toBe(before("t", "1", a, null, {}));
+  });
+
+  test("identity by key ignores inputs and parents, and follows key, task and version", async () => {
+    const shape = { count: 4, bytes: 64, pieces: 2, seed: 3 };
+    const first = planWorkGraph(slices(shape).g, { identity: "key" });
+    const changed = planWorkGraph(slices({ ...shape, changed: "root" }).g, { identity: "key" });
+    expect([...changed.hashes]).toEqual([...first.hashes]);
+    const byInputs = planWorkGraph(slices({ ...shape, changed: "root" }).g);
+    // By inputs, the changed root changes its own hash and its pieces'.
+    expect([...byInputs.hashes.keys()].filter((k) => byInputs.hashes.get(k) !== planWorkGraph(slices(shape).g).hashes.get(k)).sort()).toEqual(["p0", "p1", "root"]);
+    expect(new Set(first.hashes.values()).size).toBe(first.hashes.size);
+    expect(() => planWorkGraph(slices(shape).g, { identity: "bogus" as "key" })).toThrow("identity");
   });
 });

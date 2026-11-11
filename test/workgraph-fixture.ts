@@ -56,7 +56,73 @@ export const boom = defineTask({
     throw new Error("boom");
   },
 });
-export const TASKS = { seed, step, join, count, boom };
+/** A slice: its input is bytes (a compact description of its work); its result, their digest. */
+export const slice = defineTask({
+  name: "slice",
+  version: "1",
+  compute(input: Uint8Array, _parent: null, _after: {}, _ctx) {
+    calls.n++;
+    if (!(input instanceof Uint8Array)) throw new Error(`a slice's input is ${typeof input}, not bytes`);
+    const digest = createHash("sha256").update(input).digest("hex").slice(0, 16);
+    return { result: { bytes: input.length, digest }, value: digest };
+  },
+});
+/** A piece of a slice cut below its root: its own bytes, and the root's value. */
+export const piece = defineTask({
+  name: "piece",
+  version: "1",
+  compute(input: Uint8Array, parent: string, _after: {}, _ctx) {
+    calls.n++;
+    if (!(input instanceof Uint8Array)) throw new Error(`a piece's input is ${typeof input}, not bytes`);
+    const digest = sha(`${parent}:${createHash("sha256").update(input).digest("hex")}`);
+    return { result: { bytes: input.length, digest }, value: digest };
+  },
+});
+
+export const TASKS = { seed, step, join, count, boom, slice, piece };
+
+/** Slices of bytes: `count` independent slices, and one slice cut into `pieces` pieces below it. */
+export interface Slices {
+  readonly count: number;
+  readonly bytes: number;
+  readonly pieces: number;
+  readonly seed: number;
+  /** A slice whose bytes differ (its key). */
+  readonly changed?: string;
+}
+
+/** Deterministic bytes. */
+export function bytesOf(n: number, seedNumber: number): Uint8Array {
+  const rand = random(seedNumber);
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i += 4) {
+    const v = (rand() * 2 ** 32) >>> 0;
+    for (let j = 0; j < 4 && i + j < n; j++) out[i + j] = (v >>> (8 * j)) & 0xff;
+  }
+  return out;
+}
+
+export function slices(shape: Slices) {
+  const g = workGraphOf(TASKS);
+  const expected = new Map<string, { bytes: number; digest: string }>();
+  const digest = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+  const input = (key: string, i: number) => bytesOf(shape.bytes, shape.seed * 100_000 + i + (shape.changed === key ? 7_777 : 0));
+  for (let i = 0; i < shape.count; i++) {
+    const b = input(`s${i}`, i);
+    g.add(slice, `s${i}`, b, { cost: 10 });
+    expected.set(`s${i}`, { bytes: b.length, digest: digest(b).slice(0, 16) });
+  }
+  const rootBytes = input("root", shape.count);
+  const root = g.add(slice, "root", rootBytes, { cost: 10 });
+  const rootValue = digest(rootBytes).slice(0, 16);
+  expected.set("root", { bytes: rootBytes.length, digest: rootValue });
+  for (let i = 0; i < shape.pieces; i++) {
+    const b = input(`p${i}`, shape.count + 1 + i);
+    g.add(piece, `p${i}`, b, { cost: 10, parent: root });
+    expected.set(`p${i}`, { bytes: b.length, digest: sha(`${rootValue}:${digest(b)}`) });
+  }
+  return { g, expected };
+}
 
 /** A deterministic random number generator (mulberry32). */
 export function random(seedNumber: number) {
