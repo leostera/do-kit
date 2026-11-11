@@ -14,8 +14,8 @@
 // too, since the stop reaches a new instance of its object. Once every runner has stopped, the
 // coordinator keeps only its status for a while (not on delete), then wipes the results store
 // and itself. A write that reaches a wiped results shard is refused. (The code also has a stop wait
-// for the chunk in hand, since a shard refuses only for as long as its instance lives; the spec's
-// shard keeps refusing.)
+// for the chunk in hand, since a shard refuses only for a few seconds, so that its name can be
+// used again; the spec's shard keeps refusing.)
 //
 // Each rule is needed: --without waitForNeeds breaks resultsAreRight, --without
 // resultsBeforeDone breaks doneMeansResults, --without expireLeases breaks finishes, --without

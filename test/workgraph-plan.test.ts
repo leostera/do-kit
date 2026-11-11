@@ -300,3 +300,20 @@ describe("binary inputs and identity", () => {
     expect(() => planWorkGraph(slices(shape).g, { identity: "bogus" as "key" })).toThrow("identity");
   });
 });
+
+test("planning stays near-linear, and takes more units than a call takes arguments", () => {
+  const unit = (key: string, parent: string | null) => ({ key, task: "t", version: "1", cost: 10, input: null, parent, after: {} });
+  // 150,000 units with no edges (Math.max(...) of that many throws in V8), and one parent with 100,000 children.
+  const started = performance.now();
+  const forest = planWorkGraph(Array.from({ length: 150_000 }, (_, i) => unit(`u${i}`, null)), { identity: "key" });
+  const star = planWorkGraph([unit("root", null), ...Array.from({ length: 100_000 }, (_, i) => unit(`c${i}`, "root"))], { identity: "key" });
+  expect(forest.chunks.reduce((n, c) => n + c.units.filter((u) => !u.replay).length, 0)).toBe(150_000);
+  expect(forest.rounds).toBe(1);
+  expect(star.chunks.reduce((n, c) => n + c.units.filter((u) => !u.replay).length, 0)).toBe(100_001);
+  // Quadratic, these took minutes: 20 s leaves room for a slow machine.
+  expect(performance.now() - started).toBeLessThan(20_000);
+}, 60_000);
+
+test("a unit that costs more than a chunk is refused: it could never fit one invocation", () => {
+  expect(() => planWorkGraph([{ key: "big", task: "t", version: "1", cost: 500, input: null, parent: null, after: {} }], { chunkMs: 100 })).toThrow("over chunkMs");
+});

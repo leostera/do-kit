@@ -261,7 +261,8 @@ A unit's **hash** is the key of its result. It depends on the plan's `identity`:
 ### Unit size
 
 Each unit costs the layer something besides its own work: its hash and its share of planning
-(about 0.03 ms each, measured locally), its input in the chunk's body, its result encoded,
+(about 0.03 ms each, measured locally, and linear in the units: 200,000 units with no edges plan
+in half a second), its input in the chunk's body, its result encoded,
 written and read back, and its share of its chunk's calls to the coordinator. On one runner on the
 edge, units that do nothing, 5,000 to a chunk, took 0.11 to 0.12 ms of wall time each. So:
 - A unit should cost at least about **10 ms**, which keeps the overhead near 1%. Fine-grained
@@ -343,8 +344,9 @@ Methods:
   submission, and checks that every needed chunk exists.
 - `graphStart(name, { runners, results?, deadlineMs?, keepStatusMs?, ... })` records the runner
   count, the results store (the run's own, `ownResultsName(run)`, unless one is named), the
-  deadline (24 h by default) and how long to keep the status (1 h), wakes each runner, and arms
-  the alarm. It refuses a run never submitted.
+  deadline (24 h by default) and how long to keep the status (1 h), starts each runner, and arms
+  the alarm. It refuses a run never submitted. A runner its call does not reach is started by the
+  alarm, so a start that fails partway still leaves a run that finishes.
 - `graphNext(runner, finished)` completes the runner's `finished` chunk, if any (with its counts or
   its error), and leases it the next one. It answers:
   - `{ chunk, attempt }`;
@@ -373,12 +375,17 @@ Completing:
 Failing:
 - A chunk whose `compute` threw goes back to `ready`, until it has failed `maxAttempts` times
   (3). Then the run fails, with the error.
+- A chunk whose lease runs out after it was leased `maxLeases` times (5) fails the run: its
+  runners never reported. A chunk that needs more CPU than an invocation has kills each runner
+  that takes it, and would otherwise be leased again until the deadline. The planner refuses a
+  unit that costs more than `chunkMs`, since a unit is never cut.
 
 The alarm, every 5 s until the run ends:
 - **Expiry.** A lease that ran out goes back to `ready`.
-- **Wake.** A runner that has not called for 30 s is woken, if work remains. A runner's own alarm
-  is retried at most 6 times by the platform, so a runner whose retries ran out would otherwise
-  stay asleep.
+- **Wake.** A runner that has not called for 30 s is started again if its start never reached it,
+  and woken otherwise. A runner's own alarm is retried at most 6 times by the platform, so a
+  runner whose retries ran out would otherwise stay asleep. When chunks become ready, as many
+  waiting runners are woken as there are chunks to take; the others poll every 2 s.
 - **Deadline.** A run past its deadline fails. A run submitted and never started fails a day after
   its first submission.
 - **Done.** Once every chunk is done, the run is done, and its cleanup begins.
@@ -404,8 +411,10 @@ Two things make sure a wiped object stays empty:
 - An object that holds nothing is not made again by being asked. The coordinator, the runners and
   the sharded layer create their tables only when they first store something, so a late status,
   stop or delete, a late `graphNext`, or a read of a wiped results shard creates no storage.
-- A results shard, once wiped, refuses every call for as long as its instance lives. A write from
-  a runner stopped while writing finds it so, and fails; the runner, stopping, writes nothing more.
+- A results shard, once wiped, refuses every call for 5 s. A write from a runner stopped while
+  writing finds it so, and fails; the runner, stopping, writes nothing more. After that the name
+  is free again: a run's name can be reused once the run is deleted, though its first chunks wait
+  out those seconds.
   A wipe waits for a shard that is splitting or moving, and follows a shard that moved.
 
 ### Runners

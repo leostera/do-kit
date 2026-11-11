@@ -52,7 +52,14 @@ export class GraphRunners extends WorkGraphRunner<GraphEnv> {
     this.ctx.abort("test restart");
   }
   protected override async chunkStarting(run: string, index: number): Promise<"run" | "abandon"> {
+    // "poison": every runner dies holding its lease, as on a chunk that needs more CPU than an invocation has.
+    if (run.includes("poison")) throw new Error("test: the runner died on this chunk");
     return run.includes("lose") && index === 0 ? "abandon" : "run";
+  }
+  /** "nostart": the start's own call never reaches the runners; only the coordinator's alarm does. */
+  override async graphRun(run: string, index: number, results: string, ensure = false): Promise<void> {
+    if (run.includes("nostart") && !ensure) throw new Error("test: the start did not reach this runner");
+    return super.graphRun(run, index, results, ensure);
   }
   protected override async chunkComputed(run: string, _index: number, chunk: number): Promise<void> {
     if (!run.includes("evict")) return;
@@ -96,6 +103,7 @@ export interface GraphRequest {
   chunkMs?: number;
   replayMs?: number;
   leaseMs?: number;
+  maxLeases?: number;
   tickMs?: number;
   wakeAfterMs?: number;
 }
@@ -129,6 +137,6 @@ export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unk
     return Object.fromEntries(keys.map((k, i) => [k, values[i] ?? null]));
   }
   await run.submit(plan);
-  const status = await run.start({ runners: body.runners ?? 4, ...(body.results ? { results: body.results } : {}), ...(body.deadlineMs ? { deadlineMs: body.deadlineMs } : {}), ...(body.keepStatusMs !== undefined ? { keepStatusMs: body.keepStatusMs } : {}), ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}), ...(body.tickMs ? { tickMs: body.tickMs } : {}), ...(body.wakeAfterMs ? { wakeAfterMs: body.wakeAfterMs } : {}) });
+  const status = await run.start({ runners: body.runners ?? 4, ...(body.results ? { results: body.results } : {}), ...(body.deadlineMs ? { deadlineMs: body.deadlineMs } : {}), ...(body.keepStatusMs !== undefined ? { keepStatusMs: body.keepStatusMs } : {}), ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}), ...(body.maxLeases ? { maxLeases: body.maxLeases } : {}), ...(body.tickMs ? { tickMs: body.tickMs } : {}), ...(body.wakeAfterMs ? { wakeAfterMs: body.wakeAfterMs } : {}) });
   return { chunks: plan.chunks.length, work: plan.work, span: plan.span, units: g.units.length, bodyBytes: plan.chunks.map((c) => encodeBody(c).byteLength), status };
 }

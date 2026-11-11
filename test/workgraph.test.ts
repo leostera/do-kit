@@ -33,7 +33,7 @@ async function finished(run: string, timeoutMs = 60_000): Promise<RunStatus> {
   }
 }
 
-async function expectResults(run: string, shape: Shape, results: string, options: { chunkMs?: number; replayMs?: number } = {}) {
+async function expectResults(run: string, shape: Shape, results: string | undefined, options: { chunkMs?: number; replayMs?: number } = {}) {
   const stored = await post<Record<string, unknown>>("/workgraph", { op: "results", run, shape, results, ...options });
   expect(stored).toEqual(Object.fromEntries(forest(shape).expected));
 }
@@ -271,3 +271,36 @@ test("a shared results store outlives the run; the run itself leaves nothing", a
   expect(l.results.some((r) => r.tables.some((t) => t.name === "sharded_rows" && t.rows > 0))).toBe(true);
   await expectResults(run, shape, results, { chunkMs: 30 });
 }, 60_000);
+
+test("a run name used again right after delete runs again, on its own results store too", async () => {
+  const run = `again-${unique()}`;
+  const shape: Shape = { trees: 6, size: 4, chainy: 0.3, joins: 0, seed: 2 };
+  const start = () => post("/workgraph", { op: "start", run, shape, runners: 2, chunkMs: 30, tickMs: 300, keepStatusMs: 60_000 });
+  await start();
+  expect((await finished(run)).state).toBe("done");
+  expect(await post("/workgraph", { op: "delete", run })).toBeNull();
+  await start();
+  expect(await finished(run, 30_000)).toMatchObject({ state: "done", units: { computed: forest(shape).expected.size } });
+  await expectResults(run, shape, undefined, { chunkMs: 30 });
+}, 90_000);
+
+test("runners the start never reached are started by the coordinator's alarm", async () => {
+  const run = `nostart-${unique()}`;
+  const shape: Shape = { trees: 8, size: 4, chainy: 0.3, joins: 0, seed: 6 };
+  const results = `nostart-results-${unique()}`;
+  await post("/workgraph", { op: "start", run, shape, results, runners: 3, chunkMs: 30, tickMs: 300, wakeAfterMs: 500 });
+  const status = await finished(run, 30_000);
+  expect(status.state).toBe("done");
+  expect(status.woken).toBeGreaterThanOrEqual(3);
+  await expectResults(run, shape, results, { chunkMs: 30 });
+}, 60_000);
+
+test("a chunk whose runners never report fails the run, instead of being leased until the deadline", async () => {
+  const run = `poison-${unique()}`;
+  const shape: Shape = { trees: 1, size: 3, chainy: 1, joins: 0, seed: 1 };
+  await post("/workgraph", { op: "start", run, shape, results: `poison-${unique()}`, runners: 2, chunkMs: 1_000, leaseMs: 400, tickMs: 200, wakeAfterMs: 400, maxLeases: 2 });
+  const status = await finished(run, 60_000);
+  expect(status.state).toBe("failed");
+  expect(status.error).toContain("never reported");
+  expect(status.expired).toBe(2);
+}, 90_000);

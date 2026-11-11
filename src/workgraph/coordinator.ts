@@ -38,6 +38,11 @@ export interface StartOptions {
   readonly leaseMs?: number;
   /** A chunk whose compute fails this many times fails the run (default 3). */
   readonly maxAttempts?: number;
+  /**
+   * A chunk whose lease runs out after it was leased this many times fails the run (default 5): its
+   * runners never report, as when the chunk needs more CPU than an invocation has.
+   */
+  readonly maxLeases?: number;
   /** A runner that has not called for this long is woken while work remains (default 30 s). */
   readonly wakeAfterMs?: number;
   /** How often the alarm checks leases and runners (default 5 s). */
@@ -90,6 +95,8 @@ interface Meta {
   results: string;
   leaseMs: number;
   maxAttempts: number;
+  /** (Absent in a run started before it existed: 5.) */
+  maxLeases?: number;
   wakeAfterMs: number;
   tickMs: number;
   logChunks: boolean;
@@ -223,12 +230,13 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     const now = Date.now();
     const own = options.results === undefined;
     const results = options.results ?? ownResultsName(name);
-    const started: Meta = { ...meta, state: "running", runners: options.runners, results, ownResults: own, leaseMs: options.leaseMs ?? 120_000, maxAttempts: options.maxAttempts ?? 3, wakeAfterMs: options.wakeAfterMs ?? 30_000, tickMs: options.tickMs ?? 5_000, logChunks: options.logChunks ?? false, startedAt: now, deadlineAt: now + (options.deadlineMs ?? DAY_MS), keepStatusMs: options.keepStatusMs ?? HOUR_MS };
+    const started: Meta = { ...meta, state: "running", runners: options.runners, results, ownResults: own, leaseMs: options.leaseMs ?? 120_000, maxAttempts: options.maxAttempts ?? 3, maxLeases: options.maxLeases ?? 5, wakeAfterMs: options.wakeAfterMs ?? 30_000, tickMs: options.tickMs ?? 5_000, logChunks: options.logChunks ?? false, startedAt: now, deadlineAt: now + (options.deadlineMs ?? DAY_MS), keepStatusMs: options.keepStatusMs ?? HOUR_MS };
     this.save(started);
     this.finishIfDone(); // an empty run
     for (let i = 0; i < options.runners; i++) this.sql.exec("INSERT OR REPLACE INTO graph_runners (runner, seen_at, waiting) VALUES (?, ?, 0)", i, now);
     await this.ctx.storage.setAlarm(now + (this.meta!.cleanup ? 0 : started.tickMs));
-    if (this.meta!.state === "running") await Promise.all(Array.from({ length: options.runners }, (_, i) => this.runner(i).graphRun(name, i, results)));
+    // A runner this call fails to start is started by the alarm, like one that went quiet.
+    if (this.meta!.state === "running") await Promise.allSettled(Array.from({ length: options.runners }, (_, i) => this.runner(i).graphRun(name, i, results)));
     return this.status();
   }
 
@@ -319,7 +327,7 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
       this.finishIfDone();
     });
     if (this.meta!.logChunks) console.log(JSON.stringify({ event: "graph-chunk", run: this.meta!.name, chunk: f.chunk, attempt: f.attempt, computed: f.computed, reused: f.reused, replayed: f.replayed, wallMs: f.wallMs }));
-    if (readied > 0) this.wakeWaiting();
+    if (readied > 0) this.wakeWaiting(readied);
   }
 
   /** A chunk whose compute threw: ready again, or the run fails once it has failed maxAttempts times. */
@@ -338,7 +346,8 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
   private finishIfDone(): void {
     const m = this.meta!;
     if (m.state !== "running") return;
-    const left = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM graph_chunks WHERE state != 'done'").one().n;
+    // By state, so the index answers it: `state != 'done'` would read every chunk done so far.
+    const left = this.sql.exec("SELECT 1 FROM graph_chunks WHERE state IN ('waiting', 'ready', 'leased') LIMIT 1").toArray().length;
     if (left === 0) this.end("done", null);
   }
 
@@ -420,27 +429,38 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
       this.end("failed", `the run passed its deadline, ${m.deadlineAt - (m.startedAt ?? m.deadlineAt)} ms after it started`);
       return this.cleanUp(now);
     }
-    const expired = this.sql.exec("UPDATE graph_chunks SET state = 'ready', runner = NULL, lease_until = NULL WHERE state = 'leased' AND lease_until < ? RETURNING id", now).toArray().length;
+    const lapsed = this.sql.exec<{ id: number; attempts: number }>("UPDATE graph_chunks SET state = 'ready', runner = NULL, lease_until = NULL WHERE state = 'leased' AND lease_until < ? RETURNING id, attempts", now).toArray();
+    const expired = lapsed.length;
     const quiet = this.sql.exec<{ runner: number }>("SELECT runner FROM graph_runners WHERE seen_at < ? AND runner < ?", now - m.wakeAfterMs, m.runners).toArray();
     this.save({ ...m, expired: m.expired + expired, woken: m.woken + quiet.length });
-    const wakes = quiet.map((r) => r.runner);
-    if (expired > 0) wakes.push(...this.waitingRunners());
-    await Promise.allSettled([...new Set(wakes)].map((i) => this.runner(i).graphWake()));
+    // A chunk nobody ever reports on would be leased until the deadline, at an invocation's CPU each time.
+    const stuck = lapsed.find((c) => c.attempts >= (m.maxLeases ?? 5));
+    if (stuck) {
+      this.end("failed", `chunk ${stuck.id} was leased ${stuck.attempts} times and never reported: its runners were lost each time (a chunk that needs more CPU than one invocation has does this)`);
+      return this.cleanUp(now);
+    }
+    // A quiet runner is started again, not only woken: its start may never have reached it.
+    const quietSet = new Set(quiet.map((r) => r.runner));
+    const wakes = expired > 0 ? this.takeWaiting(expired).filter((i) => !quietSet.has(i)) : [];
+    await Promise.allSettled([...[...quietSet].map((i) => this.runner(i).graphRun(m.name, i, m.results, true)), ...wakes.map((i) => this.runner(i).graphWake())]);
     await this.ctx.storage.setAlarm(now + m.tickMs);
   }
 
-  private waitingRunners(): number[] {
+  /** Up to `count` runners told to wait, no longer marked waiting: one for each chunk there is to take. */
+  private takeWaiting(count: number): number[] {
     return this.sql
-      .exec<{ runner: number }>("SELECT runner FROM graph_runners WHERE waiting = 1")
+      .exec<{ runner: number }>("UPDATE graph_runners SET waiting = 0 WHERE runner IN (SELECT runner FROM graph_runners WHERE waiting = 1 LIMIT ?) RETURNING runner", count)
       .toArray()
       .map((r) => r.runner);
   }
 
-  /** Wakes the runners told to wait, so a chunk that just became ready does not wait for their poll. */
-  private wakeWaiting(): void {
-    const runners = this.waitingRunners();
+  /**
+   * Wakes as many waiting runners as chunks just became ready, so a ready chunk does not wait for
+   * a poll, and a runner with nothing to take is not woken for it. (The others poll.)
+   */
+  private wakeWaiting(readied: number): void {
+    const runners = this.takeWaiting(readied);
     if (runners.length === 0) return;
-    this.sql.exec("UPDATE graph_runners SET waiting = 0 WHERE waiting = 1");
     this.ctx.waitUntil(Promise.allSettled(runners.map((i) => this.runner(i).graphWake())));
   }
 
