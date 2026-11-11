@@ -9,6 +9,7 @@ Everything is exported from `@leostera/do-kit`. Each layer also has its own path
 | **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, routing that follows splits. |
 | **Sharded table** (`ShardedTable`) | `@leostera/do-kit/table` | Typed rows on a sharded object: indexes in every shard, conditional writes on a version per row, counts, and sorted listings across shards with a cursor that survives splits. With no indexes, a key-value store. |
 | **Indexed table** (`IndexedTable`) | `@leostera/do-kit/indexed` (phase 1, [RFD0003](docs/rfds/RFD0003-indexed-table.md)) | Global indexes on shards of their own: lookups by another column, unique constraints, and listings within a partition that read one index shard per page. A write returns once its index entries are written. Not benchmarked yet. |
+| **Work graphs** (`WorkGraphRunner`) | `@leostera/do-kit/workgraph` ([RFD0005](docs/rfds/RFD0005-work-graphs.md)) | Incremental, parallel execution of a graph of pure units that your app defines, too big for one invocation's CPU. Typed edges, chunks sized to the CPU budget, N runners pulling leases, results keyed by a hash of their inputs and reused by later runs. |
 | Events, cached reads | coming | Change feeds and watches, and reads cached in every data center. |
 
 To try one, run an [example](examples): small apps for each layer, each started with `bun dev` or `npm run dev`, with a page that shows its shards splitting live.
@@ -213,6 +214,67 @@ await t.list({ index: "byTeam", partition: ["core"], direction: "desc", limit: 5
 - **The rows stay the truth.** Index entries carry a copy of the row, so a lookup or page needs no second call. Every write rewrites its entries, so each global index costs one more write per row write, and a write with a unique index makes one more call before it.
 - Rows and index shards split by load, independently. Per-shard `indexes` and `counts` work as in `ShardedTable`. Custom methods that write rows use `indexedTransact`.
 - Not built yet: sorted listings across the whole table (range-partitioned indexes, phase 2), and adding a global index to a table that already has rows.
+
+## Work graphs: work too big for one invocation
+
+An invocation gets at most 5 minutes of CPU. Some work is a graph of many small pure pieces with far more than that in total: resolving the deltas of a large git pack, rebuilding a derived index, an import of many objects. You write the graph; do-kit cuts it into **chunks** that each fit one invocation, and **runners** (Durable Objects) pull them from a **coordinator**, one chunk per alarm. Each unit's result is stored under a hash of its inputs, so a retried chunk, a runner evicted partway, and a later run over a changed graph all do the same thing: compute what is missing.
+
+```ts
+import { defineTask, planWorkGraph, workGraphOf, workGraphResults, workGraphRun } from "@leostera/do-kit";
+
+// A task is a pure function: (input, parent's value, results it runs after) → { result, value }.
+const base = defineTask({
+  name: "base", version: "1",
+  async compute(input: { offset: number }, _parent: null, _after: {}, { env }) {
+    const bytes = await readObject(env, input.offset);
+    return { result: { id: await sha1(bytes) }, value: bytes };
+  },
+});
+const delta = defineTask({
+  name: "delta", version: "1",
+  async compute(input: { offset: number }, parent: Uint8Array, _after: {}, { env }) {
+    const bytes = applyDelta(parent, await readDelta(env, input.offset));
+    return { result: { id: await sha1(bytes) }, value: bytes };
+  },
+});
+
+// The graph's types follow its edges: a delta's parent must produce bytes.
+const g = workGraphOf({ base, delta });
+const a = g.add(base, "obj-0", { offset: 0 }, { cost: 2 });       // cost: estimated CPU ms
+const b = g.add(delta, "obj-1", { offset: 812 }, { cost: 3, parent: a });
+g.add(delta, "obj-2", { offset: 990 }, { cost: 3 });               // type error: a delta needs a parent
+
+const plan = planWorkGraph(g, { chunkMs: 30_000 });
+const run = workGraphRun(env.GRAPH_COORDINATORS, "pack-1234");
+await run.submit(plan);
+await run.start({ runners: 32, results: "packs" });
+// ...later: { state: "done", units: { computed, reused, replayed }, ... }
+await run.status();
+await workGraphResults(env.GRAPH_RESULTS, "packs").get(plan, b); // { id } | undefined, typed
+```
+
+The runner, coordinator and results classes are a few lines each: see [RFD0005](docs/rfds/RFD0005-work-graphs.md#guide-level-explanation).
+
+### How close to the bound, measured
+
+A graph's time on N runners is bounded by `T₁/N + T∞`: its work over N, plus its longest chain. Runners take whole chunks, so here `T∞` is the longest chain of chunks the plan has. Measured on Cloudflare's network, with units that burn 5 ms of CPU each, chunks of 1 s, and every run computing from scratch:
+
+![Speedup over one runner](docs/bench/workgraph-speedup.svg)
+
+![Time to finish a graph, 8 to 64 runners](docs/bench/workgraph-time-many.svg)
+
+| Graph | one runner | 64 runners | speedup | `T₁/64 + T∞` |
+|---|---|---|---|---|
+| 40,000 units, in trees of 5 | 236.5 s | 5.1 s | 47× | 4.7 s |
+| One random tree of 40,000 units | 185.0 s | 5.9 s | 32× | 3.9 s |
+| One chain of 2,000 units | 9.5 s | 9.3 s | 1× | 10.1 s |
+
+- A forest of small trees spreads across runners almost perfectly. One big tree is cut into pieces that replay the short path above them, so they need no other chunk, and it spreads too, at about 1.5× the bound. A chain is its own span: no runner count helps it.
+- On one runner, the same 200 s of planned work took 179 s to 266 s across six runs, depending on the machine the runner landed on. The table uses the median. This is also why the forest beats N× at 8 and 16 runners: its median single-runner run was a slow one.
+- **Faults cost what they redo.** On 16 runners, 13.6 s without faults; 21.9 s with 20% of chunks evicted once after computing (each is computed again on the alarm's retry); 16.8 s with 4 of the 16 runners lost for good, holding leases of 10 s that run out and pass on. Every unit is computed either way.
+- **One coordinator hands out about 450 to 630 chunks a second**, from 64 to 1,024 runners, measured with chunks that cost nothing. With chunks of 30 s that is room for over 10,000 runners on one run, and each run has its own coordinator.
+
+Raw data in [bench/results/workgraph.json](bench/results/workgraph.json), more graphs ([time](docs/bench/workgraph-time.svg), [faults](docs/bench/workgraph-faults.svg), [coordinator](docs/bench/workgraph-ceiling.svg)), and the method in [bench/README.md](bench/README.md#work-graphs).
 
 ## Install
 

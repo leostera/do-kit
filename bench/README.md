@@ -55,3 +55,23 @@ bun run bench:plot
 If the Worker is behind Cloudflare Access, set `BENCH_ACCESS_TOKEN` to a short-lived token (`cloudflared access token -app=$BENCH_URL`). It is sent as a header and never written to results.
 
 Results depend on placement, load, runtime version and the day. Run more than once before drawing conclusions.
+
+## Work graphs
+
+`bench/workgraph/` is a Worker of its own: a coordinator, runners and a results store (presplit to 16 shards), with units that burn SHA-256 rounds ([`src/graphs.ts`](workgraph/src/graphs.ts)). `bench/workgraph/run.ts` drives it, and saves every point to `results/workgraph.json`; `bun bench/workgraph/plot.ts` draws the `workgraph-*` graphs.
+
+- **Calibration.** Rounds per millisecond, timed by the Worker around a call to a runner object, less an empty call. Pin it with `BENCH_ITERS_PER_MS` so runs from separate invocations do the same work: it varies by machine. Each point records the value it used.
+- **A run** is a new graph (inputs salted by the run's name), coordinator, runners and results store: nothing is reused, and every object starts cold. Its time is the coordinator's, from `graphStart` to the last chunk done, so it includes starting the runners and every read and write of the results store.
+- **Suites** (`BENCH_SUITES`): `scaling`, three shapes on 1 to 64 runners (`BENCH_SHAPES`, `BENCH_RUNNERS`, repeatable: `1,1` runs twice); `faults`, evictions and lost runners on 16 (`BENCH_FAULTS`); `ceiling`, chunks that cost nothing on up to 1,024 runners (`BENCH_CEILING_RUNNERS`).
+- **The bound** is drawn from the median single-runner time and the plan's chunk span, computed by planning the same shape (its structure is seeded).
+
+```sh
+cd bench/workgraph && bun install
+echo "BENCH_TOKEN=$(openssl rand -hex 32)" > .dev.vars
+cf deploy --secrets-file .dev.vars   # on a custom domain behind Access: workers.dev is off
+cd ../.. && set -a; . bench/workgraph/.dev.vars; set +a
+BENCH_URL=https://<its domain> BENCH_ACCESS_TOKEN=$(cloudflared access token -app=https://<its domain>) bun bench/workgraph/run.ts
+bun bench/workgraph/plot.ts
+```
+
+The custom domain in `cloudflare.config.ts` is the author's; use one of yours, behind an Access application.
