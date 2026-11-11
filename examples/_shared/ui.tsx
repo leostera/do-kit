@@ -47,7 +47,7 @@ export function ErrorBanner(props: { error: string | null }) {
 }
 
 /** The object's shards, polled every second: watch them split under load. */
-export function ShardPanel(props: { path?: string }) {
+export function ShardPanel(props: { path?: string; title?: string }) {
   const [shards, setShards] = useState<ShardInfo[]>([]);
   useEffect(() => {
     let live = true;
@@ -67,7 +67,7 @@ export function ShardPanel(props: { path?: string }) {
     };
   }, [props.path]);
   return (
-    <Section title="Shards" aside={<Badge variant="secondary">{shards.length === 1 ? "1 shard" : `${shards.length} shards`}</Badge>}>
+    <Section title={props.title ?? "Shards"} aside={<Badge variant="secondary">{shards.length === 1 ? "1 shard" : `${shards.length} shards`}</Badge>}>
       <Text variant="secondary" size="sm">
         Each shard is one Durable Object owning a prefix of the keys' hashes. A shard splits when it stays busy; locally, splits copy rows, on Cloudflare they use storage snapshots.
       </Text>

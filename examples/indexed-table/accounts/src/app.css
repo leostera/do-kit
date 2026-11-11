@@ -1,0 +1,6 @@
+/* Kumo's classes, and the shared components', for Tailwind to find. In your own project, point
+   the first at ../node_modules/@cloudflare/kumo/dist and drop the second. */
+@source "../../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@source "../../../_shared";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "tailwindcss";

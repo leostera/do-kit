@@ -11,6 +11,7 @@ a shard panel that shows the object's shards, live, as they split.
 | | [sessions](sharded-object/sessions) | A table of the object's own: `transact`, `cleanupForeign`, alarms that expire rows. |
 | [ShardedTable](../docs/rfds/RFD0002-sharded-table.md) | [kv](sharded-table/kv) | A JSON key-value API: ETags for conditional writes, listings by prefix over 16 shards. |
 | | [members](sharded-table/members) | Unique handles, a lifecycle in one shard transaction, newest-first listings with counts per status. |
+| [IndexedTable](../docs/rfds/RFD0003-indexed-table.md) | [accounts](indexed-table/accounts) | Rows keyed by id, with a unique email and a listing per team: global indexes on shards of their own. |
 
 ## Run one
 

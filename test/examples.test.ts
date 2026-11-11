@@ -111,3 +111,26 @@ test("members: unique handles, a lifecycle, and listings with counts", async () 
   expect(after.members.map((m) => m.handle)).toEqual(["grace"]);
   expect(after.byStatus).toEqual({ removed: 1, invited: 1 });
 }, 60_000);
+
+test("accounts: a unique email across shards, a lookup by it, and a listing per team", async () => {
+  const base = await start("indexed-table/accounts");
+  const create = (email: string, name: string, team: string) => fetch(`${base}/api/accounts`, { method: "POST", ...json({ email, name, team }) });
+  const ada = (await (await create(`ada-${run}@example.com`, "Ada", `core-${run}`)).json()) as { id: string; email: string };
+  expect((await create(`ADA-${run}@example.com`, "Imposter", `growth-${run}`)).status).toBe(409); // taken, in any team and any case
+  const grace = (await (await create(`grace-${run}@example.com`, "Grace", `core-${run}`)).json()) as { id: string };
+  expect(((await (await fetch(`${base}/api/accounts/by-email/ada-${run}@example.com`)).json()) as { id: string }).id).toBe(ada.id);
+  expect((await fetch(`${base}/api/accounts/by-email/nobody-${run}@example.com`)).status).toBe(404);
+  const team = async (name: string) => ((await (await fetch(`${base}/api/teams/${name}-${run}`)).json()) as { accounts: { name: string }[] }).accounts.map((a) => a.name);
+  expect(await team("core")).toEqual(["Grace", "Ada"]); // newest first
+  // Moving to another team moves it between the two lists; taking a used email is refused.
+  expect((await fetch(`${base}/api/accounts/${grace.id}`, { method: "PATCH", ...json({ team: `growth-${run}` }) })).status).toBe(200);
+  expect(await team("core")).toEqual(["Ada"]);
+  expect(await team("growth")).toEqual(["Grace"]);
+  expect((await fetch(`${base}/api/accounts/${grace.id}`, { method: "PATCH", ...json({ email: `ada-${run}@example.com` }) })).status).toBe(409);
+  // Deleting frees the email.
+  expect((await fetch(`${base}/api/accounts/${ada.id}`, { method: "DELETE" })).status).toBe(204);
+  expect((await fetch(`${base}/api/accounts/by-email/ada-${run}@example.com`)).status).toBe(404);
+  expect((await create(`ada-${run}@example.com`, "Ada again", `core-${run}`)).status).toBe(201);
+  const shards = (await (await fetch(`${base}/api/index-shards`)).json()) as { rows: number }[];
+  expect(shards.reduce((n, s) => n + s.rows, 0)).toBeGreaterThanOrEqual(4); // two entries an account
+}, 120_000);
