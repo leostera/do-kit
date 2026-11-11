@@ -1,13 +1,19 @@
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
-import { MIN_LEASE_MS, WRITTEN_MS, READ_LEASE_MARGIN_MS, READ_LEASE_MS, ReadLeases, RENEW_MS } from "../src/leased/read-leases.ts";
+import { MIN_LEASE_MS, WRITTEN_MS, READ_LEASE_MARGIN_MS, READ_LEASE_MS, ReadLeases, RENEW_MS, type HeldRow, type HeldRows } from "../src/leased/read-leases.ts";
 
 const T0 = new Date("2026-01-01T00:00:00Z").getTime();
 const at = (ms: number) => setSystemTime(new Date(T0 + ms));
 afterEach(() => setSystemTime());
 
+/** A source's storage for held rows, as a Durable Object's SQLite would keep them: it outlives the ReadLeases. */
+function storage<Row = string>(): HeldRows<Row> {
+  const rows = new Map<string, HeldRow<Row>>();
+  return { load: () => [...rows.values()], put: (held) => void rows.set(held.key, held), delete: (key) => void rows.delete(key) };
+}
+
 /** A fresh leaf (no lease horizon stored). */
-function leaf(horizons: number[] = []) {
-  return new ReadLeases<string>(0, (h) => horizons.push(h));
+function leaf(horizons: number[] = [], held: HeldRows<string> = storage()) {
+  return new ReadLeases<string>(0, (h) => horizons.push(h), held);
 }
 function makeHot(leases: ReadLeases<string>, name: string): number {
   return leases.grant([name]);
@@ -75,7 +81,7 @@ describe("read leases", () => {
   test("a restarted leaf holds every push until its stored horizon has passed", () => {
     at(0);
     const horizon = T0 + 3000;
-    const leases = new ReadLeases<string>(horizon, () => {});
+    const leases = new ReadLeases<string>(horizon, () => {}, storage());
     const shownAt = leases.holdUntil([{ key: "main", before: "old" }]);
     expect(shownAt).toBeGreaterThan(horizon);
     expect(leases.visible("main", "new")).toBe("old");
@@ -84,7 +90,7 @@ describe("read leases", () => {
 
 test("holdsAny is true while a push waits for a lease, and false once the lease is over", () => {
   at(0);
-  const leases = new ReadLeases<number>(0, () => {});
+  const leases = new ReadLeases<number>(0, () => {}, storage<number>());
   expect(leases.grant(["main"])).toBe(READ_LEASE_MS);
   expect(leases.holdsAny()).toBe(false);
   expect(leases.holdUntil([{ key: "main", before: 1 }])).toBe(T0 + READ_LEASE_MS + READ_LEASE_MARGIN_MS);
@@ -166,4 +172,91 @@ test("keys whose leases are over are forgotten, not kept for as long as the sour
   at(2 * (READ_LEASE_MS + READ_LEASE_MARGIN_MS) + 2);
   leases.grant(["third"]);
   expect(leases.leasedKeys).toBe(2);
+});
+
+// A write commits at once; until the leases on its key are over, reads see the row from before
+// it. That row must outlive the source: relays holding leases from before a restart still answer
+// with it, so a source that forgot it would show the write first, and a later read through a
+// relay would go back.
+describe("a source restarted while a write is held", () => {
+  /** A source with a lease out on main and a write held on it; its storage and stored horizon. */
+  function stopped() {
+    at(0);
+    const held = storage();
+    const horizons: number[] = [];
+    const leases = leaf(horizons, held);
+    makeHot(leases, "main");
+    const shownAt = leases.holdUntil([{ key: "main", before: "old" }]);
+    return { held, horizon: horizons.at(-1)!, shownAt };
+  }
+  const restarted = (s: { held: HeldRows<string>; horizon: number }) => new ReadLeases<string>(s.horizon, () => {}, s.held);
+
+  test("keeps showing the row from before it, until the hold it had ends", () => {
+    const s = stopped();
+    at(100);
+    const leases = restarted(s);
+    expect(leases.visible("main", "new")).toBe("old");
+    expect(leases.holdsAny()).toBe(true);
+    expect(leases.shownAt("main")).toBe(s.shownAt);
+    setSystemTime(new Date(s.shownAt));
+    expect(leases.visible("main", "new")).toBe("new");
+  });
+
+  test("a row that did not exist before the write is kept as such", () => {
+    at(0);
+    const held = storage();
+    const leases = leaf([], held);
+    makeHot(leases, "main");
+    leases.holdUntil([{ key: "main", before: undefined }]);
+    expect(new ReadLeases<string>(T0 + 5000, () => {}, held).visible("main", "new")).toBeUndefined();
+  });
+
+  test("a write after the restart keeps reads on the row from before the first", () => {
+    const s = stopped();
+    at(100);
+    const leases = restarted(s);
+    const shownAt = leases.holdUntil([{ key: "main", before: "new" }]);
+    expect(leases.visible("main", "newer")).toBe("old");
+    // Held by the restart rule, and stored again: a second restart shows the same.
+    expect(shownAt).toBeGreaterThan(s.horizon);
+    expect(restarted(s).visible("main", "newer")).toBe("old");
+    expect(restarted(s).shownAt("main")).toBe(shownAt);
+  });
+
+  test("a lease given back before the restart ended the hold early, and the restart keeps that end", () => {
+    at(0);
+    const held = storage();
+    const horizons: number[] = [];
+    const leases = leaf(horizons, held);
+    leases.grant(["main"], 0);
+    leases.holdUntil([{ key: "main", before: "old" }]);
+    at(50);
+    const shownAt = leases.returned("main", 0, 0);
+    expect(shownAt).toBe(T0 + 50);
+    // Shown and acknowledged at 50: a restart must not go back to the row from before.
+    at(60);
+    expect(new ReadLeases<string>(horizons.at(-1)!, () => {}, held).visible("main", "new")).toBe("new");
+  });
+
+  test("a hold that is over is forgotten in storage too: when read, and by the sweep", () => {
+    const s = stopped();
+    expect(s.held.load().length).toBe(1);
+    setSystemTime(new Date(s.shownAt));
+    const leases = restarted(s);
+    expect(s.held.load().length).toBe(0);
+    // Held again, never read again: the sweep (on a later grant) drops it.
+    const again = leases.holdUntil([{ key: "side", before: "a" }]);
+    expect(s.held.load().length).toBe(1);
+    setSystemTime(new Date(again + READ_LEASE_MS));
+    leases.grant(["other"]);
+    expect(s.held.load().length).toBe(0);
+  });
+
+  test("a write to a key with no lease out is shown at once and stores nothing", () => {
+    at(0);
+    const held = storage();
+    const leases = leaf([], held);
+    leases.holdUntil([{ key: "cold", before: "old" }]);
+    expect(held.load().length).toBe(0);
+  });
 });

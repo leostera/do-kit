@@ -9,6 +9,12 @@
 // source stores how far its leases may reach (`horizon`, in steps); a restarted source holds every
 // write until then, plus RESTART_SKEW_MS for another machine's clock.
 //
+// The row reads see while a write is held is stored too (`HeldRows`), in the transaction that
+// commits the write. Holders with leases from before a restart still answer with that row; a
+// source that forgot it would show the write at once, and a read through a holder after one from
+// the source would go back. So a restarted source loads the holds it had, and each ends when it
+// would have: by then every lease on its key is over.
+//
 // A named holder's lease (a relay's, by its index) can be asked back: a held write asks each
 // holder (`toRevoke`), and a holder that gives it back (`returned`) ends it early, so the write is
 // shown once the holders' sub-leases are over, not when their leases would have ended. A named
@@ -41,26 +47,57 @@ export interface Change<Row> {
   readonly before: Row | undefined;
 }
 
+/** A held write on a key: the row reads see (the one before the write; undefined if there was none) until `until`. */
+export interface HeldRow<Row> {
+  readonly key: string;
+  readonly row: Row | undefined;
+  readonly until: number;
+}
+
+/**
+ * Where a source keeps its held rows, so they outlive it: its own durable storage, written
+ * synchronously. `put` runs inside `holdUntil`, so call `holdUntil` in the transaction that
+ * commits the write: the row from before it and the write are then stored together or not at all.
+ */
+export interface HeldRows<Row> {
+  /** Every row stored: read once, when the source starts. */
+  load(): readonly HeldRow<Row>[];
+  /** A key's hold began, or its end changed: replaces the key's row. */
+  put(held: HeldRow<Row>): void;
+  /** A key's hold is over. */
+  delete(key: string): void;
+}
+
 export class ReadLeases<Row> {
   /** Until then every write is held: leases granted before a restart may still run. */
   private readonly holdAllUntil: number;
   private horizon: number;
   private readonly storeHorizon: (horizon: number) => void;
+  private readonly heldRows: HeldRows<Row>;
   /**
    * The leases out on each key, by holder (a relay's index; UNNAMED for holders that can't be
    * asked back): when each ends by this source's clock (margin included), and whether it was asked back.
    */
   private readonly leases = new Map<string, Map<number, { end: number; revoked: boolean }>>();
-  /** Keys with a held write: the row reads see until `until`. */
+  /** Keys with a held write: the row reads see until `until`. Each entry is in `heldRows` too. */
   private readonly held = new Map<string, { row: Row | undefined; until: number }>();
   /** When each key last changed (holdUntil sees every change): not leased to relays for WRITTEN_MS after. */
   private readonly changedAt = new Map<string, number>();
 
-  /** `horizon`: how far leases granted before this run may reach (stored by `storeHorizon`). */
-  constructor(horizon: number, storeHorizon: (horizon: number) => void) {
+  /**
+   * `horizon`: how far leases granted before this run may reach (stored by `storeHorizon`).
+   * `heldRows`: the holds this source had when it last ran, and where it keeps them from now on.
+   */
+  constructor(horizon: number, storeHorizon: (horizon: number) => void, heldRows: HeldRows<Row>) {
     this.horizon = horizon;
     this.storeHorizon = storeHorizon;
+    this.heldRows = heldRows;
     this.holdAllUntil = horizon > 0 ? horizon + RESTART_SKEW_MS : 0;
+    const now = Date.now();
+    for (const h of heldRows.load()) {
+      if (h.until > now) this.held.set(h.key, { row: h.row, until: h.until });
+      else heldRows.delete(h.key);
+    }
   }
 
   /**
@@ -107,6 +144,19 @@ export class ReadLeases<Row> {
       for (const [h, l] of holders) if (l.end <= now) holders.delete(h);
       if (holders.size === 0) this.leases.delete(key);
     }
+    for (const [key, held] of this.held) if (held.until <= now) this.release(key);
+  }
+
+  /** A key's hold is over: forgotten here and in storage. */
+  private release(key: string): void {
+    this.held.delete(key);
+    this.heldRows.delete(key);
+  }
+
+  /** Sets a key's hold, here and in storage. */
+  private hold(key: string, row: Row | undefined, until: number): void {
+    this.held.set(key, { row, until });
+    this.heldRows.put({ key, row, until });
   }
   private sweptAt = 0;
 
@@ -164,8 +214,11 @@ export class ReadLeases<Row> {
     if (l) l.end = Math.min(l.end, inMs > 0 ? now + inMs + READ_LEASE_MARGIN_MS : now);
     const held = this.held.get(key);
     if (!held) return now;
-    held.until = Math.min(held.until, Math.max(now, this.leaseEnd(key), this.holdAllUntil));
-    return held.until;
+    const until = Math.min(held.until, Math.max(now, this.leaseEnd(key), this.holdAllUntil));
+    // Stored before the answer leaves: the write is acknowledged at `until`, and a restart after
+    // that must not show the row from before it again.
+    if (until !== held.until) this.hold(key, held.row, until);
+    return until;
   }
 
   /**
@@ -182,7 +235,7 @@ export class ReadLeases<Row> {
     for (const c of changes) {
       const held = this.held.get(c.key);
       // A second write while one is held: reads keep the row from before the first.
-      this.held.set(c.key, { row: held && held.until > now ? held.row : c.before, until: Math.max(until, held?.until ?? 0) });
+      this.hold(c.key, held && held.until > now ? held.row : c.before, Math.max(until, held?.until ?? 0));
     }
     return until;
   }
@@ -192,7 +245,7 @@ export class ReadLeases<Row> {
     const held = this.held.get(key);
     if (!held) return committed;
     if (held.until > Date.now()) return held.row;
-    this.held.delete(key);
+    this.release(key);
     return committed;
   }
 

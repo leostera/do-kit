@@ -431,13 +431,20 @@ either accept stale reads or build this themselves.
 
 ### During implementation
 
-- **A held write across a restart.** The built pieces (`ReadLeases`) commit a write at once and
-  keep the row from before it in memory until the leases on its key end: the overlay alternative,
-  not the waiting write this RFD proposes. A source restarted while a write is held loses that
-  row. It then shows the write, while relays whose leases were granted before the restart still
-  answer with the row from before it: for up to one lease, a read can go back. Either the rows
-  from before held writes are stored (with the horizon), or reads wait out the horizon after a
-  restart, as writes do. Not fixed yet: it needs the source's integration to choose.
+- **A held write across a restart (fixed).** The built pieces (`ReadLeases`) commit a write at
+  once and show the row from before it until the leases on its key end: the overlay alternative,
+  not the waiting write this RFD proposes. That row was kept only in memory, so a source restarted
+  while a write was held lost it. It then showed the write, while relays whose leases were granted
+  before the restart still answered with the row from before it: for up to one lease, a read could
+  go back.
+
+  The row is now stored. `ReadLeases` takes the source's `HeldRows` (`load`, `put`, `delete`,
+  synchronous), writes each hold's row and end as it sets them, and loads them when the source
+  starts. A source calls `holdUntil` in the transaction that commits the write, so the write and
+  the row from before it are stored together. A restored hold ends when it would have: by then
+  every lease on its key is over. The other choice, reads waiting out the horizon after a restart
+  as writes do, was passed over: the horizon is stored up to 5 s ahead, so every restart of a
+  source with leases out (each deploy) would stall its reads for seconds.
 
 - How a `LeaseRelay` subclass reads values of a `ShardedTable`: decoded rows, or the stored form.
 - Whether the client fixes one `draw` per isolate, or one per key, to spread isolates better over

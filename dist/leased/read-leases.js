@@ -9,6 +9,12 @@
 // source stores how far its leases may reach (`horizon`, in steps); a restarted source holds every
 // write until then, plus RESTART_SKEW_MS for another machine's clock.
 //
+// The row reads see while a write is held is stored too (`HeldRows`), in the transaction that
+// commits the write. Holders with leases from before a restart still answer with that row; a
+// source that forgot it would show the write at once, and a read through a holder after one from
+// the source would go back. So a restarted source loads the holds it had, and each ends when it
+// would have: by then every lease on its key is over.
+//
 // A named holder's lease (a relay's, by its index) can be asked back: a held write asks each
 // holder (`toRevoke`), and a holder that gives it back (`returned`) ends it early, so the write is
 // shown once the holders' sub-leases are over, not when their leases would have ended. A named
@@ -38,20 +44,32 @@ export class ReadLeases {
     holdAllUntil;
     horizon;
     storeHorizon;
+    heldRows;
     /**
      * The leases out on each key, by holder (a relay's index; UNNAMED for holders that can't be
      * asked back): when each ends by this source's clock (margin included), and whether it was asked back.
      */
     leases = new Map();
-    /** Keys with a held write: the row reads see until `until`. */
+    /** Keys with a held write: the row reads see until `until`. Each entry is in `heldRows` too. */
     held = new Map();
     /** When each key last changed (holdUntil sees every change): not leased to relays for WRITTEN_MS after. */
     changedAt = new Map();
-    /** `horizon`: how far leases granted before this run may reach (stored by `storeHorizon`). */
-    constructor(horizon, storeHorizon) {
+    /**
+     * `horizon`: how far leases granted before this run may reach (stored by `storeHorizon`).
+     * `heldRows`: the holds this source had when it last ran, and where it keeps them from now on.
+     */
+    constructor(horizon, storeHorizon, heldRows) {
         this.horizon = horizon;
         this.storeHorizon = storeHorizon;
+        this.heldRows = heldRows;
         this.holdAllUntil = horizon > 0 ? horizon + RESTART_SKEW_MS : 0;
+        const now = Date.now();
+        for (const h of heldRows.load()) {
+            if (h.until > now)
+                this.held.set(h.key, { row: h.row, until: h.until });
+            else
+                heldRows.delete(h.key);
+        }
     }
     /**
      * A lease on `keys` (ms; 0 if none). A held write waits for the leases out now, so a lease
@@ -106,6 +124,19 @@ export class ReadLeases {
             if (holders.size === 0)
                 this.leases.delete(key);
         }
+        for (const [key, held] of this.held)
+            if (held.until <= now)
+                this.release(key);
+    }
+    /** A key's hold is over: forgotten here and in storage. */
+    release(key) {
+        this.held.delete(key);
+        this.heldRows.delete(key);
+    }
+    /** Sets a key's hold, here and in storage. */
+    hold(key, row, until) {
+        this.held.set(key, { row, until });
+        this.heldRows.put({ key, row, until });
     }
     sweptAt = 0;
     /** How many keys have a lease on record (for tests and operators). */
@@ -165,8 +196,12 @@ export class ReadLeases {
         const held = this.held.get(key);
         if (!held)
             return now;
-        held.until = Math.min(held.until, Math.max(now, this.leaseEnd(key), this.holdAllUntil));
-        return held.until;
+        const until = Math.min(held.until, Math.max(now, this.leaseEnd(key), this.holdAllUntil));
+        // Stored before the answer leaves: the write is acknowledged at `until`, and a restart after
+        // that must not show the row from before it again.
+        if (until !== held.until)
+            this.hold(key, held.row, until);
+        return until;
     }
     /**
      * Before a write to these keys is shown: when every lease on them is over. If that is later than
@@ -187,7 +222,7 @@ export class ReadLeases {
         for (const c of changes) {
             const held = this.held.get(c.key);
             // A second write while one is held: reads keep the row from before the first.
-            this.held.set(c.key, { row: held && held.until > now ? held.row : c.before, until: Math.max(until, held?.until ?? 0) });
+            this.hold(c.key, held && held.until > now ? held.row : c.before, Math.max(until, held?.until ?? 0));
         }
         return until;
     }
@@ -198,7 +233,7 @@ export class ReadLeases {
             return committed;
         if (held.until > Date.now())
             return held.row;
-        this.held.delete(key);
+        this.release(key);
         return committed;
     }
     /** When a write held on `key` is shown (now, if none is). */

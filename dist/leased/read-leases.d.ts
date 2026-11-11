@@ -16,22 +16,45 @@ export interface Change<Row> {
     readonly key: string;
     readonly before: Row | undefined;
 }
+/** A held write on a key: the row reads see (the one before the write; undefined if there was none) until `until`. */
+export interface HeldRow<Row> {
+    readonly key: string;
+    readonly row: Row | undefined;
+    readonly until: number;
+}
+/**
+ * Where a source keeps its held rows, so they outlive it: its own durable storage, written
+ * synchronously. `put` runs inside `holdUntil`, so call `holdUntil` in the transaction that
+ * commits the write: the row from before it and the write are then stored together or not at all.
+ */
+export interface HeldRows<Row> {
+    /** Every row stored: read once, when the source starts. */
+    load(): readonly HeldRow<Row>[];
+    /** A key's hold began, or its end changed: replaces the key's row. */
+    put(held: HeldRow<Row>): void;
+    /** A key's hold is over. */
+    delete(key: string): void;
+}
 export declare class ReadLeases<Row> {
     /** Until then every write is held: leases granted before a restart may still run. */
     private readonly holdAllUntil;
     private horizon;
     private readonly storeHorizon;
+    private readonly heldRows;
     /**
      * The leases out on each key, by holder (a relay's index; UNNAMED for holders that can't be
      * asked back): when each ends by this source's clock (margin included), and whether it was asked back.
      */
     private readonly leases;
-    /** Keys with a held write: the row reads see until `until`. */
+    /** Keys with a held write: the row reads see until `until`. Each entry is in `heldRows` too. */
     private readonly held;
     /** When each key last changed (holdUntil sees every change): not leased to relays for WRITTEN_MS after. */
     private readonly changedAt;
-    /** `horizon`: how far leases granted before this run may reach (stored by `storeHorizon`). */
-    constructor(horizon: number, storeHorizon: (horizon: number) => void);
+    /**
+     * `horizon`: how far leases granted before this run may reach (stored by `storeHorizon`).
+     * `heldRows`: the holds this source had when it last ran, and where it keeps them from now on.
+     */
+    constructor(horizon: number, storeHorizon: (horizon: number) => void, heldRows: HeldRows<Row>);
     /**
      * A lease on `keys` (ms; 0 if none). A held write waits for the leases out now, so a lease
      * granted while one is held ends by then (with the margin), and none is given if that leaves
@@ -43,6 +66,10 @@ export declare class ReadLeases<Row> {
      * and never again would otherwise stay here for as long as the source runs.
      */
     private sweep;
+    /** A key's hold is over: forgotten here and in storage. */
+    private release;
+    /** Sets a key's hold, here and in storage. */
+    private hold;
     private sweptAt;
     /** How many keys have a lease on record (for tests and operators). */
     get leasedKeys(): number;
