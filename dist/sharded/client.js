@@ -1,6 +1,7 @@
 // The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
+import { ATOMIC_HOLD_MS } from "./atomic.js";
 import { hashBit, keyHash } from "./hash.js";
 import { hostBits, shardObjectName, nodeName } from "./index.js";
 /**
@@ -222,7 +223,7 @@ export class ShardedClient {
      * of them (and of `payloads`, aligned with `keys`). One result per shard.
      */
     async call(keys, method, payloads, ...args) {
-        return this.route(false, keys, method, payloads, args);
+        return this.route(false, keys, method, payloads, this.method(method, args));
     }
     /**
      * Like `call`, for keys that must be handled together by one shard (an all-or-nothing update):
@@ -231,10 +232,151 @@ export class ShardedClient {
     async callOneShard(keys, method, payloads, ...args) {
         if (keys.length === 0)
             throw new Error(`sharded ${this.name}: callOneShard needs at least one key to pick its shard`);
-        const [only] = await this.route(true, keys, method, payloads, args);
+        const [only] = await this.route(true, keys, method, payloads, this.method(method, args));
         return only.result;
     }
-    async route(oneShard, keys, method, payloads, args) {
+    /** How `route` calls a shard for a method of the subclass. */
+    method(method, args) {
+        return (stub, bits, keys, payloads, hashes) => stub.shardedCall(this.name, bits, method, keys, payloads, args, this.stubOptions, this.presplitTo, hashes);
+    }
+    /** How `route` calls a shard for a step of an atomic call. */
+    atomicStep(step, args) {
+        return (stub, bits, keys, payloads, hashes) => stub.shardedAtomic(this.name, bits, step, keys, payloads, args, this.stubOptions, this.presplitTo, hashes);
+    }
+    /**
+     * Calls `method` on the shards owning `keys` (RFD0008), all or nothing: every shard's share
+     * applies, or none does. Keys in one shard: one call, as `callOneShard`. Keys in several: the
+     * shard of the smallest key (the primary) records the outcome once every other shard has
+     * prepared its share, holding its keys; then each applies or drops it. `method` names one of the
+     * class's `atomic` methods. Refused anywhere: nothing is applied, and the refusals come back.
+     * Writes to the keys wait while the call holds them; reads see the rows from before.
+     */
+    async atomically(keys, method, payloads, ...args) {
+        if (keys.length === 0)
+            throw new Error(`sharded ${this.name}: atomically needs at least one key`);
+        if (payloads && payloads.length !== keys.length)
+            throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
+        await this.loadCache();
+        for (let attempt = 0;; attempt++) {
+            if (attempt > MAX_HOPS)
+                throw new Error(`sharded ${this.name}: atomic call did not settle`);
+            if (new Set(keys.map((k) => this.shardFor(this.routeHash(k)))).size === 1) {
+                try {
+                    const [only] = await this.route(true, keys, method, payloads, this.atomicStep({ step: "solo", method }, args));
+                    const answer = only.result;
+                    return "refused" in answer ? { committed: false, refusals: [{ keys, result: answer.refused }] } : { committed: true, results: [{ keys, result: answer.applied }] };
+                }
+                catch (error) {
+                    // A split this client had not heard of: the keys span shards now.
+                    if (error instanceof SpansShards)
+                        continue;
+                    throw error;
+                }
+            }
+            const outcome = await this.atomicAcross(keys, method, payloads, args);
+            if (outcome !== "again")
+                return outcome;
+        }
+    }
+    /** An atomic call over several shards; "again" if a split moved the primary's keys apart before the commit (nothing applied). */
+    async atomicAcross(keys, method, payloads, args) {
+        const started = Date.now();
+        const tx = crypto.randomUUID();
+        const primaryKey = [...keys].sort()[0];
+        const primaryBits = this.shardFor(this.routeHash(primaryKey));
+        const mine = keys.map((k) => this.shardFor(this.routeHash(k)) === primaryBits);
+        const pick = (xs, primary) => xs.filter((_, i) => mine[i] === primary);
+        const deadline = Date.now() + ATOMIC_HOLD_MS;
+        const others = pick(keys, false);
+        let prepares;
+        try {
+            prepares = await this.route(false, others, method, payloads && pick(payloads, false), this.atomicStep({ step: "prepare", tx, method, primaryKey, deadline }, args));
+        }
+        catch (error) {
+            // Some shards may hold: the abort lets them drop at their deadline at the latest.
+            await this.decideAbort(tx, primaryKey);
+            throw error;
+        }
+        const prepared = prepares.filter((r) => "prepared" in r.result);
+        const refusals = prepares.flatMap((r) => ("refused" in r.result ? [{ keys: r.keys, result: r.result.refused }] : []));
+        const preparedAt = Date.now();
+        const log = (outcome, extra = {}) => console.log(JSON.stringify({ event: "sharded-atomic", object: this.name, shards: prepares.length + 1, keys: keys.length, outcome, prepareMs: preparedAt - started, ms: Date.now() - started, ...extra }));
+        if (refusals.length > 0) {
+            await this.decideAbort(tx, primaryKey);
+            await this.resolveAll(prepared, tx, "abort");
+            log("refused");
+            return { committed: false, refusals };
+        }
+        let answer;
+        let primaryKeys;
+        try {
+            const [commit] = await this.route(true, pick(keys, true), method, payloads && pick(payloads, true), this.atomicStep({ step: "commit", tx, method }, args));
+            answer = commit.result;
+            primaryKeys = commit.keys;
+        }
+        catch (error) {
+            if (error instanceof SpansShards) {
+                await this.decideAbort(tx, primaryKey);
+                await this.resolveAll(prepared, tx, "abort");
+                log("again");
+                return "again";
+            }
+            // The commit's answer is lost: the outcome decides, as it would for the shards.
+            const outcome = await this.atomicOutcome(tx, primaryKey).catch(() => null);
+            if (outcome === null)
+                throw error;
+            const resolved = await this.resolveAll(prepared, tx, outcome);
+            log(outcome, { lostCommitAnswer: true });
+            if (outcome === "abort")
+                throw error;
+            return { committed: true, results: resolved.results };
+        }
+        if ("refused" in answer || ("outcome" in answer && answer.outcome === "abort")) {
+            await this.resolveAll(prepared, tx, "abort");
+            log("refused at the primary");
+            // Refused by the primary's check, or aborted by a shard's recovery before the commit came.
+            return { committed: false, refusals: "refused" in answer ? [{ keys: primaryKeys, result: answer.refused }] : [] };
+        }
+        const results = "applied" in answer ? [{ keys: primaryKeys, result: answer.applied }] : [];
+        const resolved = await this.resolveAll(prepared, tx, "commit");
+        if (resolved.all)
+            await this.atomicTo(primaryKey, { step: "forget", tx }).catch(() => undefined);
+        log("commit", { resolveMs: Date.now() - started });
+        return { committed: true, results: [...results, ...resolved.results] };
+    }
+    /** The outcome of atomic call `tx`, from its primary (recording an abort if it has none). */
+    async atomicOutcome(tx, primaryKey) {
+        const answer = await this.atomicTo(primaryKey, { step: "outcome", tx });
+        return answer.outcome;
+    }
+    /** A step at the primary of `tx`. */
+    async atomicTo(primaryKey, step) {
+        const [only] = await this.route(true, [primaryKey], step.step, null, this.atomicStep(step, []));
+        return only.result;
+    }
+    /** Records an abort at the primary, if it can: else the holds end at their deadline, aborted. */
+    async decideAbort(tx, primaryKey) {
+        await this.atomicTo(primaryKey, { step: "abort", tx }).catch((error) => console.error(JSON.stringify({ event: "sharded-atomic-abort-failed", object: this.name, tx, error: String(error) })));
+    }
+    /** Tells every shard that prepared the outcome; each that applied answers its result. A lost one recovers at its deadline. */
+    async resolveAll(prepared, tx, outcome) {
+        const results = [];
+        let all = true;
+        await Promise.all(prepared.map(async (share) => {
+            try {
+                const [only] = await this.route(true, share.keys, "resolve", null, this.atomicStep({ step: "resolve", tx, outcome }, []));
+                const answer = only.result;
+                if ("applied" in answer)
+                    results.push({ keys: share.keys, result: answer.applied });
+            }
+            catch (error) {
+                all = false;
+                console.error(JSON.stringify({ event: "sharded-atomic-resolve-failed", object: this.name, tx, outcome, error: String(error) }));
+            }
+        }));
+        return { all, results };
+    }
+    async route(oneShard, keys, method, payloads, invoke) {
         if (payloads && payloads.length !== keys.length)
             throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
         await this.loadCache();
@@ -266,7 +408,7 @@ export class ShardedClient {
                 const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
                 const called = Date.now();
                 const groupHashes = positions.map((i) => hashes[i]);
-                const answer = (await this.onShard(bits, (stub) => stub.shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo, groupHashes)));
+                const answer = (await this.onShard(bits, (stub) => invoke(stub, bits, groupKeys, groupPayloads, groupHashes)));
                 took.push(Date.now() - called);
                 if ("ok" in answer)
                     out.push({ keys: groupKeys, positions, result: answer.ok });

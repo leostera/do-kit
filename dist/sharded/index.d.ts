@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import { type AtomicAnswer, type AtomicMethod, type AtomicStep } from "./atomic.js";
+export { ATOMIC_HOLD_MS, ATOMIC_OUTCOME_TTL_MS, type AtomicMethod, type AtomicOutcome, type AtomicShardResult, type Prepared } from "./atomic.js";
 export { hashBit, keyHash } from "./hash.js";
 export { RouteMismatch, SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 declare global {
@@ -200,6 +202,11 @@ export declare function shardObjectName(name: string, bits: string): string;
 export declare abstract class ShardedObject<Env = unknown, V = unknown> extends DurableObject<Env> {
     protected splitPolicy: SplitPolicy;
     /**
+     * The methods `client.atomically` can call (RFD0008), by name: each one's share of an
+     * all-or-nothing call over keys in any number of shards. See AtomicMethod.
+     */
+    protected atomic: Readonly<Record<string, AtomicMethod<V, any, any, any, any>>>;
+    /**
      * The share (0 to 1) of new shards that log a `shard-created` JSON line on their first call,
      * with how long the root took to confirm the tree's depth (`rootMs`). Off by default.
      */
@@ -318,15 +325,72 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     } | null;
     /** The name all shards of this object share (what the client was created with). */
     protected objectName(): string;
+    /** The keys atomic calls hold here, loaded from storage on first use (null: not loaded yet). */
+    private held;
+    /** Whether the atomic tables exist here. */
+    private atomicReady;
+    private ensureAtomicSchema;
+    private hasAtomicTables;
+    /** Every key an atomic call holds here, by key. */
+    private heldKeys;
+    private loadHolds;
+    private loadHold;
+    private holdInMemory;
+    /** Lets the writes that wait on `tx`'s keys go. */
+    private releaseInMemory;
+    /** The earliest deadline of a hold here, or null. */
+    private nextHoldDeadline;
+    /** The subclass's atomic method `method`. */
+    private atomicMethod;
+    /** The keys a share holds and reads: its own, then the method's holdKeys, once each. */
+    private holdKeysOf;
+    /** The rows of `keys`, inside a transaction. */
+    private rowsOf;
+    /** Writes rows, inside a transaction; only `keys` (what was fenced and checked). */
+    private writeRows;
+    /**
+     * Runs `inTransaction` once these keys are free: no split copying them, no other atomic call
+     * holding them, this shard owning them. `gather` (I/O) runs first, and again if a hold appeared
+     * while it ran, so the transaction checks rows nobody holds.
+     */
+    private whenFree;
+    private atomicStep;
+    /** The gather of `m`, bound to this share's arguments. */
+    private gatherOf;
+    private checkOf;
+    /** The whole call in this shard: check and apply in one transaction, as `update`. */
+    private atomicSolo;
+    /** A share that is not the primary's: checked, and if it would apply, kept and held. */
+    private atomicPrepare;
+    /**
+     * The primary's share: checked, and if it would apply, the outcome "commit" recorded and the
+     * share applied, in one transaction; refused, "abort" recorded. An outcome recorded already
+     * (a recovery that got here first) is answered as it is.
+     */
+    private atomicCommit;
+    private outcomeOf;
+    /** Records `outcome` for `tx` unless one is recorded; returns the one that is. */
+    private recordOutcome;
+    /** A share prepared here: applied (commit) or dropped (abort), and its keys released, in one transaction. */
+    private atomicResolve;
+    /** Holds past their deadline: asks each one's primary for the outcome, and resolves it. */
+    private recovering;
+    private recoverHolds;
+    private recoverDue;
     private assertOwner;
-    /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
+    /**
+     * Waits while a split copies any of these keys, or an atomic call holds them (other than
+     * `exceptTx`), up to `holdWaitMs`; then "not ready".
+     */
     private waitForHold;
     /** Counts an answer other than "ok". */
     private answered;
-    /** What an update of these keys waits for, if any. */
+    /** What an update of these keys waits for, if any: a split copying them, or an atomic call (not `exceptTx`) holding them. */
     private holding;
     /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
     shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions?: StubOptions | null, presplitTo?: number, hashes?: readonly string[] | null): Promise<CallAnswer<unknown>>;
+    /** One step of an atomic call (RFD0008), routed by the client as a call is: see AtomicStep. */
+    shardedAtomic(name: string, bits: string, step: AtomicStep, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions?: StubOptions | null, presplitTo?: number, hashes?: readonly string[] | null): Promise<CallAnswer<AtomicAnswer>>;
     /** A call to every shard: `method(...args)`, with no keys. */
     shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions?: StubOptions | null, presplitTo?: number): Promise<CallAnswer<unknown>>;
     /**
