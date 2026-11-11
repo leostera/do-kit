@@ -18,6 +18,12 @@ const BACKFILL_PAGES = 10;
 const FENCES = "indexed_fences";
 /** How soon the alarm delivers what a write could not, after it started. */
 const DELIVERY_RETRY_MS = 2_000;
+/**
+ * How far ahead a write asks for the alarm, in case it never gets to deliver what it wrote (a
+ * crash right after its transaction). Far enough that a shard taking writes sets its alarm now
+ * and then, not with every write; a delivery that fails asks for it DELIVERY_RETRY_MS ahead.
+ */
+const SAFETY_ALARM_MS = 30_000;
 /** Outbox entries the alarm picks up at a time. */
 const DELIVERY_BATCH = 200;
 /**
@@ -132,22 +138,27 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
    */
   protected async indexedTransact<R>(keys: readonly string[], fn: () => R): Promise<R> {
     this.migrate();
-    await this.wake(Date.now() + DELIVERY_RETRY_MS);
+    await this.wake(Date.now() + SAFETY_ALARM_MS);
     const { result, ops } = await this.transact(keys, () => this.inBatch(new Map(), fn));
     const ids = [...ops.values()].flat();
-    if (ids.length && !(await this.deliverWithin(ids, this.indexWaitMs))) throw new Error("IndexPending: rows written, index entries still being delivered");
+    if (ids.length && !(await this.deliverWithin(ids, this.indexWaitMs))) {
+      await this.wake(Date.now() + DELIVERY_RETRY_MS);
+      throw new Error("IndexPending: rows written, index entries still being delivered");
+    }
     return result;
   }
 
   protected override async writeBatch(keys: readonly string[], payloads: readonly unknown[] | null, write: () => WriteResult[]): Promise<IndexedShardResult[]> {
     this.migrate();
     // Before the transaction: an outbox left by a crash right after it is delivered by the alarm.
-    await this.wake(Date.now() + DELIVERY_RETRY_MS);
+    await this.wake(Date.now() + SAFETY_ALARM_MS);
     const tokens = new Map<string, Readonly<Record<string, number>>>();
     keys.forEach((key, i) => tokens.set(key, (payloads?.[i] as WriteTokens | undefined)?.tokens ?? {}));
     const { result, ops } = await this.transact(keys, () => this.inBatch(tokens, write));
     const ids = [...ops.values()].flat();
     const delivered = ids.length === 0 || (await this.deliverWithin(ids, this.indexWaitMs));
+    // Not delivered in time: the alarm takes over soon, not at the safety alarm's time.
+    if (!delivered) await this.wake(Date.now() + DELIVERY_RETRY_MS);
     return result.map((r, i) => (r.ok && ops.has(keys[i]!) ? { ...r, indexed: delivered } : r));
   }
 

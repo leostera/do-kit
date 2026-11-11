@@ -178,6 +178,17 @@ test("a write whose entries cannot be delivered throws IndexPending, and the ala
   expect((await lookup(t, "late@example.com"))!.row.id).toBe("u1");
 });
 
+test("a custom write whose entries cannot be delivered throws IndexPending, and the alarm delivers them soon", async () => {
+  const t = fresh("users");
+  await put(t, user("u1", "a@example.com"));
+  await op(t, "failApply", true);
+  expect(String(await op(t, "rawCall", "rename", ["u1"], [{ name: "Renamed" }]).catch((e: unknown) => e))).toContain("IndexPending");
+  await op(t, "failApply", false);
+  // Well before the 30 s a write asks for the alarm in case it never delivers.
+  expect(await eventually(() => op<number>(t, "outbox"), (left) => left === 0, 10_000)).toBe(0);
+  expect((await lookup(t, "a@example.com"))!.row.name).toBe("Renamed");
+});
+
 test("rows that move in a split while their entries are undelivered still reach the index", async () => {
   const t = fresh("users");
   await put(t, user("w0", "w0@example.com")); // the index shard exists

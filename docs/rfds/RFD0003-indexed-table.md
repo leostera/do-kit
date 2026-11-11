@@ -217,6 +217,10 @@ write rows too (see "Custom methods").
    - If delivery has not finished by the client's deadline, the call throws `IndexPending` with
      the row's version. The row is written, and the alarm delivers entries older than 2 s that
      no write is sending, as it does whatever a restart left in the outbox.
+   - A write asks for the alarm 30 s ahead, in case it never gets to deliver what it wrote, so
+     a shard taking writes sets its alarm now and then, not with every write. A delivery that
+     fails or runs late asks for it 2 s ahead. Row shards keep their client of the index shards,
+     and its stubs, between writes.
 4. **Apply.** Index shards apply what is delivered, idempotently and by version, and only the
    entry owner's changes:
    - a put sets the entry's version and row if it is newer than both the entry and its tombstone,
@@ -432,7 +436,10 @@ Phase 1 is built with the first answer to each, so each can still change before 
   it is then, from the shard that owns the row, and only if the row is still at the put's
   version. So a put can trail the remove that follows it only by the time one call is in flight.
   (The spec keeps tombstones for good: it does not model time.)
-- How long a reservation waits before the alarm resolves it. Built: 5 s (`reservationTimeoutMs`).
+- How long a reservation waits before the alarm resolves it. Built: 30 s
+  (`reservationTimeoutMs`). A reservation someone else wants is resolved at once, when they ask;
+  the alarm only clears the ones nobody asks about, so it need not be soon, and an index shard
+  taking reservations sets its alarm now and then, not with each one.
 - Batching outbox delivery per index shard. Built: coalesced across writes (see Deliver), each
   call split per index shard by the sharded client.
 - Not built yet: dropping the entries of a global index that was removed.

@@ -67,7 +67,7 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   protected abstract rowNodes(): DurableObjectNamespace<any>;
   /** How long a reservation may stay pending before the alarm asks its row shard. */
-  protected reservationTimeoutMs = 5_000;
+  protected reservationTimeoutMs = 30_000;
   /** How long an entry a row let go of is kept, so a late older change cannot bring it back. */
   protected tombstoneMs = 60 * 60_000;
 
