@@ -5,6 +5,13 @@ import { keyHash, sharded } from "../sharded/index.js";
 import { ShardedTable } from "../table/index.js";
 import { addressKey, entriesOf, entryOf, globalIndexes } from "./entries.js";
 const OUTBOX = "indexed_outbox";
+/** The global indexes this shard has seen, and how far each is built over the rows it had before it. */
+const GLOBALS = "indexed_globals";
+/** Rows a backfill could not put in a unique index: another row has their value. */
+const DUPLICATES = "indexed_duplicates";
+/** Rows a backfill reads at a time, and pages per alarm. */
+const BACKFILL_ROWS = 200;
+const BACKFILL_PAGES = 10;
 const FENCES = "indexed_fences";
 /** How soon the alarm delivers what a write could not, after it started. */
 const DELIVERY_RETRY_MS = 2_000;
@@ -142,6 +149,8 @@ export class IndexedTable extends ShardedTable {
     }
     /** Appends the row's index changes to the outbox: a put for each entry it has, a remove for each it lost. */
     rowWritten(key, before, after, version) {
+        // A write settles what a backfill found: its own reservations decide from here on.
+        this.store.exec(`DELETE FROM ${DUPLICATES} WHERE key = ?`, key);
         const had = entriesOf(this.table, before);
         const has = entriesOf(this.table, after);
         const tokens = this.batch?.tokens.get(key) ?? {};
@@ -210,8 +219,15 @@ export class IndexedTable extends ShardedTable {
             const rows = slices(ids).flatMap((part) => this.store.exec(`SELECT id, op FROM ${OUTBOX} WHERE id IN (${marks(part)})`, ...part).toArray());
             if (rows.length) {
                 const ops = this.onTheWire(rows.map((r) => JSON.parse(r.op)));
-                if (ops.length)
-                    await this.indexShards().call(ops.map((op) => op.route), "indexApply", ops);
+                if (ops.length) {
+                    for (const group of await this.indexShards().call(ops.map((op) => op.route), "indexApply", ops)) {
+                        group.result.forEach((answer, j) => {
+                            const op = ops[group.positions[j]];
+                            if (answer && op.kind === "put" && op.backfill)
+                                this.store.exec(`INSERT OR REPLACE INTO ${DUPLICATES} (ix, key, owner) VALUES (?, ?, ?)`, op.route.slice(0, op.route.indexOf(":")), op.owner, answer.taken);
+                        });
+                    }
+                }
                 // Not fenced by a split: a copy drops the outbox it gets (see afterClone), so a delete
                 // the copy misses changes nothing.
                 for (const part of slices(rows.map((r) => r.id)))
@@ -284,10 +300,78 @@ export class IndexedTable extends ShardedTable {
                 break;
             }
         }
+        if (await this.backfill())
+            return void (await this.wake(Date.now()));
         // Whatever is still there: due once it is old enough (and in flight now, most likely).
         const oldest = this.store.exec(`SELECT min(at) AS at FROM ${OUTBOX} WHERE hash >= ? AND hash <= ?`, lo, hi).one().at;
         if (oldest !== null)
             await this.wake(Math.max(oldest + DELIVERY_RETRY_MS, Date.now() + DELIVERY_RETRY_MS));
+    }
+    // ---- Global indexes added to a table that has rows ----
+    /** How far this shard's global indexes are built, and the rows a unique one could not take. */
+    async indexBuildStatus() {
+        this.migrate();
+        this.assertOwns([]);
+        const building = this.store.exec(`SELECT name FROM ${GLOBALS} WHERE done = 0 ORDER BY name`).toArray().map((r) => r.name);
+        const duplicates = this.store.exec(`SELECT ix, key, owner FROM ${DUPLICATES} ORDER BY ix, key LIMIT 100`).toArray().filter((d) => this.owns(d.key)).map((d) => ({ index: d.ix, key: d.key, owner: d.owner }));
+        return { building, duplicates };
+    }
+    /**
+     * Builds the indexes added since this shard last saw the schema, over the rows it owns: a few
+     * pages of rows, each row's entry put in the outbox and delivered like a write's. True if more
+     * is left. A split copies how far each index got, and each side goes on over its own rows.
+     */
+    async backfill() {
+        const indexes = new Map(globalIndexes(this.table).map((ix) => [ix.name, ix]));
+        for (let page = 0; page < BACKFILL_PAGES; page++) {
+            const next = this.store.exec(`SELECT name, after FROM ${GLOBALS} WHERE done = 0 ORDER BY name LIMIT 1`).toArray()[0];
+            if (!next)
+                return false;
+            const ix = indexes.get(next.name);
+            const rows = this.ownedRowsAfter(next.after, BACKFILL_ROWS);
+            const now = Date.now();
+            const ids = [];
+            for (const { row, version } of rows) {
+                const e = entryOf(this.table, ix, row);
+                if (!e)
+                    continue;
+                const key = row[this.table.primaryKey];
+                const op = { kind: "put", route: e.route, entry: e.entry, owner: key, version, token: null, backfill: true };
+                ids.push(this.store.exec(`INSERT INTO ${OUTBOX} (key, hash, op, at) VALUES (?, ?, ?, ?) RETURNING id`, key, keyHash(key), JSON.stringify(op), now).one().id);
+            }
+            if (rows.length < BACKFILL_ROWS)
+                this.store.exec(`UPDATE ${GLOBALS} SET done = 1, after = NULL WHERE name = ?`, next.name);
+            else
+                this.store.exec(`UPDATE ${GLOBALS} SET after = ? WHERE name = ?`, rows.at(-1).row[this.table.primaryKey], next.name);
+            // Delivered before the next page, so the outbox stays small. One that fails is left to the alarm.
+            if (ids.length)
+                await this.deliver(ids).catch((error) => console.error(JSON.stringify({ event: "index-backfill-delivery-failed", node: this.nodeLabel(), error: String(error) })));
+        }
+        return this.store.exec(`SELECT 1 FROM ${GLOBALS} WHERE done = 0 LIMIT 1`).toArray().length > 0;
+    }
+    /**
+     * Records the schema's global indexes. One this shard has not seen is built over its rows, unless
+     * this is the first time it records any: then the indexes are as old as the table here.
+     */
+    migrateGlobals() {
+        const first = this.store.exec(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?`, GLOBALS).one().n === 0;
+        this.store.exec(`CREATE TABLE IF NOT EXISTS ${GLOBALS} (name TEXT PRIMARY KEY NOT NULL, def TEXT NOT NULL, after TEXT, done INTEGER NOT NULL) WITHOUT ROWID`);
+        this.store.exec(`CREATE TABLE IF NOT EXISTS ${DUPLICATES} (ix TEXT NOT NULL, key TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY (ix, key)) WITHOUT ROWID`);
+        const wanted = new Map(globalIndexes(this.table).map((ix) => [ix.name, JSON.stringify([ix.columns, ix.unique, ix.partition])]));
+        for (const seen of this.store.exec(`SELECT name, def FROM ${GLOBALS}`).toArray()) {
+            if (wanted.get(seen.name) === seen.def) {
+                wanted.delete(seen.name);
+                continue;
+            }
+            // Dropped, or redefined (built again, as a new one). Its old entries stay on the index shards.
+            this.store.exec(`DELETE FROM ${GLOBALS} WHERE name = ?`, seen.name);
+            this.store.exec(`DELETE FROM ${DUPLICATES} WHERE ix = ?`, seen.name);
+        }
+        for (const [name, def] of wanted)
+            this.store.exec(`INSERT INTO ${GLOBALS} (name, def, after, done) VALUES (?, ?, NULL, ?)`, name, def, first ? 1 : 0);
+        // The alarm builds what is new (the first call of a deploy reaches every shard that is used).
+        if (this.store.exec(`SELECT 1 FROM ${GLOBALS} WHERE done = 0 LIMIT 1`).toArray().length > 0)
+            void this.wake(Date.now()).catch(() => { });
     }
     // ---- Splits ----
     /**
@@ -332,6 +416,7 @@ export class IndexedTable extends ShardedTable {
         this.store.exec(`CREATE INDEX IF NOT EXISTS ${OUTBOX}_hash ON ${OUTBOX} (hash)`);
         this.store.exec(`CREATE TABLE IF NOT EXISTS ${FENCES} (key TEXT NOT NULL, route TEXT NOT NULL, entry TEXT NOT NULL, hash TEXT NOT NULL, token INTEGER NOT NULL, PRIMARY KEY (key, route, entry))`);
         this.store.exec(`CREATE INDEX IF NOT EXISTS ${FENCES}_hash ON ${FENCES} (hash)`);
+        this.migrateGlobals();
         this.indexMigrated = true;
     }
     fence(key, route, entry) {

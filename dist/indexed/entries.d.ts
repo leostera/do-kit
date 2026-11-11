@@ -38,6 +38,7 @@ export type IndexOp = {
     readonly version: number;
     readonly row: RowShape;
     readonly token: number | null;
+    readonly backfill?: true;
 } | {
     readonly kind: "remove";
     readonly route: string;
@@ -64,7 +65,26 @@ export type StoredOp = Exclude<IndexOp, {
     readonly owner: string;
     readonly version: number;
     readonly token: number | null;
+    readonly backfill?: true;
 };
+/**
+ * What an index shard answers a delivered change: null, or for a put of a backfill (a row that was
+ * there before its unique index), the row that has the value already.
+ */
+export type ApplyAnswer = null | {
+    readonly taken: string;
+};
+/** How far a table's global indexes are built, and the rows a unique one could not take. */
+export interface IndexStatus {
+    /** Indexes still being built over rows that were there before them: lookups and pages may miss rows. */
+    readonly building: readonly string[];
+    /** Rows whose value of a unique index another row has (at most 100 a shard): they are not in it. */
+    readonly duplicates: readonly {
+        readonly index: string;
+        readonly key: string;
+        readonly owner: string;
+    }[];
+}
 /** What reserving a unique value answered. */
 export type ReserveAnswer = {
     readonly reserved: number;

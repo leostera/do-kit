@@ -1,6 +1,6 @@
 import { ShardedTable } from "../table/index.js";
 import type { RowShape, WriteResult } from "../table/schema.js";
-import { type ResolveAnswer } from "./entries.js";
+import { type IndexStatus, type ResolveAnswer } from "./entries.js";
 /** What the client sends with a write: a reservation token per unique index it reserved. */
 export interface WriteTokens {
     readonly tokens?: Readonly<Record<string, number>>;
@@ -79,6 +79,19 @@ export declare abstract class IndexedTable<Env, Row extends RowShape> extends Sh
      * writes still delivering them. Call `super.onAlarm()`.
      */
     protected onAlarm(): Promise<void>;
+    /** How far this shard's global indexes are built, and the rows a unique one could not take. */
+    indexBuildStatus(): Promise<IndexStatus>;
+    /**
+     * Builds the indexes added since this shard last saw the schema, over the rows it owns: a few
+     * pages of rows, each row's entry put in the outbox and delivered like a write's. True if more
+     * is left. A split copies how far each index got, and each side goes on over its own rows.
+     */
+    private backfill;
+    /**
+     * Records the schema's global indexes. One this shard has not seen is built over its rows, unless
+     * this is the first time it records any: then the indexes are as old as the table here.
+     */
+    private migrateGlobals;
     /**
      * The copy keeps the outbox entries of its own keys, and delivers them: it has those rows from
      * here on, and a put is sent with its row. The rest are the original's. Call `super.afterClone`.

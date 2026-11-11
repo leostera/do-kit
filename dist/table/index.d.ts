@@ -15,6 +15,12 @@ export interface PutOptions {
  */
 export declare abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObject<Env, never> {
     protected abstract readonly table: TableSchema<Row>;
+    /**
+     * Rows whose key a new index is given per call, while it is built over rows that were there
+     * before it. A shard with more answers "not ready" and goes on with the next call, so building
+     * an index over millions of rows never needs more CPU than one call has.
+     */
+    protected indexBuildRows: number;
     private migrated;
     /** SQLite's index on the primary key, for listings in key order. */
     private keyIndex;
@@ -62,6 +68,8 @@ export declare abstract class ShardedTable<Env, Row extends RowShape> extends Sh
     protected patchRow(key: string, changes: Partial<Row>, options?: PutOptions): WriteResult;
     /** Deletes a row if its version is `ifVersion`. Call inside `transact`. */
     protected deleteRow(key: string, options?: PutOptions): WriteResult;
+    /** Up to `limit` of the rows this shard owns, in key order, after `afterKey` (null: from the first). */
+    protected ownedRowsAfter(afterKey: string | null, limit: number): Versioned<Row>[];
     /** The highest version a deleted row of this shard had (0: none). */
     private deletedVersion;
     /** Deletes rows (and counts) of hashes this shard gave away, a batch at a time. */

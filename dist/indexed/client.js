@@ -119,6 +119,16 @@ export class IndexedTableClient extends TableClient {
         this.settle([0], results, out, WRITE_ATTEMPTS, () => key);
         return out[0];
     }
+    /**
+     * How far the global indexes are built. One added to a table that has rows is built in the
+     * background, shard by shard: until it is no longer `building`, its lookups and pages may miss
+     * rows. `duplicates` are rows that were there before a unique index and share a value with
+     * another row: they are not in the index until they are written again with a free value.
+     */
+    async indexStatus() {
+        const shards = (await this.client.scan("indexBuildStatus"));
+        return { building: [...new Set(shards.flatMap((s) => s.building))].sort(), duplicates: shards.flatMap((s) => s.duplicates) };
+    }
     /** The row whose values of a unique global index are `values`, in one call to one index shard. */
     async lookup(index, values) {
         const ix = this.globalIndex(index);

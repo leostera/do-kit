@@ -48,13 +48,10 @@ export class GlobalIndex extends ShardedObject {
     async indexApply(routes, ops) {
         this.migrate();
         const now = Date.now();
-        await this.transact(routes, () => {
-            for (const op of ops)
-                this.apply(op, now);
-        });
+        const answers = await this.transact(routes, () => ops.map((op) => this.apply(op, now)));
         if (ops.some((op) => op.kind === "remove"))
             await this.wake(now + this.tombstoneMs);
-        return ops.map(() => null);
+        return answers;
     }
     /** The rows of unique entries (null: none, or only reserved). */
     async indexLookup(routes, payloads) {
@@ -151,10 +148,22 @@ export class GlobalIndex extends ShardedObject {
     }
     // ---- Delivered changes ----
     apply(op, now) {
+        return this.applied(op, now) ?? null;
+    }
+    applied(op, now) {
         const e = this.get(op.route, op.entry);
         if (op.kind === "put") {
             if (!e) {
                 this.db.exec(`INSERT INTO ${ENTRIES} (route, entry, hash, owner, version, row, pending, issued, removed, floor, fenced, at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0, 0, 0, ?)`, op.route, op.entry, keyHash(op.route), op.owner, op.version, JSON.stringify(op.row), op.token ?? 0, now);
+                this.stats.applied++;
+                return;
+            }
+            if (e.owner !== op.owner && op.backfill) {
+                // A row from before its unique index, whose value another row has: it is reported, not
+                // indexed. Unless that row let go of the value: then this one has it.
+                if (!(e.removed && e.pending === null))
+                    return { taken: e.owner };
+                this.db.exec(`UPDATE ${ENTRIES} SET owner = ?, version = ?, row = ?, pending = NULL, issued = 0, removed = 0, floor = 0, fenced = 0, at = ? WHERE route = ? AND entry = ?`, op.owner, op.version, JSON.stringify(op.row), now, op.route, op.entry);
                 this.stats.applied++;
                 return;
             }

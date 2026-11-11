@@ -1,6 +1,6 @@
 import { ShardedObject } from "../sharded/index.js";
 import type { RowShape, Versioned } from "../table/schema.js";
-import type { IndexOp, IndexPage, IndexPageRequest, ReserveAnswer } from "./entries.js";
+import type { ApplyAnswer, IndexOp, IndexPage, IndexPageRequest, ReserveAnswer } from "./entries.js";
 /** What `indexStats` reports, for tests and operators. */
 export interface GlobalIndexStats {
     readonly entries: number;
@@ -43,7 +43,7 @@ export declare abstract class GlobalIndex<Env> extends ShardedObject<Env, never>
         readonly owner: string;
     }[]): Promise<ReserveAnswer[]>;
     /** Applies changes delivered by row shards, idempotently and by version. */
-    indexApply(routes: readonly string[], ops: readonly IndexOp[]): Promise<null[]>;
+    indexApply(routes: readonly string[], ops: readonly IndexOp[]): Promise<ApplyAnswer[]>;
     /** The rows of unique entries (null: none, or only reserved). */
     indexLookup(routes: readonly string[], payloads: readonly {
         readonly entry: string;
@@ -57,6 +57,7 @@ export declare abstract class GlobalIndex<Env> extends ShardedObject<Env, never>
     private resolve;
     private settle;
     private apply;
+    private applied;
     private page;
     /** Resolves reservations left pending, and drops tombstones past their time. Call `super.onAlarm()`. */
     protected onAlarm(): Promise<void>;

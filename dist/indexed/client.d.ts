@@ -1,6 +1,7 @@
 import { type ShardedClientOptions } from "../sharded/client.js";
 import { TableClient } from "../table/client.js";
 import { type ListPage, type ListQuery, type RowShape, type TableSchema, type Versioned, type WriteResult } from "../table/schema.js";
+import { type IndexStatus } from "./entries.js";
 /**
  * The row is written, but not all of its index entries were within the row shard's wait: lookups
  * and listings may not show it yet. The row shard goes on delivering them. Treat the write as done,
@@ -54,6 +55,13 @@ export declare class IndexedTableClient<Row extends RowShape> extends TableClien
     delete(key: string, options?: {
         ifVersion?: number;
     }): Promise<IndexedWriteResult>;
+    /**
+     * How far the global indexes are built. One added to a table that has rows is built in the
+     * background, shard by shard: until it is no longer `building`, its lookups and pages may miss
+     * rows. `duplicates` are rows that were there before a unique index and share a value with
+     * another row: they are not in the index until they are written again with a free value.
+     */
+    indexStatus(): Promise<IndexStatus>;
     /** The row whose values of a unique global index are `values`, in one call to one index shard. */
     lookup(index: string, values: readonly unknown[]): Promise<Versioned<Row> | null>;
     /**

@@ -302,6 +302,12 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     protected ownedHashRange(): readonly [string, string];
     /** Whether `key` is this shard's now. Keys of a split's moving half stay this shard's until it commits. */
     protected owns(key: string): boolean;
+    /**
+     * Ends the call as "not ready": nothing more is done, and the client backs off and calls again.
+     * For work a shard does in slices before it can serve (building an index over its rows): each
+     * call does a slice, commits it, and ends here until the work is done.
+     */
+    protected notReady(): never;
     /** This shard's name (`${name}#${bits}`), once it has one. */
     protected nodeLabel(): string;
     /** The shard this one split from and when; null for the root. */
