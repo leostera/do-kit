@@ -96,6 +96,10 @@ export class Users extends IndexedTable<Env, User> {
   protected indexNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.USER_INDEXES as never;
   }
+  /** The keys with index changes not delivered yet, on this object, and whether it owns each. */
+  async outboxKeys(): Promise<{ key: string; owned: boolean }[]> {
+    return this.ctx.storage.sql.exec<{ key: string }>("SELECT DISTINCT key FROM indexed_outbox ORDER BY key").toArray().map(({ key }) => ({ key, owned: this.owns(key) }));
+  }
   /** Index changes not delivered yet, on this object (owned or not). */
   async outboxSize(): Promise<number> {
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM indexed_outbox").one().n;
@@ -564,6 +568,8 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
       return flat(untyped(rows).call(body.args[1] as string[], body.args[0] as string, body.args[2] as unknown[]));
     case "indexStats":
       return untyped(indexes).scan("indexStats");
+    case "outboxKeys":
+      return untyped(rows).scan("outboxKeys");
     case "outbox":
       return (await untyped(rows).scan("outboxSize")).reduce((a: number, b) => a + (b as number), 0);
     case "split": // [side, bits]

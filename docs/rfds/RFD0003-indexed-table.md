@@ -177,7 +177,10 @@ A write is a `put`, `patch` or `delete` through the client. Custom transactional
 write rows too (see "Custom methods").
 
 1. **Reserve.** For each unique index whose values the write sets, or changes, the client calls
-   `reserve(entryKey, key)` on that index's shard.
+   `reserve(entryKey, key)` on that index's shard. A create (`ifVersion: 0`) and a patch of a
+   unique column reserve first. Any other put is sent without reservations: if it keeps the row's
+   unique values it needs none, and if the row shard refuses it because one changes, the client
+   reserves and sends it again.
    - If no entry exists, the shard creates one with `owner: key, version: 0, pending: token`.
    - If the entry is the same key's, the shard sets `pending` to a new token.
    - If the entry is another key's and confirmed, the answer is `taken`. The write returns
@@ -203,10 +206,17 @@ write rows too (see "Custom methods").
    A delete is a write too: its removes carry one past the row's last version, and a row written
    later starts above that, so a recreated row's puts are never mistaken for older changes.
 3. **Deliver.** Still inside the call, the row shard sends the outbox entries to their index
-   shards in parallel, deletes each one acknowledged, and only then returns the write's result.
-   If delivery has not finished by the client's deadline, the call throws `IndexPending` with the
-   row's version. The row is written, and the alarm keeps delivering. The alarm also delivers
-   whatever a restart left in the outbox.
+   shards, deletes each one acknowledged, and only then returns the write's result.
+   - Deliveries are coalesced: writes queue their entries, and at most 4 calls at a time send
+     what is queued, up to 500 entries each. Under load one call carries the entries of many
+     writes.
+   - The outbox keeps a put without its row. The row is read when the put is sent, and goes only
+     if it is still at the put's version. A put that a later write superseded is sent as a
+     **confirm** of its token (which clears the reservation), or not at all: the later write's
+     changes cover the entry.
+   - If delivery has not finished by the client's deadline, the call throws `IndexPending` with
+     the row's version. The row is written, and the alarm delivers entries older than 2 s that
+     no write is sending, as it does whatever a restart left in the outbox.
 4. **Apply.** Index shards apply what is delivered, idempotently and by version, and only the
    entry owner's changes:
    - a put sets the entry's version and row if it is newer than both the entry and its tombstone,
@@ -256,10 +266,12 @@ changes go through the client, which reserves first.
 
 ### Splits
 
-- **Row shards.** The outbox and fences are tables, so a split copies them with the rows. The
-  original goes on delivering its whole outbox, and the copy drops the outbox it got (`afterClone`):
-  index changes apply by version, so the original's late ones are harmless. Each side drops the
-  fences of keys it does not own (`cleanupForeign`).
+- **Row shards.** The outbox and fences are tables, so a split copies them with the rows. Each
+  side keeps the outbox entries and fences of its own keys and drops the rest (`afterClone` in
+  the copy, `cleanupForeign` in the original), so every entry is sent by the shard that has its
+  row. An entry a write on the original is still sending when the split commits is sent by both;
+  changes apply by version, so that is harmless. The original's alarm never sends an entry of a
+  key it gave away: its row of that key stopped changing at the split.
 - **Index shards** are sharded objects: they split by load like any other, by entry routing key.
   All entries of one partition value stay together (phase 1).
 - **Phase 2** needs the core to split a shard by range at a key chosen from its data, and to
@@ -403,10 +415,13 @@ Phase 1 is built with the first answer to each, so each can still change before 
 
 - Tombstone and fence lifetimes. Built: tombstones are kept an hour (`tombstoneMs`); fences are
   kept until the key moves to another shard. Fences could be dropped once older than any write
-  deadline.
+  deadline. An hour is enough because a put is never old when it is sent: it goes with the row as
+  it is then, from the shard that owns the row, and only if the row is still at the put's
+  version. So a put can trail the remove that follows it only by the time one call is in flight.
+  (The spec keeps tombstones for good: it does not model time.)
 - How long a reservation waits before the alarm resolves it. Built: 5 s (`reservationTimeoutMs`).
-- Batching outbox delivery per index shard for `putMany`. Built: one routed call per write batch,
-  which the sharded client splits per index shard.
+- Batching outbox delivery per index shard. Built: coalesced across writes (see Deliver), each
+  call split per index shard by the sharded client.
 - Not built yet: the backfill of a global index added to a table that has rows.
 
 ### Out of scope

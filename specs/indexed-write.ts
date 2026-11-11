@@ -33,11 +33,15 @@ interface Entry {
   fenced: boolean;
 }
 
-/** An index change a row shard has to deliver. */
+/**
+ * An index change a row shard has to deliver. The outbox keeps no copy of the row: a put is sent
+ * with the row as it is when sent, so a put a later write superseded goes as a "confirm" (only its
+ * token, to clear the reservation) or not at all.
+ */
 interface Op {
   id: number;
   value: Value;
-  kind: "put" | "remove";
+  kind: "put" | "remove" | "confirm";
   version: number;
   token: number | null;
 }
@@ -80,7 +84,7 @@ export default defineSpec(
         description: `The client writing row ${key}.`,
         zone: workers,
         singleton: true,
-        initialState: () => ({ key, attempt: 0, wrote: 0, tries: 0, want: null as Value | null, phase: "idle" as "idle" | "reserving" | "writing" | "done", token: null as number | null, outcome: "" }),
+        initialState: () => ({ key, attempt: 0, wrote: 0, tries: 0, has: null as Value | null, want: null as Value | null, phase: "idle" as "idle" | "reserving" | "writing" | "done", token: null as number | null, outcome: "" }),
         display: {
           icon: "code",
           status: (s) => (s.phase === "idle" ? "idle" : s.phase === "done" ? s.outcome : `${s.phase} ${s.want ?? "delete"}`),
@@ -99,10 +103,12 @@ export default defineSpec(
               s.want = value === "delete" ? null : (value as Value);
               s.token = null;
               s.tries = 1;
-              if (s.want === null) {
+              // A delete, or the value its row last had: written without a reservation (the row
+              // shard refuses if the value changes after all, and the writer reserves then).
+              if (s.want === null || s.want === s.has) {
                 s.phase = "writing";
                 s.attempt += 1;
-                ctx.send(rowShard(ctx), Write, { value: null, token: null, attempt: s.attempt });
+                ctx.send(rowShard(ctx), Write, { value: s.want, token: null, attempt: s.attempt });
                 ctx.start("gaveUp");
               } else {
                 s.phase = "reserving";
@@ -145,7 +151,7 @@ export default defineSpec(
             },
           },
           [Refused]: {
-            description: "The reservation was given up before the row was written: reserves again.",
+            description: "The write needs a reservation (its value changes), or its reservation was given up before the row was written: reserves again.",
             sources: ["src/indexed/client.ts#IndexedTableClient.settle"],
             starts: ["retry"],
             run(s, msg, ctx) {
@@ -180,6 +186,7 @@ export default defineSpec(
               s.phase = "done";
               s.outcome = "written";
               s.wrote = msg.version;
+              s.has = s.want;
               ctx.cancel("gaveUp");
             },
           },
@@ -213,6 +220,39 @@ export default defineSpec(
       });
     }
 
+    /** The row shard's state that sending reads. */
+    type ShardState = { key: Key; version: number; outbox: Op[]; sending: Set<number>; answering: { version: number; attempt: number } | null };
+
+    /** Answers the waiting write once none of its changes is left in the outbox. */
+    function answerIfDone(s: ShardState, ctx: { send: (to: never, m: typeof WriteDone, p: { version: number; attempt: number }) => void; the: Ctx["the"] }) {
+      if (s.answering !== null && !s.outbox.some((op) => op.version <= s.answering!.version)) {
+        ctx.send(writer(ctx, s.key), WriteDone, s.answering);
+        s.answering = null;
+      }
+    }
+
+    /**
+     * Sends what is in the outbox and not being sent. A put that a later write of the row
+     * superseded is sent as a confirm of its token, or dropped if it has none: the later write's
+     * changes cover the entries.
+     */
+    function sendOutbox(s: ShardState, ctx: { send: (...a: never[]) => void; the: Ctx["the"] }) {
+      for (const op of [...s.outbox]) {
+        if (s.sending.has(op.id)) continue;
+        let wire = op;
+        if (op.kind === "put" && op.version < s.version) {
+          if (op.token === null) {
+            s.outbox = s.outbox.filter((o) => o.id !== op.id);
+            continue;
+          }
+          wire = { ...op, kind: "confirm" };
+        }
+        s.sending.add(op.id);
+        (ctx.send as (to: never, m: typeof Apply, p: { owner: Key; op: Op }) => void)((ctx.the as (a: unknown) => never)(Index), Apply, { owner: s.key, op: wire });
+      }
+      answerIfDone(s, ctx as never);
+    }
+
     function makeShard(name: string, key: Key) {
       return spec.defineActor({
         name,
@@ -238,36 +278,33 @@ export default defineSpec(
         },
         transitions: {
           [Write]: {
-            description: "Refuses a fenced token; otherwise writes the row and its index changes to the outbox in one transaction, then delivers them.",
+            description: "Refuses a value change without a token above the fence; otherwise writes the row and its index changes to the outbox in one transaction, raising the fence to the token it used, then delivers them.",
             sources: ["src/indexed/table.ts#IndexedTable.writeBatch", "src/indexed/table.ts#IndexedTable.refuseRowWrite", "src/indexed/table.ts#IndexedTable.rowWritten"],
             sends: [Refused, Apply, WriteDone],
             run(s, msg, ctx) {
-              if (fences.on && msg.value !== null && msg.token !== null && msg.token <= (s.fence[msg.value] ?? 0)) return ctx.reply(Refused, { value: msg.value, attempt: msg.attempt });
+              const fence = msg.value === null ? 0 : (s.fence[msg.value] ?? 0);
+              const valid = msg.token !== null && (!fences.on || msg.token > fence);
+              if (msg.value !== null && msg.value !== s.value && !valid) return ctx.reply(Refused, { value: msg.value, attempt: msg.attempt });
+              const token = valid ? msg.token : null;
+              if (fences.on && token !== null) s.fence[msg.value!] = token;
               const before = s.value;
               s.version += 1;
               s.value = msg.value;
               if (before !== null && before !== msg.value) s.outbox.push({ id: s.nextOp++, value: before, kind: "remove", version: s.version, token: null });
-              if (msg.value !== null) s.outbox.push({ id: s.nextOp++, value: msg.value, kind: "put", version: s.version, token: msg.token });
+              if (msg.value !== null) s.outbox.push({ id: s.nextOp++, value: msg.value, kind: "put", version: s.version, token });
               if (!waitForIndex.on || s.outbox.length === 0) ctx.send(writer(ctx, s.key), WriteDone, { version: s.version, attempt: msg.attempt });
               else s.answering = { version: s.version, attempt: msg.attempt };
-              for (const op of s.outbox) {
-                if (s.sending.has(op.id)) continue;
-                s.sending.add(op.id);
-                ctx.send(ctx.the(Index), Apply, { owner: s.key, op });
-              }
+              sendOutbox(s, ctx as never);
             },
           },
           [Applied]: {
             description: "The index has a change: drops it from the outbox, and answers the waiting write once all of its changes are in.",
-            sources: ["src/indexed/table.ts#IndexedTable.deliver"],
+            sources: ["src/indexed/table.ts#IndexedTable.deliver", "src/indexed/table.ts#IndexedTable.send"],
             sends: [WriteDone],
             run(s, msg, ctx) {
               s.outbox = s.outbox.filter((op) => op.id !== msg.id);
               s.sending.delete(msg.id);
-              if (s.answering !== null && !s.outbox.some((op) => op.version <= s.answering!.version)) {
-                ctx.send(writer(ctx, s.key), WriteDone, s.answering);
-                s.answering = null;
-              }
+              answerIfDone(s, ctx as never);
             },
           },
           [spec.failed(Apply)]: {
@@ -279,16 +316,12 @@ export default defineSpec(
           },
           deliver: {
             description: "The alarm: delivers what is left in the outbox.",
-            sources: ["src/indexed/table.ts#IndexedTable.onAlarm"],
+            sources: ["src/indexed/table.ts#IndexedTable.onAlarm", "src/indexed/table.ts#IndexedTable.onTheWire"],
             routine: true,
             when: (s) => s.outbox.some((op) => !s.sending.has(op.id)),
-            sends: [Apply],
+            sends: [Apply, WriteDone],
             run(s, ctx) {
-              for (const op of s.outbox) {
-                if (s.sending.has(op.id)) continue;
-                s.sending.add(op.id);
-                ctx.send(ctx.the(Index), Apply, { owner: s.key, op });
-              }
+              sendOutbox(s, ctx as never);
             },
           },
           [Resolve]: {
@@ -389,6 +422,8 @@ export default defineSpec(
                 }
                 if (op.token !== null && e.pending !== null && op.token >= e.pending) e.pending = null;
               }
+            } else if (op.kind === "confirm") {
+              if (e && e.owner === owner && op.token !== null && e.pending !== null && op.token >= e.pending) e.pending = null;
             } else if (e && e.owner === owner && op.version > e.version) {
               e.removed = true;
               if (tombstones.on) e.floor = Math.max(e.floor, op.version);
@@ -571,6 +606,26 @@ export default defineSpec(
         s.deliver(s.the(ShardJ), "Applied", { id: 1 });
         s.deliver(s.the(ShardJ), "Applied");
         s.deliver(s.the(Bob), "WriteDone");
+      },
+    });
+
+    spec.defineScenario({
+      name: "A later write supersedes an undelivered put",
+      description: "Alice's put of b is lost on its way to the index; before the alarm sends it again she moves to c. The old put goes as a confirm of her token only, and the index ends with c alone.",
+      run(s) {
+        s.act(s.the(Alice), "write", { value: "b" });
+        s.deliver(s.the(Index), "Reserve");
+        s.deliver(s.the(Alice), "Reserved");
+        s.deliver(s.the(ShardK), "Write");
+        s.drop(s.the(Index), "Apply");
+        s.deliver(s.the(ShardK), spec.failed(Apply));
+        s.fire(s.the(Alice), "gaveUp");
+        s.act(s.the(Alice), "write", { value: "c" });
+        s.deliver(s.the(Index), "Reserve");
+        s.deliver(s.the(Alice), "Reserved");
+        // Writing c sends what the outbox holds: the put of b goes as a confirm.
+        s.deliver(s.the(ShardK), "Write");
+        s.settle({ until: (w) => w.quiet });
       },
     });
 

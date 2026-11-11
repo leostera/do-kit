@@ -116,8 +116,12 @@ test("a reservation whose writer never wrote is resolved, and the writer's token
 test("a reservation left by a failed version check is resolved by the alarm", async () => {
   const t = fresh("users");
   await put(t, user("u1", "old@example.com"));
-  // Reserves new@, then fails its version check: new@ stays reserved by u1, unwritten.
+  // An update sent optimistically fails its version check before it reserves anything.
   expect(await put(t, user("u1", "new@example.com"), { ifVersion: 7 })).toEqual({ ok: false, version: 1 });
+  const pendingNow = (s: { pending: number }[]) => s.reduce((a, b) => a + b.pending, 0);
+  expect(pendingNow(await op<{ pending: number }[]>(t, "indexStats"))).toBe(0);
+  // A create reserves first: here it fails its version check (u1 exists), and new@ stays reserved by u1, unwritten.
+  expect(await put(t, user("u1", "new@example.com"), { ifVersion: 0 })).toEqual({ ok: false, version: 1 });
   const pending = (s: { pending: number }[]) => s.reduce((a, b) => a + b.pending, 0);
   expect(pending(await op<{ pending: number }[]>(t, "indexStats"))).toBe(1);
   // The alarm asks u1's shard once the reservation is old enough, and drops it.
@@ -143,6 +147,15 @@ test("listing a partition of a global index reads one index shard, in index orde
   expect((await op<Versioned[]>(t, "listAll", { index: "byTeam", partition: ["core"] })).map((r) => r.row.id)).not.toContain(rows[1]!.id);
 });
 
+test("a batch larger than one SQL statement's parameters is written and delivered", async () => {
+  const t = fresh("users");
+  const rows = Array.from({ length: 120 }, (_, i) => ({ row: user(`b-${i}`, `b${i}@example.com`, `team-${i % 3}`, i) }));
+  const written = await ok(op<Result<WriteResult[]>>(t, "putMany", rows));
+  expect(written.every((w) => w.ok)).toBe(true);
+  expect((await lookup(t, "b119@example.com"))!.row.id).toBe("b-119");
+  expect(await op<number>(t, "outbox")).toBe(0);
+});
+
 test("custom methods deliver their index changes, and cannot change a unique value without a reservation", async () => {
   const t = fresh("users");
   await put(t, user("u1", "a@example.com"));
@@ -164,6 +177,23 @@ test("a write whose entries cannot be delivered throws IndexPending, and the ala
   expect(await eventually(() => op<number>(t, "outbox"), (left) => left === 0)).toBe(0);
   expect((await lookup(t, "late@example.com"))!.row.id).toBe("u1");
 });
+
+test("rows that move in a split while their entries are undelivered still reach the index", async () => {
+  const t = fresh("users");
+  await put(t, user("w0", "w0@example.com")); // the index shard exists
+  await op(t, "failApply", true);
+  const ids = Array.from({ length: 12 }, (_, i) => `m-${i}`);
+  for (const id of ids) expect(await op<Result<WriteResult>>(t, "put", user(id, `${id}@example.com`))).toMatchObject({ error: "IndexPending" });
+  // Half the rows move to a new shard, and their undelivered entries with them: each shard ends up
+  // holding the entries of its own keys only, and sends them from its own rows.
+  expect(await op(t, "split", "rows", "")).toBe(true);
+  const settled = await eventually(() => op<{ key: string; owned: boolean }[][]>(t, "outboxKeys"), (shards) => shards.length === 2 && shards.flat().every((e) => e.owned), 30_000);
+  expect(settled.map((s) => s.length).every((n) => n > 0)).toBe(true);
+  expect(settled.flat().map((e) => e.key).sort()).toEqual([...ids].sort());
+  await op(t, "failApply", false);
+  expect(await eventually(() => op<number>(t, "outbox"), (left) => left === 0, 30_000)).toBe(0);
+  for (const id of ids) expect((await lookup(t, `${id}@example.com`))?.row.id).toBe(id);
+}, 60_000);
 
 test("splits of the rows and of the index while writing: every row is found through every index, and no entry is left without its row", async () => {
   const t = fresh("users");

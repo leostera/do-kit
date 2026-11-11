@@ -74,24 +74,34 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
   }
 
   /**
-   * Writes whole rows. Reserves each row's unique values first: a value another row has fails that
-   * write with `conflict`. Returns once every index has the rows, or throws IndexPending.
+   * Writes whole rows. A unique value another row has fails that write with `conflict`. Returns
+   * once every index has the rows, or throws IndexPending.
+   *
+   * A create (`ifVersion: 0`) reserves its unique values first. Any other put is sent without
+   * reservations: if it keeps the row's unique values, it needs none, and if the row shard refuses
+   * it because one changes, it is reserved and sent again.
    */
   override async putMany(writes: readonly Write<Row>[]): Promise<IndexedWriteResult[]> {
     const out = new Array<IndexedWriteResult>(writes.length);
+    const reserve = new Set(writes.flatMap((w, i) => (w.ifVersion === 0 ? [i] : [])));
     let todo = writes.map((_, i) => i);
+    // One more attempt than WRITE_ATTEMPTS: an optimistic put's refusal is not a lost reservation.
     for (let attempt = 1; todo.length > 0; attempt++) {
-      const reserved = await this.reserveAll(todo.map((i) => ({ key: this.keyOf(writes[i]!.row), row: writes[i]!.row as RowShape })));
-      const go: { i: number; tokens: Record<string, number> }[] = [];
-      todo.forEach((i, j) => {
+      const reserving = todo.filter((i) => reserve.has(i));
+      const reserved = await this.reserveAll(reserving.map((i) => ({ key: this.keyOf(writes[i]!.row), row: writes[i]!.row as RowShape })));
+      const tokens = new Map<number, Record<string, number>>();
+      reserving.forEach((i, j) => {
         const r = reserved[j]!;
         if ("conflict" in r) out[i] = { ok: false, version: 0, conflict: r.conflict };
-        else go.push({ i, tokens: r.tokens });
+        else tokens.set(i, r.tokens);
       });
+      const go = todo.filter((i) => !reserve.has(i) || tokens.has(i));
       if (go.length === 0) break;
-      const payloads = go.map(({ i, tokens }) => ({ row: writes[i]!.row, ...(writes[i]!.ifVersion === undefined ? {} : { ifVersion: writes[i]!.ifVersion }), tokens }));
-      const results = await this.byPosition<IndexedShardResult>(go.map(({ i }) => this.keyOf(writes[i]!.row)), "tablePut", payloads);
-      todo = this.settle(go.map(({ i }) => i), results, out, attempt, (i) => this.keyOf(writes[i]!.row));
+      const payloads = go.map((i) => ({ row: writes[i]!.row, ...(writes[i]!.ifVersion === undefined ? {} : { ifVersion: writes[i]!.ifVersion }), ...(tokens.has(i) ? { tokens: tokens.get(i)! } : {}) }));
+      const results = await this.byPosition<IndexedShardResult>(go.map((i) => this.keyOf(writes[i]!.row)), "tablePut", payloads);
+      const optimistic = new Set(go.filter((i) => !reserve.has(i)));
+      todo = this.settle(go, results, out, attempt, (i) => this.keyOf(writes[i]!.row), optimistic);
+      for (const i of todo) reserve.add(i);
     }
     return out;
   }
@@ -168,11 +178,11 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
   }
 
   /** Results back in `out` at `positions`; returns the positions to write again (their reservation was given up). */
-  private settle(positions: readonly number[], results: readonly IndexedShardResult[], out: IndexedWriteResult[], attempt: number, keyAt: (i: number) => string): number[] {
+  private settle(positions: readonly number[], results: readonly IndexedShardResult[], out: IndexedWriteResult[], attempt: number, keyAt: (i: number) => string, optimistic: ReadonlySet<number> = new Set()): number[] {
     const again: number[] = [];
     positions.forEach((i, j) => {
       const r = results[j]!;
-      if (r.refused !== undefined && attempt < WRITE_ATTEMPTS) return void again.push(i);
+      if (r.refused !== undefined && (optimistic.has(i) || attempt < WRITE_ATTEMPTS)) return void again.push(i);
       if (r.refused !== undefined) throw new IndexContended(keyAt(i), r.refused);
       if (r.indexed === false) throw new IndexPending(keyAt(i), r.version);
       out[i] = { ok: r.ok, version: r.version };
