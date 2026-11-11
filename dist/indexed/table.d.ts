@@ -88,10 +88,21 @@ export declare abstract class IndexedTable<Env, Row extends RowShape> extends Sh
      */
     private backfill;
     /**
-     * Records the schema's global indexes. One this shard has not seen is built over its rows, unless
-     * this is the first time it records any: then the indexes are as old as the table here.
+     * Records the schema's global indexes, by id. One this shard has not seen is built over its rows,
+     * unless the shard has none yet. One it saw that the schema no longer has (dropped, or redefined:
+     * another id) has its entries dropped from the index shards.
      */
     private migrateGlobals;
+    /**
+     * Tells every index shard to drop the entries of the indexes this shard saw go, and drops their
+     * fences here. True if none is left. Every row shard that saw one go asks, and asking again
+     * changes nothing. Sends of the index (from the outbox) are left out from here on (see onTheWire).
+     */
+    private sendDrops;
+    /** The ids of the schema's global indexes. */
+    private liveIndexIds;
+    private live;
+    private tableExists;
     /**
      * The copy keeps the outbox entries of its own keys, and delivers them: it has those rows from
      * here on, and a put is sent with its row. The rest are the original's. Call `super.afterClone`.

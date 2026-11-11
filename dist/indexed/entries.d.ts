@@ -2,6 +2,11 @@ import { type Condition, type RowShape, type SqlValue, type TableSchema } from "
 /** A global index, resolved from the schema. */
 export interface GlobalIndexInfo {
     readonly name: string;
+    /**
+     * The index's name and a fingerprint of its definition: what its routes start with. An index
+     * redefined under the same name gets another id, so its entries never mix with the old ones.
+     */
+    readonly id: string;
     readonly columns: readonly string[];
     readonly unique: boolean;
     readonly partition: number;
@@ -17,8 +22,14 @@ export interface EntryAddress {
     readonly entry: string;
 }
 export declare function globalIndexes<Row extends RowShape>(schema: TableSchema<Row>): GlobalIndexInfo[];
-/** The routing key of an index's partition. */
+/** The routing key of an index's partition (`index` is the index's id). */
 export declare function routeOf(index: string, partitionValues: readonly SqlValue[]): string;
+/** The id of the index a route is of. */
+export declare function indexIdOfRoute(route: string): string;
+/** The name of the index an id is of (an id from before ids had a fingerprint is the name). */
+export declare function indexNameOfId(id: string): string;
+/** Every route of the index with this id is in [from, to): its entries, as one range. */
+export declare function routeRangeOf(id: string): readonly [from: string, to: string];
 /** The entry a row has in an index, or null (a unique index skips rows with a null in its columns). */
 export declare function entryOf<Row extends RowShape>(schema: TableSchema<Row>, ix: GlobalIndexInfo, row: RowShape): EntryAddress | null;
 /** Every entry a row has, keyed by `route entry`. */

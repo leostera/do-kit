@@ -3,12 +3,14 @@
 // shards before the write returns, and fences the reservation tokens of unique values.
 import { keyHash, sharded } from "../sharded/index.js";
 import { ShardedTable } from "../table/index.js";
-import { addressKey, entriesOf, entryOf, globalIndexes } from "./entries.js";
+import { addressKey, entriesOf, entryOf, globalIndexes, indexIdOfRoute, indexNameOfId, routeRangeOf } from "./entries.js";
 const OUTBOX = "indexed_outbox";
 /** The global indexes this shard has seen, and how far each is built over the rows it had before it. */
 const GLOBALS = "indexed_globals";
 /** Rows a backfill could not put in a unique index: another row has their value. */
 const DUPLICATES = "indexed_duplicates";
+/** Ids of global indexes the schema no longer has (dropped or redefined), until the index shards drop their entries. */
+const DROPS = "indexed_drops";
 /** Rows a backfill reads at a time, and pages per alarm. */
 const BACKFILL_ROWS = 200;
 const BACKFILL_PAGES = 10;
@@ -240,7 +242,7 @@ export class IndexedTable extends ShardedTable {
                             if (answer && op.kind === "put" && op.backfill)
                                 this.hasDuplicates = true;
                             if (answer && op.kind === "put" && op.backfill)
-                                this.store.exec(`INSERT OR REPLACE INTO ${DUPLICATES} (ix, key, owner) VALUES (?, ?, ?)`, op.route.slice(0, op.route.indexOf(":")), op.owner, answer.taken);
+                                this.store.exec(`INSERT OR REPLACE INTO ${DUPLICATES} (ix, key, owner) VALUES (?, ?, ?)`, indexNameOfId(indexIdOfRoute(op.route)), op.owner, answer.taken);
                         });
                     }
                 }
@@ -270,7 +272,11 @@ export class IndexedTable extends ShardedTable {
     onTheWire(stored) {
         const rows = new Map();
         const out = [];
+        const live = this.liveIndexIds();
         for (const op of stored) {
+            // Of an index the schema no longer has: its entries are being dropped, not changed.
+            if (!live.has(indexIdOfRoute(op.route)))
+                continue;
             if (op.kind !== "put") {
                 out.push(op);
                 continue;
@@ -316,6 +322,8 @@ export class IndexedTable extends ShardedTable {
                 break;
             }
         }
+        if (!(await this.sendDrops()))
+            await this.wake(Date.now() + DELIVERY_RETRY_MS);
         if (await this.backfill())
             return void (await this.wake(Date.now()));
         // Whatever is still there: due once it is old enough (and in flight now, most likely).
@@ -366,28 +374,71 @@ export class IndexedTable extends ShardedTable {
         return this.store.exec(`SELECT 1 FROM ${GLOBALS} WHERE done = 0 LIMIT 1`).toArray().length > 0;
     }
     /**
-     * Records the schema's global indexes. One this shard has not seen is built over its rows, unless
-     * this is the first time it records any: then the indexes are as old as the table here.
+     * Records the schema's global indexes, by id. One this shard has not seen is built over its rows,
+     * unless the shard has none yet. One it saw that the schema no longer has (dropped, or redefined:
+     * another id) has its entries dropped from the index shards.
      */
-    migrateGlobals() {
-        const first = this.store.exec(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?`, GLOBALS).one().n === 0;
-        this.store.exec(`CREATE TABLE IF NOT EXISTS ${GLOBALS} (name TEXT PRIMARY KEY NOT NULL, def TEXT NOT NULL, after TEXT, done INTEGER NOT NULL) WITHOUT ROWID`);
+    migrateGlobals(fresh) {
+        const recorded = this.tableExists(GLOBALS);
+        this.store.exec(`CREATE TABLE IF NOT EXISTS ${GLOBALS} (name TEXT PRIMARY KEY NOT NULL, def TEXT NOT NULL, after TEXT, done INTEGER NOT NULL, id TEXT) WITHOUT ROWID`);
+        if (!this.store.exec(`PRAGMA table_info(${GLOBALS})`).toArray().some((c) => c.name === "id"))
+            this.store.exec(`ALTER TABLE ${GLOBALS} ADD COLUMN id TEXT`);
         this.store.exec(`CREATE TABLE IF NOT EXISTS ${DUPLICATES} (ix TEXT NOT NULL, key TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY (ix, key)) WITHOUT ROWID`);
-        const wanted = new Map(globalIndexes(this.table).map((ix) => [ix.name, JSON.stringify([ix.columns, ix.unique, ix.partition])]));
-        for (const seen of this.store.exec(`SELECT name, def FROM ${GLOBALS}`).toArray()) {
-            if (wanted.get(seen.name) === seen.def) {
-                wanted.delete(seen.name);
+        this.store.exec(`CREATE TABLE IF NOT EXISTS ${DROPS} (id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
+        const wanted = new Map(globalIndexes(this.table).map((ix) => [ix.name, ix]));
+        // What this shard's entries were made with: recorded, or (a shard from before indexes were
+        // recorded) the schema's indexes under their names, which were their ids then.
+        const seen = recorded
+            ? this.store.exec(`SELECT name, id FROM ${GLOBALS}`).toArray().map((r) => ({ name: r.name, id: r.id ?? r.name }))
+            : fresh ? [] : [...wanted.keys()].map((name) => ({ name, id: name }));
+        for (const { name, id } of seen) {
+            if (wanted.get(name)?.id === id) {
+                wanted.delete(name);
                 continue;
             }
-            // Dropped, or redefined (built again, as a new one). Its old entries stay on the index shards.
-            this.store.exec(`DELETE FROM ${GLOBALS} WHERE name = ?`, seen.name);
-            this.store.exec(`DELETE FROM ${DUPLICATES} WHERE ix = ?`, seen.name);
+            // Dropped, or redefined (built again, as a new one, under another id): its entries are dropped.
+            this.store.exec(`DELETE FROM ${GLOBALS} WHERE name = ?`, name);
+            this.store.exec(`DELETE FROM ${DUPLICATES} WHERE ix = ?`, name);
+            this.store.exec(`INSERT OR IGNORE INTO ${DROPS} (id) VALUES (?)`, id);
         }
-        for (const [name, def] of wanted)
-            this.store.exec(`INSERT INTO ${GLOBALS} (name, def, after, done) VALUES (?, ?, NULL, ?)`, name, def, first ? 1 : 0);
-        // The alarm builds what is new (the first call of a deploy reaches every shard that is used).
-        if (this.store.exec(`SELECT 1 FROM ${GLOBALS} WHERE done = 0 LIMIT 1`).toArray().length > 0)
+        // A shard with no rows yet (its first call) takes the indexes as built: they are as old as its table.
+        for (const ix of wanted.values())
+            this.store.exec(`INSERT INTO ${GLOBALS} (name, def, after, done, id) VALUES (?, ?, NULL, ?, ?)`, ix.name, JSON.stringify([ix.columns, ix.unique, ix.partition]), fresh ? 1 : 0, ix.id);
+        // The alarm builds what is new and drops what is gone (the first call of a deploy reaches every shard that is used).
+        if (this.store.exec(`SELECT 1 FROM ${GLOBALS} WHERE done = 0 UNION ALL SELECT 1 FROM ${DROPS} LIMIT 1`).toArray().length > 0)
             void this.wake(Date.now()).catch(() => { });
+    }
+    /**
+     * Tells every index shard to drop the entries of the indexes this shard saw go, and drops their
+     * fences here. True if none is left. Every row shard that saw one go asks, and asking again
+     * changes nothing. Sends of the index (from the outbox) are left out from here on (see onTheWire).
+     */
+    async sendDrops() {
+        const ids = this.store.exec(`SELECT id FROM ${DROPS} ORDER BY id`).toArray().map((r) => r.id);
+        for (const id of ids) {
+            try {
+                await this.indexShards().scan("indexDrop", id);
+            }
+            catch (error) {
+                console.error(JSON.stringify({ event: "index-drop-failed", node: this.nodeLabel(), index: id, error: String(error) }));
+                return false;
+            }
+            const [from, to] = routeRangeOf(id);
+            this.store.exec(`DELETE FROM ${FENCES} WHERE route >= ? AND route < ?`, from, to);
+            this.store.exec(`DELETE FROM ${DROPS} WHERE id = ?`, id);
+        }
+        return true;
+    }
+    /** The ids of the schema's global indexes. */
+    liveIndexIds() {
+        const schema = this.table;
+        if (this.live?.schema !== schema)
+            this.live = { schema, ids: new Set(globalIndexes(schema).map((ix) => ix.id)) };
+        return this.live.ids;
+    }
+    live = null;
+    tableExists(name) {
+        return this.store.exec(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, name).toArray().length > 0;
     }
     // ---- Splits ----
     /**
@@ -423,6 +474,8 @@ export class IndexedTable extends ShardedTable {
         super.migrate();
         if (this.indexMigrated)
             return;
+        // No outbox yet: this shard has never written a row with global indexes.
+        const fresh = !this.tableExists(OUTBOX);
         this.store.exec(`CREATE TABLE IF NOT EXISTS ${OUTBOX} (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, hash TEXT NOT NULL DEFAULT '', op TEXT NOT NULL, at INTEGER NOT NULL)`);
         // An outbox from before entries had their key's hash: filled in once.
         if (!this.store.exec(`PRAGMA table_info(${OUTBOX})`).toArray().some((c) => c.name === "hash"))
@@ -432,7 +485,7 @@ export class IndexedTable extends ShardedTable {
         this.store.exec(`CREATE INDEX IF NOT EXISTS ${OUTBOX}_hash ON ${OUTBOX} (hash)`);
         this.store.exec(`CREATE TABLE IF NOT EXISTS ${FENCES} (key TEXT NOT NULL, route TEXT NOT NULL, entry TEXT NOT NULL, hash TEXT NOT NULL, token INTEGER NOT NULL, PRIMARY KEY (key, route, entry))`);
         this.store.exec(`CREATE INDEX IF NOT EXISTS ${FENCES}_hash ON ${FENCES} (hash)`);
-        this.migrateGlobals();
+        this.migrateGlobals(fresh);
         this.indexMigrated = true;
     }
     fence(key, route, entry) {

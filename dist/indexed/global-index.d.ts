@@ -1,6 +1,6 @@
 import { ShardedObject } from "../sharded/index.js";
 import type { RowShape, Versioned } from "../table/schema.js";
-import type { ApplyAnswer, IndexOp, IndexPage, IndexPageRequest, ReserveAnswer } from "./entries.js";
+import { type ApplyAnswer, type IndexOp, type IndexPage, type IndexPageRequest, type ReserveAnswer } from "./entries.js";
 /** What `indexStats` reports, for tests and operators. */
 export interface GlobalIndexStats {
     readonly entries: number;
@@ -31,6 +31,8 @@ export declare abstract class GlobalIndex<Env> extends ShardedObject<Env, never>
     protected reservationTimeoutMs: number;
     /** How long an entry a row let go of is kept, so a late older change cannot bring it back. */
     protected tombstoneMs: number;
+    /** Entries of dropped indexes one alarm deletes, at most; the next alarm goes on. */
+    protected dropBatch: number;
     private migrated;
     private rowClient;
     /** Reservations being resolved: one question per entry at a time. */
@@ -44,6 +46,11 @@ export declare abstract class GlobalIndex<Env> extends ShardedObject<Env, never>
     }[]): Promise<ReserveAnswer[]>;
     /** Applies changes delivered by row shards, idempotently and by version. */
     indexApply(routes: readonly string[], ops: readonly IndexOp[]): Promise<ApplyAnswer[]>;
+    /**
+     * Drops every entry of the index with this id, which its table no longer has. Sent by the row
+     * shards (each that saw it go) to every index shard; the alarm deletes the entries.
+     */
+    indexDrop(id: string): Promise<void>;
     /** The rows of unique entries (null: none, or only reserved). */
     indexLookup(routes: readonly string[], payloads: readonly {
         readonly entry: string;
@@ -61,6 +68,11 @@ export declare abstract class GlobalIndex<Env> extends ShardedObject<Env, never>
     private page;
     /** Resolves reservations left pending, and drops tombstones past their time. Call `super.onAlarm()`. */
     protected onAlarm(): Promise<void>;
+    /** Deletes up to `dropBatch` entries of dropped indexes. True if there may be more. */
+    private deleteDroppedEntries;
+    private hasDroppedEntries;
+    private droppedIds;
+    private dropped;
     /** Deletes entries of routes this shard gave away. Call `super.cleanupForeign`. */
     protected cleanupForeign(owns: (key: string) => boolean, limit: number): number;
     private migrate;
