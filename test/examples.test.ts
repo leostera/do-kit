@@ -73,19 +73,22 @@ test("kv: ETags make writes conditional, and listings page by prefix", async () 
   const put = (key: string, value: unknown, headers: Record<string, string>) => fetch(`${base}/api/kv/${key}`, { method: "PUT", ...json(value, headers) });
   const created = await put(`${run}-user:alice`, { plan: "free" }, { "if-none-match": "*" });
   expect(created.status).toBe(201);
-  expect(created.headers.get("etag")).toBe('"1"');
+  // The first version of a key is 1 in a shard that never deleted a row, and above its deleted
+  // rows' versions otherwise (local state outlives a run): the ETags are whatever the API says.
+  const v1 = created.headers.get("etag")!;
+  const v2 = `"${Number(JSON.parse(v1)) + 1}"`;
   expect((await put(`${run}-user:alice`, { plan: "pro" }, { "if-none-match": "*" })).status).toBe(412);
-  const updated = await put(`${run}-user:alice`, { plan: "pro" }, { "if-match": '"1"' });
+  const updated = await put(`${run}-user:alice`, { plan: "pro" }, { "if-match": v1 });
   expect(updated.status).toBe(200);
-  expect(updated.headers.get("etag")).toBe('"2"');
+  expect(updated.headers.get("etag")).toBe(v2);
   const read = await fetch(`${base}/api/kv/${run}-user:alice`);
   expect(await read.json()).toEqual({ plan: "pro" });
-  expect(read.headers.get("etag")).toBe('"2"');
+  expect(read.headers.get("etag")).toBe(v2);
   await put(`${run}-user:bob`, { plan: "free" }, {});
   await put(`${run}-team:core`, { size: 3 }, {});
   expect(await (await fetch(`${base}/api/kv?prefix=${run}-user:`)).json()).toEqual({ keys: [`${run}-user:alice`, `${run}-user:bob`], cursor: null });
-  expect((await fetch(`${base}/api/kv/${run}-user:alice`, { method: "DELETE", headers: { "if-match": '"1"' } })).status).toBe(412);
-  expect((await fetch(`${base}/api/kv/${run}-user:alice`, { method: "DELETE", headers: { "if-match": '"2"' } })).status).toBe(204);
+  expect((await fetch(`${base}/api/kv/${run}-user:alice`, { method: "DELETE", headers: { "if-match": v1 } })).status).toBe(412);
+  expect((await fetch(`${base}/api/kv/${run}-user:alice`, { method: "DELETE", headers: { "if-match": v2 } })).status).toBe(204);
   expect((await fetch(`${base}/api/kv/${run}-user:alice`)).status).toBe(404);
 }, 60_000);
 

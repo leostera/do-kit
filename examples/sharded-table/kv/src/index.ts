@@ -57,9 +57,12 @@ app.get("/api/kv/:key", async (c) => {
 });
 
 app.put("/api/kv/:key", async (c) => {
-  const result = await kv(c.env).put({ key: c.req.param("key"), value: await c.req.json(), updatedAt: Date.now() }, conditionOf((n) => c.req.header(n)));
+  const condition = conditionOf((n) => c.req.header(n));
+  const result = await kv(c.env).put({ key: c.req.param("key"), value: await c.req.json(), updatedAt: Date.now() }, condition);
   if (!result.ok) return c.text("version mismatch\n", 412, { etag: `"${result.version}"` });
-  return c.body(null, result.version === 1 ? 201 : 200, { etag: `"${result.version}"` });
+  // Created: written only because it was absent. (Not "version 1": a key written after a delete in
+  // its shard starts above the deleted row's version.)
+  return c.body(null, condition.ifVersion === 0 || result.version === 1 ? 201 : 200, { etag: `"${result.version}"` });
 });
 
 app.delete("/api/kv/:key", async (c) => {
