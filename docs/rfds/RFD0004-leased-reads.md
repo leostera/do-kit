@@ -225,6 +225,13 @@ A write (`update` or `transact`) to `keys`:
 Writes to the same key that arrive while one waits wait for the same time. They then run in
 arrival order. A write's `decide` runs after the wait, on the values as they are then.
 
+A held write asks each relay holding a lease on its keys to give it back (`toRevoke`), and a
+relay that does ends the lease early (`returned`): now, or when the sub-leases it gave are over.
+Each grant is numbered, and an answer ends only the lease it was asked for. An answer can arrive
+after the hold it was for is over by time, the write shown, and the relay leased again; ending
+that later lease would let the next write through while the relay still serves the value before
+it. `specs/leased-reads.ts` shows the stale read without the check (rule `matchLease`).
+
 A key that was never leased has no lease end, so its writes never wait. A direct read never gets
 a lease, so only relayed keys make writes wait.
 
@@ -336,9 +343,11 @@ made in the shard's jurisdiction, as other shards are. No value is stored outsid
 ### Rollout and validation
 
 1. Specs before code:
-   - `specs/leased-reads.ts`: fresh reads, reads never go back, and leases nest, with two relays,
-     restarts of relays and of the shard, and asks joining shared reads. It should show the miss
-     when an ask may join an earlier read.
+   - `specs/leased-reads.ts` (done): fresh reads, reads never go back, leases nest, and held
+     writes are shown, with lost messages, restarts of the relay and of the shard, and asks
+     joining shared reads. Real time is kept in model variables that only guards read. Each of
+     its six rules is shown needed, including the miss when an ask may join an earlier read
+     (`joinLaterReads`). It models one relay: relay counts and nesting are not in it.
    - Add a split scenario: a lease granted on a moving key during the hold. It should show the
      miss when the cap at the copied horizon is removed.
 2. `ReadLeases`, `SharedRead` and `RelayPlan`, with unit tests that move the clock.
