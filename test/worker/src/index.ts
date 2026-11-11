@@ -560,6 +560,8 @@ export class PresplitCounters extends CounterBase {
   }
 }
 
+const keptClients = new Map<string, ReturnType<typeof sharded<CounterBase>>>();
+
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
   return (cls === "users" ? env.USERS : cls === "userIndexes" ? env.USER_INDEXES : cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "routed" ? env.ROUTED_COUNTERS : cls === "routedTable" ? env.ROUTED_DOCS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
 }
@@ -685,6 +687,14 @@ export default {
           const out: unknown[] = new Array(body.keys.length);
           for (const shard of results) shard.positions.forEach((p, j) => (out[p] = (shard.result as unknown[])[j]));
           return Response.json(out);
+        }
+        case "/callKept": {
+          // A client kept by the isolate and used by one request after another (an app's mistake:
+          // a client belongs to one request). Its kept stubs are the first request's.
+          let client = keptClients.get(body.name);
+          if (!client) keptClients.set(body.name, (client = sharded(ns, body.name)));
+          const results = await client.call(body.keys, body.method as "get", (body.payloads ?? null) as null);
+          return Response.json(results.flatMap((r) => r.result as unknown[]));
         }
         case "/callOne": {
           const routed = (body as { routeOf?: "refs" }).routeOf === "refs";

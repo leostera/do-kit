@@ -103,6 +103,10 @@ the write against splits (see Invariants).
 - Shards make stubs of other shards (to split, presplit and activate) in their own
   jurisdiction (`ctx.id.jurisdiction`): an object reached through `namespace.jurisdiction("eu")`
   keeps every shard there. The same name in the plain namespace is another object.
+- The client keeps the stub of each shard it has called (at most 256), so calling a shard again
+  does not open it again. A stub whose call throws is dropped. A client belongs to the request,
+  or the Durable Object, that made it: a Durable Object can keep one for its life. Used by a
+  later request of a Worker, it makes that request's own stubs instead of failing.
 - The client's `stubOptions` (a version cohort, a location hint) go into every `get` it makes,
   and along with each call. A shard makes its own stubs with the options of the last call it
   served (`stubOptions()`, which a subclass may override), so a split's new shard runs the

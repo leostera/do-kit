@@ -618,3 +618,9 @@ test("update refuses to write a key it did not list: it was not checked as this 
   expect(await response.text()).toContain("not one of its keys");
   expect(await call<(number | null)[]>("m", name, "get", ["listed", "unlisted"])).toEqual([null, null]);
 });
+
+test("a client used by a later request than the one that made it still works", async () => {
+  const name = `kept-${Date.now()}`;
+  // Three requests through one client the isolate keeps: the stubs it kept are the first request's.
+  for (const expected of [1, 2, 3]) expect(await post<number[]>("/callKept", { cls: "m", name, method: "add", keys: ["a"], payloads: [1] })).toEqual([expected]);
+});
