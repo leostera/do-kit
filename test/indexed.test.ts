@@ -285,3 +285,32 @@ test("a unique index added to a table that has rows is built over them, and repo
   expect((await find("free@example.com"))?.row.id).toBe(dup!.key);
   expect((await ok(evolve<Result<Status>>("indexStatus"))).duplicates).toEqual([]);
 }, 120_000);
+
+test("an index the schema drops has its entries dropped, and one redefined under the same name is built again apart", async () => {
+  const t = fresh("evolving-users");
+  const evolve = <T>(operation: string, args: unknown[], version?: number) => post<T>("/indexed", { cls: "evolving", name: t, op: operation, args, version });
+  const entries = async () => (await evolve<{ entries: number }[]>("indexStats", [])).reduce((n, s) => n + s.entries, 0);
+  // 300 users on two row shards, under the schema with byEmail and byTeam (team, createdAt).
+  await evolve("upgrade", ["", "0", "1"], 2);
+  const people = Array.from({ length: 300 }, (_, i) => ({ ...user(`p-${i}`, `p-${i}@example.com`, i % 2 ? "web" : "core", 300 - i), name: `n-${String(i).padStart(3, "0")}` }));
+  for (let i = 0; i < people.length; i += 100) await evolve("putMany", [people.slice(i, i + 100).map((row) => ({ row }))]);
+  expect(await evolve("split", ["rows", ""])).toBe(true);
+  expect(await entries()).toBe(2 * people.length);
+  // The next deploy drops byEmail, and orders byTeam by name instead.
+  await evolve("upgrade", ["0", "1"], 3);
+  type Status = { building: string[] };
+  await eventually(() => ok(evolve<Result<Status>>("indexStatus", [], 3)), (s) => s.building.length === 0, 60_000);
+  // Only the new byTeam's entries are left: byEmail's, and the old byTeam's, are gone.
+  expect(await eventually(entries, (n) => n === people.length, 30_000)).toBe(people.length);
+  for (const team of ["core", "web"]) {
+    const listed = await evolve<Versioned[]>("listAll", [{ index: "byTeam", partition: [team] }], 3);
+    expect(listed.map((r) => r.row.id)).toEqual(people.filter((p) => p.team === team).sort((a, b) => (a.name < b.name ? -1 : 1)).map((p) => p.id));
+  }
+  // Writes from here on change the new index only.
+  expect(await ok(evolve<Result<WriteResult>>("patch", ["p-0", { name: "a-first" }], 3))).toMatchObject({ ok: true });
+  expect((await evolve<Versioned[]>("listAll", [{ index: "byTeam", partition: ["core"], limit: 1 }], 3))[0]!.row.id).toBe("p-0");
+  expect(await entries()).toBe(people.length);
+  // A put of the dropped index that comes late (from a row shard of the earlier deploy) is ignored.
+  await evolve("lateOldPut", [people[1]], 3);
+  expect(await entries()).toBe(people.length);
+}, 180_000);

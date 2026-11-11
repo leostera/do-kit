@@ -172,7 +172,7 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
     const partition = query.partition ?? [];
     if (partition.length !== ix.partition) throw new Error(`global index ${ix.name} is partitioned by ${ix.partition} column(s): pass partition with their values`);
     const values = ix.columns.slice(0, ix.partition).map((c, i) => encodeValue(this.schema, c, partition[i]));
-    const route = routeOf(ix.name, values);
+    const route = routeOf(ix.id, values);
     const where = (query.where ?? []).map((c) => this.encodeCondition(c));
     const request0 = pageRequest({ ...query, where }, null);
     const fingerprint = queryFingerprint(request0, [...ix.columns, JSON.stringify(values)]);

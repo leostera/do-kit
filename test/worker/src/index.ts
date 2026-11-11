@@ -7,6 +7,7 @@ import { MAX_KNOWN_OBJECTS, RouteMismatch } from "../../../src/sharded/client.ts
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedListQuery } from "../../../src/indexed/index.ts";
+import { entryOf, globalIndexes } from "../../../src/indexed/entries.ts";
 import { storageReport, type StorageReport } from "./storage-report.ts";
 import { graphRoute, type GraphEnv, type GraphRequest } from "./workgraph.ts";
 export { GraphCoordinators, GraphResults, GraphRunners } from "./workgraph.ts";
@@ -140,13 +141,15 @@ export class UserIndexes extends GlobalIndex<Env> {
 
 /** Users listed by team, then (after `upgrade`) also unique by email: an index added to a table that has rows. */
 const usersV1 = defineTable<User>({ primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "createdAt"], partition: 1 } } });
+/** After a second upgrade: byEmail dropped, and byTeam redefined (ordered by name). */
+export const usersV3 = defineTable<User>({ primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "name"], partition: 1 } } });
 
 export class EvolvingUsers extends IndexedTable<Env, User> {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
   protected get table(): TableSchema<User> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
     const version = this.ctx.storage.sql.exec<{ version: number }>("SELECT version FROM test_schema").toArray()[0]?.version ?? 1;
-    return version === 2 ? users : usersV1;
+    return version === 3 ? usersV3 : version === 2 ? users : usersV1;
   }
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.EVOLVING_USERS as never;
@@ -155,16 +158,18 @@ export class EvolvingUsers extends IndexedTable<Env, User> {
     return this.env.EVOLVING_USER_INDEXES as never;
   }
   /** A deploy of the new schema: records it and restarts, so the next call migrates. */
-  async upgrade(): Promise<void> {
+  async upgrade(version = 2): Promise<void> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
     this.ctx.storage.sql.exec("DELETE FROM test_schema");
-    this.ctx.storage.sql.exec("INSERT INTO test_schema (version) VALUES (2)");
+    this.ctx.storage.sql.exec("INSERT INTO test_schema (version) VALUES (?)", version);
     await this.ctx.storage.sync();
     this.ctx.abort("upgrade");
   }
 }
 
 export class EvolvingUserIndexes extends GlobalIndex<Env> {
+  // Small, so dropping an index takes several alarms.
+  protected override dropBatch = 50;
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.EVOLVING_USER_INDEXES as never;
   }
@@ -567,14 +572,15 @@ function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
 }
 
 /** POST /indexed {name, op, args}: one call of the indexed table client, or a test hook. */
-async function indexedOp(env: Env, body: { name: string; op: string; args: unknown[]; cls?: "evolving" }): Promise<unknown> {
-  // "evolving": the table that gains its unique index after `upgrade` (args[0]: which schema the client has).
+async function indexedOp(env: Env, body: { name: string; op: string; args: unknown[]; cls?: "evolving"; version?: number }): Promise<unknown> {
+  // "evolving": the table that gains its unique index after `upgrade` (args: the shards' bits),
+  // and (`version` 3) drops it and redefines the other. `version` is also the client's schema.
   if (body.cls === "evolving" && body.op === "upgrade") {
-    for (const bits of body.args as string[]) await env.EVOLVING_USERS.get(env.EVOLVING_USERS.idFromName(shardObjectName(body.name, bits))).upgrade().catch(() => {});
+    for (const bits of body.args as string[]) await env.EVOLVING_USERS.get(env.EVOLVING_USERS.idFromName(shardObjectName(body.name, bits))).upgrade(body.version ?? 2).catch(() => {});
     return null;
   }
   const [rowNs, indexNs] = body.cls === "evolving" ? [env.EVOLVING_USERS as unknown as typeof env.USERS, env.EVOLVING_USER_INDEXES as unknown as typeof env.USER_INDEXES] : [env.USERS, env.USER_INDEXES];
-  const t = indexedTable(rowNs, indexNs, body.name, users);
+  const t = indexedTable(rowNs, indexNs, body.name, body.version === 3 ? usersV3 : users);
   const rows = sharded(rowNs, body.name);
   const indexes = sharded(indexNs, body.name);
   const untyped = (client: unknown) => client as { call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{ positions: number[]; result: unknown[] }[]>; scan(method: string, ...a: unknown[]): Promise<unknown[]> };
@@ -615,6 +621,12 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
       return flat(untyped(rows).call(body.args[1] as string[], body.args[0] as string, body.args[2] as unknown[]));
     case "indexStats":
       return untyped(indexes).scan("indexStats");
+    case "lateOldPut": { // [row]: a put of byEmail (the v2 schema's), as a row shard of an earlier deploy would send it
+      const ix = globalIndexes(users).find((g) => g.name === "byEmail")!;
+      const row = body.args[0] as User;
+      const e = entryOf(users, ix, row)!;
+      return flat(untyped(indexes).call([e.route], "indexApply", [{ kind: "put", route: e.route, entry: e.entry, owner: row.id, version: 99, row, token: null }]));
+    }
     case "outboxKeys":
       return untyped(rows).scan("outboxKeys");
     case "outbox":

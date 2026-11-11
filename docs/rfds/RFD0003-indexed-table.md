@@ -143,8 +143,10 @@ sequenceDiagram
   delivered) and **fences** (the highest reservation token applied or refused, per key, index and
   value).
 - **Index shards**: one more sharded class, bound separately (`indexNodes()`), holding the entries
-  of every global index of the table. An entry's routing key is `index name + partition values`,
-  so the core routes it unchanged in phase 1.
+  of every global index of the table. An entry's routing key is `index id + partition values`,
+  so the core routes it unchanged in phase 1. An index's **id** is its name and a fingerprint of
+  its definition (columns, `unique`, `partition`), e.g. `byEmail~3fa2c1d0`. An index redefined
+  under the same name has another id, so its entries never mix with the old definition's.
 - **The client** (`indexedTable(...)`) reserves, writes, looks up and lists. It routes to both
   classes with the core client.
 
@@ -311,8 +313,22 @@ changes go through the client, which reserves first.
     it. From the moment the index is declared it is enforced for writes, against the rows indexed
     so far, so a write can take a value that a row not yet reached also has; that row is then the
     one reported.
-- Removing a global index leaves its entries on the index shards (not cleaned up yet). Redefining
-  one under the same name builds it again.
+- **Removing or redefining** a global index drops its entries:
+  - A row shard records the ids of its indexes (`indexed_globals`). On the first call of a deploy
+    that no longer has one of them (removed, or redefined: a new id), it queues the old id in
+    `indexed_drops`, and builds a redefined index again like a new one.
+  - Its alarm tells every index shard to drop the id (a scan of `indexDrop`), then drops the
+    id's fences. Every row shard that saw the id go asks; asking again changes nothing. From the
+    migration on, it leaves the id's changes out of what it sends.
+  - An index shard records the id (`global_index_dropped`, kept for good: one row per index ever
+    dropped), and its alarm deletes the id's entries, `dropBatch` (2,000) at a time. A change to a
+    dropped id that comes late, from a row shard still on the earlier deploy, is ignored, so no
+    entry of it comes back.
+  - Lookups and listings only ask for ids of the schema they have, so they never see the old
+    entries, even before they are deleted.
+  - Index shards and row shards from before ids had a fingerprint routed by the index's name:
+    their first call of this version drops those and builds the indexes again under their ids.
+    Until it is built, lookups and listings of an index may miss rows, as for a new index.
 
 ### Security, privacy, and observability
 
@@ -442,7 +458,12 @@ Phase 1 is built with the first answer to each, so each can still change before 
   taking reservations sets its alarm now and then, not with each one.
 - Batching outbox delivery per index shard. Built: coalesced across writes (see Deliver), each
   call split per index shard by the sharded client.
-- Not built yet: dropping the entries of a global index that was removed.
+- Dropping the entries of a removed or redefined global index. Built: see "Removing or
+  redefining" above.
+- Storing one outbox row per write, and sending it from memory instead of reading it back.
+  Not built: it saves about 4 of the ~18 SQL statements of an indexed write, but on Cloudflare's
+  network all of the write's JavaScript, its SQL included, took 5–8 ms of a 120–150 ms warm
+  create. The time is in the calls between objects and in waiting for commits.
 
 ### Out of scope
 

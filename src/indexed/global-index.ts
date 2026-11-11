@@ -5,9 +5,16 @@
 import { keyHash, sharded, ShardedObject } from "../sharded/index.js";
 import type { Untyped } from "../table/client.js";
 import type { Condition, RowShape, SqlValue, Versioned } from "../table/schema.js";
-import type { ApplyAnswer, IndexOp, IndexPage, IndexPageRequest, ReserveAnswer, ResolveAnswer } from "./entries.js";
+import { indexIdOfRoute, routeRangeOf, type ApplyAnswer, type IndexOp, type IndexPage, type IndexPageRequest, type ReserveAnswer, type ResolveAnswer } from "./entries.js";
 
 const ENTRIES = "global_index_entries";
+/**
+ * Ids of indexes a table dropped (or redefined): their entries are deleted by the alarm, and a
+ * change to one that comes late (from a deploy still rolling out) is ignored. Kept for good: a few
+ * rows, one per index ever dropped.
+ */
+const DROPPED = "global_index_dropped";
+
 const META = "global_index_meta";
 const COLUMN = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
 /** Rounds of resolving one reservation before a reserve answers "contended". */
@@ -70,6 +77,8 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
   protected reservationTimeoutMs = 30_000;
   /** How long an entry a row let go of is kept, so a late older change cannot bring it back. */
   protected tombstoneMs = 60 * 60_000;
+  /** Entries of dropped indexes one alarm deletes, at most; the next alarm goes on. */
+  protected dropBatch = 2_000;
 
   private migrated = false;
   private rowClient: Untyped | null = null;
@@ -93,6 +102,17 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
     const answers = await this.transact(routes, () => ops.map((op) => this.apply(op, now)));
     if (ops.some((op) => op.kind === "remove")) await this.wake(now + this.tombstoneMs);
     return answers;
+  }
+
+  /**
+   * Drops every entry of the index with this id, which its table no longer has. Sent by the row
+   * shards (each that saw it go) to every index shard; the alarm deletes the entries.
+   */
+  async indexDrop(id: string): Promise<void> {
+    this.migrate();
+    this.db.exec(`INSERT OR IGNORE INTO ${DROPPED} (id, at) VALUES (?, ?)`, id, Date.now());
+    this.dropped = null;
+    if (this.hasDroppedEntries()) await this.wake(Date.now());
   }
 
   /** The rows of unique entries (null: none, or only reserved). */
@@ -191,6 +211,10 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
   // ---- Delivered changes ----
 
   private apply(op: IndexOp, now: number): ApplyAnswer {
+    if (this.droppedIds().has(indexIdOfRoute(op.route))) {
+      this.stats.ignored++;
+      return null;
+    }
     return this.applied(op, now) ?? null;
   }
 
@@ -272,6 +296,8 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
   /** Resolves reservations left pending, and drops tombstones past their time. Call `super.onAlarm()`. */
   protected override async onAlarm(): Promise<void> {
     this.migrate();
+    // Entries of dropped indexes first: a reservation of one is not worth resolving.
+    if (this.deleteDroppedEntries()) return void (await this.wake(Date.now()));
     const now = Date.now();
     const [lo, hi] = this.ownedHashRange();
     const stale = this.db
@@ -287,6 +313,32 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
     const times = [next.pending === null ? null : Math.max(next.pending + this.reservationTimeoutMs, now + 1_000), next.removed === null ? null : next.removed + this.tombstoneMs].filter((t): t is number => t !== null);
     if (times.length) await this.wake(Math.min(...times));
   }
+
+  /** Deletes up to `dropBatch` entries of dropped indexes. True if there may be more. */
+  private deleteDroppedEntries(): boolean {
+    let left = this.dropBatch;
+    for (const id of this.droppedIds()) {
+      const [from, to] = routeRangeOf(id);
+      left -= this.db.exec(`DELETE FROM ${ENTRIES} WHERE rowid IN (SELECT rowid FROM ${ENTRIES} WHERE route >= ? AND route < ? LIMIT ?)`, from, to, left).rowsWritten;
+      if (left <= 0) return true;
+    }
+    return false;
+  }
+
+  private hasDroppedEntries(): boolean {
+    for (const id of this.droppedIds()) {
+      const [from, to] = routeRangeOf(id);
+      if (this.db.exec(`SELECT 1 FROM ${ENTRIES} WHERE route >= ? AND route < ? LIMIT 1`, from, to).toArray().length) return true;
+    }
+    return false;
+  }
+
+  private droppedIds(): ReadonlySet<string> {
+    // Read again after a restore or a split's copy too: the instance may be new, or not.
+    if (!this.dropped) this.dropped = new Set(this.db.exec<{ id: string }>(`SELECT id FROM ${DROPPED}`).toArray().map((r) => r.id));
+    return this.dropped;
+  }
+  private dropped: ReadonlySet<string> | null = null;
 
   /** Deletes entries of routes this shard gave away. Call `super.cleanupForeign`. */
   protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
@@ -309,6 +361,7 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
     this.db.exec(`CREATE INDEX IF NOT EXISTS ${ENTRIES}_pending ON ${ENTRIES} (at) WHERE pending IS NOT NULL`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS ${ENTRIES}_removed ON ${ENTRIES} (at) WHERE removed = 1`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${META} (name TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL) WITHOUT ROWID`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${DROPPED} (id TEXT PRIMARY KEY NOT NULL, at INTEGER NOT NULL) WITHOUT ROWID`);
     this.migrated = true;
   }
 
