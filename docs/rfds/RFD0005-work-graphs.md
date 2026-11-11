@@ -93,7 +93,8 @@ benchmarks measure how close.
 - Moving bulk data. Units read their inputs from where the app keeps them (R2, a table), and
   results are small. Large values cross chunks only at cuts (see Cuts).
 - Dynamic graphs. The graph is known when the run is planned. Work whose next steps depend on
-  results is a sequence of runs.
+  results is a sequence of runs. [RFD0007](RFD0007-open-runs.md) proposes adding parts to a
+  running run.
 - Background jobs or scheduling. A run executes one graph to completion; when to start one, and
   what to do with its results, is the app's.
 
