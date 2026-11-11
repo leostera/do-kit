@@ -24,7 +24,11 @@ export interface Executed {
     /** Units computed only for their values: replayed ones, and stored ones above a unit computed. */
     readonly replayed: number;
 }
-/** The store keys a chunk reads before computing: its results, its exports, its loads and after results. */
-export declare function keysToRead(body: ChunkBody): string[];
+/**
+ * The store keys a chunk reads before computing: its results, its exports, its loads and after
+ * results. `inputsOnly`: only what it takes from other chunks (its loads and after results), for a
+ * chunk that cannot have anything of its own stored yet.
+ */
+export declare function keysToRead(body: ChunkBody, inputsOnly?: boolean): string[];
 export declare function executeChunk<Env>(body: ChunkBody, tasks: Readonly<Record<string, AnyTask<Env>>>, stored: ReadonlyMap<string, string>, env: Env): Promise<Executed>;
 //# sourceMappingURL=execute.d.ts.map

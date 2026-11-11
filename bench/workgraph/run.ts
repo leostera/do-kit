@@ -16,7 +16,7 @@ const TOKEN = process.env.BENCH_TOKEN ?? "";
 const ACCESS = process.env.BENCH_ACCESS_TOKEN ?? "";
 const SUITES = (process.env.BENCH_SUITES ?? "scaling,faults,ceiling").split(",");
 const RUNNERS = (process.env.BENCH_RUNNERS ?? "1,2,4,8,16,32,64").split(",").map(Number);
-const FILE = join(import.meta.dir, "..", "results", "workgraph.json");
+const FILE = process.env.BENCH_RESULTS_FILE ?? join(import.meta.dir, "..", "results", "workgraph.json");
 
 /** CPU per unit, and the chunk size, for the scaling and fault suites. */
 const UNIT_MS = 5;

@@ -15,10 +15,13 @@ export type Finished = {
     readonly error: string;
 };
 /** What a runner is told to do next. */
-export type NextAnswer = {
+export type NextAnswer = 
+/** `fresh`: nothing of this chunk can be stored yet (its first lease, in the run's own results store). */
+{
     readonly chunk: number;
     readonly attempt: number;
     readonly body: Uint8Array;
+    readonly fresh?: boolean;
 } | {
     readonly wait: number;
 } | {

@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 // The pure modules: the barrel also exports the object classes, which need cloudflare:workers.
 import { createHash } from "node:crypto";
 import { decodeBody, encodeBody } from "../src/workgraph/body.ts";
-import { ComputeFailed, executeChunk } from "../src/workgraph/execute.ts";
+import { ComputeFailed, executeChunk, keysToRead } from "../src/workgraph/execute.ts";
 import { defineTask, workGraphOf, type NodeRef, type ResultOfNode } from "../src/workgraph/graph.ts";
 import { planWorkGraph, unitHash, type Chunk, type WorkGraphPlan } from "../src/workgraph/plan.ts";
 import { resultKey } from "../src/workgraph/stored.ts";
@@ -316,4 +316,29 @@ test("planning stays near-linear, and takes more units than a call takes argumen
 
 test("a unit that costs more than a chunk is refused: it could never fit one invocation", () => {
   expect(() => planWorkGraph([{ key: "big", task: "t", version: "1", cost: 500, input: null, parent: null, after: {} }], { chunkMs: 100 })).toThrow("over chunkMs");
+});
+
+test("a fresh chunk reads only what it takes from other chunks, and computes the same results", async () => {
+  // A tree cut in two that stores its cut (replayMs 0), and a unit that runs after one of the first chunk's.
+  const unit = (key: string, parent: string | null, after: Record<string, string> = {}) => ({ key, task: "count", version: "1", cost: 60, input: key, parent, after });
+  const plan = planWorkGraph([unit("a", null), unit("b", "a"), unit("c", "b"), unit("d", null, { of: "a" })], { chunkMs: 100, replayMs: 0 });
+  const stored = new Map<string, string>();
+  const results = new Map<string, string>();
+  for (const chunk of [...plan.chunks].sort((x, y) => x.round - y.round || x.needs.length - y.needs.length)) {
+    const all = keysToRead(chunk);
+    const inputs = keysToRead(chunk, true);
+    // Its inputs are among everything it would read, and none of them is a result or value of its own.
+    const own = new Set(chunk.units.filter((u) => !u.replay).flatMap((u) => [resultKey(u.hash), `v:${u.hash}`]));
+    expect(inputs.every((k) => all.includes(k) && !own.has(k))).toBe(true);
+    expect(inputs.length).toBeLessThan(all.length);
+    // Given only its inputs, it computes every unit, with the same writes as given all it could read.
+    const seen = new Map([...stored].filter(([k]) => inputs.includes(k)));
+    const executed = await executeChunk(chunk, TASKS, seen, {});
+    expect(executed.computed).toBe(chunk.units.filter((u) => !u.replay).length);
+    for (const [k, v] of executed.writes) {
+      stored.set(k, v);
+      results.set(k, v);
+    }
+  }
+  expect([...results.keys()].filter((k) => k.startsWith("r:")).length).toBe(4);
 });

@@ -126,7 +126,7 @@ export default {
           if (r.faults) await Promise.all(Array.from({ length: r.runners }, (_, i) => env.RUNNERS.get(env.RUNNERS.idFromName(runnerName(r.run, i))).benchFaults(r.run, r.faults!)));
           const run = workGraphRun(env.COORDINATORS, r.run);
           await run.submit(plan);
-          const status = await run.start({ runners: r.runners, results: `results-${r.run}`, ...(r.leaseMs ? { leaseMs: r.leaseMs } : {}) });
+          const status = await run.start({ runners: r.runners, ...(r.leaseMs ? { leaseMs: r.leaseMs } : {}) });
           return Response.json({ chunks: plan.chunks.length, units: g.units.length, work: plan.work, span: plan.span, chunkSpan: plan.chunkSpan, bodyBytes: Math.max(...plan.chunks.map((c) => encodeBody(c).byteLength)), replayed: plan.replayed, planMs, status });
         }
         case "/status":

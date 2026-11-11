@@ -188,7 +188,10 @@ export class WorkGraphCoordinator extends DurableObject {
         const next = this.sql.exec("SELECT id, attempts FROM graph_chunks WHERE state = 'ready' ORDER BY round, id LIMIT 1").toArray()[0];
         if (next) {
             this.sql.exec("UPDATE graph_chunks SET state = 'leased', runner = ?, lease_until = ?, attempts = attempts + 1 WHERE id = ?", runner, now + meta.leaseMs, next.id);
-            return { chunk: next.id, attempt: next.attempts + 1, body: this.body(next.id) };
+            // A chunk leased for the first time, writing to a store only this run uses, has no results
+            // there yet: its runner need not look. (Leased again, or the same lease given back to a
+            // runner that was evicted, it may have written some.)
+            return { chunk: next.id, attempt: next.attempts + 1, body: this.body(next.id), fresh: meta.ownResults && next.attempts === 0 };
         }
         this.sql.exec("UPDATE graph_runners SET waiting = 1 WHERE runner = ?", runner);
         return { wait: Math.min(2_000, meta.tickMs) };

@@ -37,15 +37,19 @@ export interface Executed {
   readonly replayed: number;
 }
 
-/** The store keys a chunk reads before computing: its results, its exports, its loads and after results. */
-export function keysToRead(body: ChunkBody): string[] {
+/**
+ * The store keys a chunk reads before computing: its results, its exports, its loads and after
+ * results. `inputsOnly`: only what it takes from other chunks (its loads and after results), for a
+ * chunk that cannot have anything of its own stored yet.
+ */
+export function keysToRead(body: ChunkBody, inputsOnly = false): string[] {
   const keys = new Set<string>();
   for (const u of body.units) {
-    if (!u.replay) keys.add(resultKey(u.hash));
+    if (!u.replay && !inputsOnly) keys.add(resultKey(u.hash));
     if (u.load) keys.add(valueKey(u.load));
     for (const a of u.after) keys.add(resultKey(a.hash));
   }
-  for (const hash of body.exports) keys.add(valueKey(hash));
+  if (!inputsOnly) for (const hash of body.exports) keys.add(valueKey(hash));
   return [...keys];
 }
 

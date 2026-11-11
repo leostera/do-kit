@@ -445,6 +445,13 @@ Each chunk runs in its own alarm invocation, and so has its own CPU budget. A ru
 evicted during step 3 or 4 has its alarm retried by the platform. The retry leases the same
 chunk, finds the results already written, and computes only what is missing.
 
+A chunk leased for the first time in a run that writes to its own results store has nothing
+stored yet, so the coordinator says so (`fresh`) and the runner skips step 2 for the chunk's own
+units: it reads only the values it loads and the results it runs after. That is one round of
+calls to the results store less per chunk: locally, with chunks that cost nothing, 20,000 chunks
+took 69 to 70 s instead of 83 to 95 s. A chunk leased again, a lease given back to an evicted
+runner, and a run on a shared store read as before.
+
 `compute` throwing is reported as the chunk's failure, with its message.
 
 ### Results

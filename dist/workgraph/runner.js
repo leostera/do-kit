@@ -113,7 +113,7 @@ export class WorkGraphRunner extends DurableObject {
         // (Tests: a runner lost holding its lease. It keeps its state, as a lost object would, until stopped.)
         if ((await this.chunkStarting(state.run, state.index, answer.chunk, answer.attempt)) === "abandon")
             return void (await this.ctx.storage.put("state", { ...state, stopped: true }));
-        const report = await this.runChunk(state, answer.chunk, answer.attempt, decodeBody(answer.body));
+        const report = await this.runChunk(state, answer.chunk, answer.attempt, decodeBody(answer.body), answer.fresh === true);
         this.live();
         await this.ctx.storage.put("finished", report);
         await this.ctx.storage.setAlarm(Date.now());
@@ -122,11 +122,12 @@ export class WorkGraphRunner extends DurableObject {
      * Computes a chunk and makes its results durable; the report is recorded only after. A compute
      * that throws is reported as the chunk's failure. Anything else throws, and the alarm is retried.
      */
-    async runChunk(state, chunk, attempt, body) {
+    async runChunk(state, chunk, attempt, body, fresh) {
         const started = Date.now();
         const store = sharded(this.results(), state.results);
         const stored = new Map();
-        const keys = keysToRead(body);
+        // A fresh chunk has nothing stored of its own: only what it takes from other chunks is read.
+        const keys = keysToRead(body, fresh);
         for (let i = 0; i < keys.length; i += READ_BATCH) {
             const part = keys.slice(i, i + READ_BATCH);
             for (const shard of await store.call(part, "graphGet", null))
