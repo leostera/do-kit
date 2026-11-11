@@ -86,7 +86,7 @@ export default defineSpec(
         },
         [Rows]: {
           description: "Keeps a shard's page; with every shard's, returns the rows up to the smallest frontier and moves the cursor.",
-          sources: ["src/sharded/client.ts#ShardedClient.scan", "src/table/client.ts#mergePages"],
+          sources: ["src/sharded/client.ts#ShardedClient.scan", "src/table/schema.ts#mergePages"],
           run(s, msg) {
             if (!s.waiting.delete(msg.shard)) return;
             s.answers[msg.shard] = { rows: msg.rows, frontier: msg.frontier };

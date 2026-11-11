@@ -1,7 +1,7 @@
 // The client of a sharded table: routes rows by key and merges listing pages from every shard.
 import { sharded, type ShardedClient, type ShardedClientOptions } from "../sharded/client.js";
 import {
-  comparePositions,
+  mergePages,
   decodeCursor,
   encodeCursor,
   pageRequest,
@@ -173,34 +173,11 @@ function sumGroups(perShard: readonly (readonly GroupCount[])[]): GroupCount[] {
 }
 
 /**
- * Merges one page from every shard: every shard reported every match up to the smallest frontier,
- * so rows up to it are complete. Returns them in order, up to `limit`, and where the next page
- * starts (null: done).
- */
-export function mergePages(pages: readonly ShardPage[], request: Pick<ShardPageRequest, "limit" | "direction">): { rows: ShardPage["rows"][number][]; next: Position | null } {
-  const cmp = (a: Position, b: Position) => comparePositions(a, b, request.direction);
-  let frontier: Position | null = null;
-  for (const page of pages) if (page.frontier && (!frontier || cmp(page.frontier, frontier) < 0)) frontier = page.frontier;
-  const seen = new Set<string>();
-  const complete = pages
-    .flatMap((p) => p.rows)
-    .filter((r) => frontier === null || cmp(r.position, frontier) <= 0)
-    .filter((r) => {
-      // A key reported by two shards in one page (one before a split committed, one after).
-      if (seen.has(r.key)) return false;
-      seen.add(r.key);
-      return true;
-    })
-    .sort((a, b) => cmp(a.position, b.position));
-  const rows = complete.slice(0, request.limit);
-  if (rows.length === request.limit && (complete.length > request.limit || frontier !== null)) return { rows, next: rows.at(-1)!.position };
-  return { rows, next: frontier };
-}
-
-/**
  * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
  * `schema` the table it declares (the client routes rows by its primary key).
  */
 export function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>, options: ShardedClientOptions = {}): TableClient<Row> {
   return new TableClient<Row>(namespace as unknown as DurableObjectNamespace<Rpc.DurableObjectBranded>, name, schema, options);
 }
+
+export { mergePages } from "./schema.js";
