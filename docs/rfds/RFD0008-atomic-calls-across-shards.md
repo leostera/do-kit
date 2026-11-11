@@ -184,7 +184,10 @@ than any hold lives (its deadline, plus alarm retries). A recovery's ask can sti
 when the call commits, every share resolves and the primary forgets; arriving then, it records an
 "abort" for a call that committed. That record is never read: every shard of the call has
 resolved, and the only other asker, a client whose commit answer was lost, does not forget. It is
-purged with the outcomes past their TTL.
+purged with the outcomes past their TTL. The alarm purges them: a shard keeping outcomes keeps an
+alarm for the oldest one's expiry, so they go whether or not any call reaches it again (a split
+half keeps copies of its source's outcomes, which only their TTL removes). Subclasses may change
+the TTL (`atomicOutcomeTtlMs`).
 
 **Splits.** A shard holding keys does not split (`splittable()` is false while
 `sharded_atomic_holds` has rows; holds live for milliseconds). Prepares are fenced like any write,

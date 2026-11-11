@@ -620,6 +620,8 @@ export class RoutedCounters extends CounterBase {
 /** Splits to depth 2 while empty, never by load. */
 export class PresplitCounters extends CounterBase {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 4, initialDepth: 2 };
+  // Short enough for a test to see outcomes nobody forgot go.
+  protected override atomicOutcomeTtlMs = 2_000;
   protected override nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
     return this.env.PRESPLIT_COUNTERS as never;
   }
