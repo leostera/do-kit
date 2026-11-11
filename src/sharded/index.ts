@@ -1231,11 +1231,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     let release!: () => void;
     const started = Date.now();
     const timeout = this.policy.splitTimeoutMs ?? 60_000;
-    const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)), deadline: started + timeout, held: 0, notReady: 0, heldMsMax: 0 };
-    this.hold = hold;
     const [lo, hi] = hashRange(meta.bits);
     const [rightLo] = hashRange(right);
     const counted = this.sql.exec<{ rows: number; rightRows: number }>("SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM sharded_rows WHERE hash >= ? AND hash <= ?", rightLo, lo, hi).one();
+    // Only the `finally` below releases the hold: nothing that can throw goes between the two.
+    const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)), deadline: started + timeout, held: 0, notReady: 0, heldMsMax: 0 };
+    this.hold = hold;
     let copy: "native" | "logical" | null = null;
     const steps = { warm, handOut: 0, snapshot: 0, restore: 0, restoreInside: 0, copyRows: 0, claim: 0, claimAttempts: 0, claimError: null as string | null };
     const record = (outcome: SplitRecord["outcome"], error: string | null): SplitRecord[] => [

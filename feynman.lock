@@ -79,7 +79,7 @@
     "src/sharded/index.ts#ShardedObject.shardedScan": "1dfa12398046",
     "src/sharded/index.ts#ShardedObject.shardedTreeDepth": "05ea4049b8bf",
     "src/sharded/index.ts#ShardedObject.shardedWipe": "477cbebca1e8",
-    "src/sharded/index.ts#ShardedObject.split": "d1753a1f7ef9",
+    "src/sharded/index.ts#ShardedObject.split": "b9f87d301c8a",
     "src/sharded/index.ts#ShardedObject.update": "457b8451b036",
     "src/sharded/index.ts#ShardedObject.waitForHold": "b5f2d31f5e91",
     "src/sharded/index.ts#ShardedObject.whenFree": "75c395a12d74",

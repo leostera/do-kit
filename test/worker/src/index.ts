@@ -234,6 +234,16 @@ export class FlakyDocs extends EvolvingDocs {
     if (this.ctx.storage.sql.exec("SELECT fail FROM test_clone WHERE fail = 1").toArray().length) throw new Error("test: clone refused");
     super.afterClone(owns);
   }
+  /** The next SQL statement containing `text` throws, once, as a storage error would. */
+  async failStatementOnce(text: string): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const exec = sql.exec.bind(sql);
+    sql.exec = ((query: string, ...bindings: unknown[]) => {
+      if (!query.includes(text)) return exec(query, ...bindings);
+      sql.exec = exec;
+      throw new Error("test: storage error");
+    }) as typeof sql.exec;
+  }
   /** Asks for onAlarm in `ms`. */
   async wakeIn(ms: number): Promise<void> {
     await this.scheduleAlarm(Date.now() + ms);
@@ -706,7 +716,7 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     await ns.get(ns.idFromName(shardObjectName(body.name, body.args[1] as string))).failActivations(body.args[0] as boolean);
     return null;
   }
-  if (body.op === "wakeIn" || body.op === "alarmNow" || body.op === "alarmRan" || body.op === "dropAlarm" || body.op === "crashAlarmOnce" || body.op === "lateSchema") {
+  if (body.op === "wakeIn" || body.op === "failStatementOnce" || body.op === "alarmNow" || body.op === "alarmRan" || body.op === "dropAlarm" || body.op === "crashAlarmOnce" || body.op === "lateSchema") {
     const ns = env.FLAKY;
     const stub = ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
     return stub[body.op]!(body.args[0]);

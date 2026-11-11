@@ -308,6 +308,21 @@ test("a split succeeds after an abandoned attempt left a copy with an older sche
   expect(rows.find((r) => r.row.name === "r0")!.row.stars).toBe(5);
 }, 60_000);
 
+test("a split that fails as it starts lets writes and later splits go ahead", async () => {
+  const name = `split-start-fails-${Date.now()}`;
+  const doc = (i: number, lastEditAt: number | null = null) => ({ name: `r${i}`, id: `id${i}`, createdAt: i, lastEditAt, deleted: false, meta: null });
+  for (let i = 0; i < 40; i++) await table("flaky", name, "put", doc(i));
+  // The statement a split runs first, right after it starts holding writes to the right half.
+  await table("flaky", name, "failStatementOnce", "COUNT(*) AS rows", "");
+  await post("/split", { cls: "flaky", name, bits: "" }).catch(() => null);
+  // Every row takes a write again, whichever half it is in, and the shard splits.
+  for (let i = 0; i < 40; i++) await table("flaky", name, "put", doc(i, 1));
+  expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(true);
+  const rows = await table<{ row: { lastEditAt: number | null } }[]>("flaky", name, "all", {});
+  expect(rows.length).toBe(40);
+  expect(rows.map((r) => r.row.lastEditAt)).toEqual(rows.map(() => 1));
+}, 60_000);
+
 test("a new shard is activated once it can be, however long activation kept failing", async () => {
   const name = `activate-${Date.now()}`;
   for (let i = 0; i < 40; i++) await table("flaky", name, "put", { name: `r${i}`, id: `id${i}`, createdAt: i, lastEditAt: null, deleted: false, meta: null });
