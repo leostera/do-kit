@@ -150,7 +150,10 @@ export class IndexedTable extends ShardedTable {
     /** Appends the row's index changes to the outbox: a put for each entry it has, a remove for each it lost. */
     rowWritten(key, before, after, version) {
         // A write settles what a backfill found: its own reservations decide from here on.
-        this.store.exec(`DELETE FROM ${DUPLICATES} WHERE key = ?`, key);
+        if (this.hasDuplicates) {
+            this.store.exec(`DELETE FROM ${DUPLICATES} WHERE key = ?`, key);
+            this.hasDuplicates = this.store.exec(`SELECT 1 FROM ${DUPLICATES} LIMIT 1`).toArray().length > 0;
+        }
         const had = entriesOf(this.table, before);
         const has = entriesOf(this.table, after);
         const tokens = this.batch?.tokens.get(key) ?? {};
@@ -223,6 +226,8 @@ export class IndexedTable extends ShardedTable {
                     for (const group of await this.indexShards().call(ops.map((op) => op.route), "indexApply", ops)) {
                         group.result.forEach((answer, j) => {
                             const op = ops[group.positions[j]];
+                            if (answer && op.kind === "put" && op.backfill)
+                                this.hasDuplicates = true;
                             if (answer && op.kind === "put" && op.backfill)
                                 this.store.exec(`INSERT OR REPLACE INTO ${DUPLICATES} (ix, key, owner) VALUES (?, ?, ?)`, op.route.slice(0, op.route.indexOf(":")), op.owner, answer.taken);
                         });
@@ -426,8 +431,15 @@ export class IndexedTable extends ShardedTable {
         this.store.exec(`INSERT INTO ${FENCES} (key, route, entry, hash, token) VALUES (?, ?, ?, ?, ?) ON CONFLICT (key, route, entry) DO UPDATE SET token = max(token, excluded.token)`, key, route, entry, keyHash(key), token);
     }
     uniqueIndexes() {
-        return globalIndexes(this.table).filter((ix) => ix.unique);
+        // Per schema object: every write asks.
+        const schema = this.table;
+        if (this.uniques?.schema !== schema)
+            this.uniques = { schema, indexes: globalIndexes(schema).filter((ix) => ix.unique) };
+        return this.uniques.indexes;
     }
+    uniques = null;
+    /** Whether a backfill left duplicates on record here: a write clears its key's only if so. */
+    hasDuplicates = true;
     async wake(time) {
         if (this.wakeAt !== null && this.wakeAt <= time && this.wakeAt > Date.now())
             return;

@@ -235,6 +235,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     // after it starts above that, so the two never share a version.
     const deletedAt = watched ? current + 1 : current;
     this.db.exec(`INSERT INTO ${VERSIONS} (name, version) VALUES ('deleted', ?) ON CONFLICT (name) DO UPDATE SET version = max(version, excluded.version)`, deletedAt);
+    this.deletedAt = Math.max(this.deletedVersion(), deletedAt);
     if (watched) this.rowWritten(key, watched.before, null, deletedAt);
     return { ok: true, version: 0 };
   }
@@ -252,8 +253,11 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
 
   /** The highest version a deleted row of this shard had (0: none). */
   private deletedVersion(): number {
-    return this.db.exec<{ version: number }>(`SELECT version FROM ${VERSIONS} WHERE name = 'deleted'`).toArray()[0]?.version ?? 0;
+    // Read once an instance: only deleteRow raises it, and keeps this in step.
+    this.deletedAt ??= this.db.exec<{ version: number }>(`SELECT version FROM ${VERSIONS} WHERE name = 'deleted'`).toArray()[0]?.version ?? 0;
+    return this.deletedAt;
   }
+  private deletedAt: number | null = null;
 
   // ---- Splits ----
 
@@ -304,11 +308,18 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   }
 
   private indexes(): IndexDef[] {
-    return Object.entries(this.table.indexes ?? {}).map(([name, columns]) => {
-      const id = `${name}_${shortDigest(columns.join(","))}`;
-      return { name, columns, keyColumn: `${KEY_COLUMN_PREFIX}${id}`, sqlIndex: `${INDEX_PREFIX}${id}` };
-    });
+    // Per schema object (a subclass may swap its schema): every write and page asks.
+    const schema = this.table;
+    if (this.indexDefs?.schema !== schema) {
+      const defs = Object.entries(schema.indexes ?? {}).map(([name, columns]) => {
+        const id = `${name}_${shortDigest(columns.join(","))}`;
+        return { name, columns, keyColumn: `${KEY_COLUMN_PREFIX}${id}`, sqlIndex: `${INDEX_PREFIX}${id}` };
+      });
+      this.indexDefs = { schema, defs };
+    }
+    return this.indexDefs.defs;
   }
+  private indexDefs: { schema: unknown; defs: IndexDef[] } | null = null;
 
   /** A row's key in an index, from its stored values. */
   private indexKey(ix: IndexDef, stored: Record<string, SqlValue>): string {

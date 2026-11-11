@@ -72,10 +72,12 @@ export declare abstract class ShardedTable<Env, Row extends RowShape> extends Sh
     protected ownedRowsAfter(afterKey: string | null, limit: number): Versioned<Row>[];
     /** The highest version a deleted row of this shard had (0: none). */
     private deletedVersion;
+    private deletedAt;
     /** Deletes rows (and counts) of hashes this shard gave away, a batch at a time. */
     protected cleanupForeign(owns: (key: string) => boolean, limit: number): number;
     private page;
     private indexes;
+    private indexDefs;
     /** A row's key in an index, from its stored values. */
     private indexKey;
     private condition;

@@ -206,6 +206,7 @@ export class ShardedTable extends ShardedObject {
         // after it starts above that, so the two never share a version.
         const deletedAt = watched ? current + 1 : current;
         this.db.exec(`INSERT INTO ${VERSIONS} (name, version) VALUES ('deleted', ?) ON CONFLICT (name) DO UPDATE SET version = max(version, excluded.version)`, deletedAt);
+        this.deletedAt = Math.max(this.deletedVersion(), deletedAt);
         if (watched)
             this.rowWritten(key, watched.before, null, deletedAt);
         return { ok: true, version: 0 };
@@ -222,8 +223,11 @@ export class ShardedTable extends ShardedObject {
     }
     /** The highest version a deleted row of this shard had (0: none). */
     deletedVersion() {
-        return this.db.exec(`SELECT version FROM ${VERSIONS} WHERE name = 'deleted'`).toArray()[0]?.version ?? 0;
+        // Read once an instance: only deleteRow raises it, and keeps this in step.
+        this.deletedAt ??= this.db.exec(`SELECT version FROM ${VERSIONS} WHERE name = 'deleted'`).toArray()[0]?.version ?? 0;
+        return this.deletedAt;
     }
+    deletedAt = null;
     // ---- Splits ----
     /** Deletes rows (and counts) of hashes this shard gave away, a batch at a time. */
     cleanupForeign(owns, limit) {
@@ -270,11 +274,18 @@ export class ShardedTable extends ShardedObject {
         return { rows, frontier: scanned === request.budget ? last : null };
     }
     indexes() {
-        return Object.entries(this.table.indexes ?? {}).map(([name, columns]) => {
-            const id = `${name}_${shortDigest(columns.join(","))}`;
-            return { name, columns, keyColumn: `${KEY_COLUMN_PREFIX}${id}`, sqlIndex: `${INDEX_PREFIX}${id}` };
-        });
+        // Per schema object (a subclass may swap its schema): every write and page asks.
+        const schema = this.table;
+        if (this.indexDefs?.schema !== schema) {
+            const defs = Object.entries(schema.indexes ?? {}).map(([name, columns]) => {
+                const id = `${name}_${shortDigest(columns.join(","))}`;
+                return { name, columns, keyColumn: `${KEY_COLUMN_PREFIX}${id}`, sqlIndex: `${INDEX_PREFIX}${id}` };
+            });
+            this.indexDefs = { schema, defs };
+        }
+        return this.indexDefs.defs;
     }
+    indexDefs = null;
     /** A row's key in an index, from its stored values. */
     indexKey(ix, stored) {
         return encodeIndexKey([...ix.columns.map((c) => stored[c] ?? null), stored[this.table.primaryKey]]);

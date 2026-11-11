@@ -223,6 +223,7 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     protected routeOf(key: string): string;
     /** The hash a key is owned by: `keyHash(routeOf(key))`. */
     protected routeHash(key: string): string;
+    private readonly routeHashes;
     /** Whether the subclass routes keys by something other than themselves. */
     protected routesByKey(): boolean;
     /** `splitPolicy`, checked once (a subclass sets it after the constructor here runs). */

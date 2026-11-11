@@ -140,38 +140,39 @@ export function compareText(a, b) {
  * 0x00 escaped as 0x00 0xFF, then 0x00): nulls first ascending, last descending.
  */
 export function encodeIndexKey(values) {
-    const bytes = [];
+    let hex = "";
     for (const v of values) {
         if (v === null)
-            bytes.push(0x00);
+            hex += "00";
         else if (typeof v === "number") {
             if (Number.isNaN(v))
                 throw new Error("NaN cannot be indexed");
-            const view = new DataView(new ArrayBuffer(8));
-            view.setFloat64(0, v === 0 ? 0 : v);
-            const b = new Uint8Array(view.buffer);
-            if (b[0] & 0x80)
-                for (let i = 0; i < 8; i++)
-                    b[i] = ~b[i] & 0xff;
-            else
-                b[0] = b[0] | 0x80;
-            bytes.push(0x01, ...b);
+            FLOAT.setFloat64(0, v === 0 ? 0 : v);
+            const negative = (FLOAT.getUint8(0) & 0x80) !== 0;
+            hex += "01";
+            for (let i = 0; i < 8; i++) {
+                const b = FLOAT.getUint8(i);
+                hex += HEX[negative ? ~b & 0xff : i === 0 ? b | 0x80 : b];
+            }
         }
         else {
-            bytes.push(0x02);
-            for (const byte of new TextEncoder().encode(v)) {
-                bytes.push(byte);
-                if (byte === 0x00)
-                    bytes.push(0xff);
+            hex += "02";
+            const bytes = ENCODER.encode(v);
+            for (let i = 0; i < bytes.length; i++) {
+                const b = bytes[i];
+                hex += HEX[b];
+                if (b === 0x00)
+                    hex += "ff";
             }
-            bytes.push(0x00);
+            hex += "00";
         }
     }
-    let hex = "";
-    for (const byte of bytes)
-        hex += byte.toString(16).padStart(2, "0");
     return hex;
 }
+/** Each byte as two hex digits: an index key is built for every row written, per index. */
+const HEX = Array.from({ length: 256 }, (_, b) => b.toString(16).padStart(2, "0"));
+const ENCODER = new TextEncoder();
+const FLOAT = new DataView(new ArrayBuffer(8));
 /**
  * A short fingerprint of what a cursor belongs to: the index (its name and columns, so a cursor
  * from before an index was redefined is refused, not resumed at a meaningless position), the

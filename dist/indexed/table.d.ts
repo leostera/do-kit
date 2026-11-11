@@ -107,6 +107,9 @@ export declare abstract class IndexedTable<Env, Row extends RowShape> extends Sh
     private fence;
     private raiseFence;
     private uniqueIndexes;
+    private uniques;
+    /** Whether a backfill left duplicates on record here: a write clears its key's only if so. */
+    private hasDuplicates;
     private wake;
     private indexShards;
     private get store();

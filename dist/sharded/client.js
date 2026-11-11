@@ -3,6 +3,26 @@
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
 import { hashBit, keyHash } from "./hash.js";
 import { hostBits, shardObjectName, nodeName } from "./index.js";
+/**
+ * Object ids by name, per namespace binding: computing one from a name is not free, and a client
+ * asks for the same shards' ids on every call. Bounded; a namespace made per call (one scoped to a
+ * jurisdiction) is simply not remembered.
+ */
+const knownIds = new WeakMap();
+const MAX_KNOWN_IDS = 20_000;
+export function objectId(namespace, objectName) {
+    let ids = knownIds.get(namespace);
+    if (!ids)
+        knownIds.set(namespace, (ids = new Map()));
+    let known = ids.get(objectName);
+    if (!known) {
+        if (ids.size >= MAX_KNOWN_IDS)
+            ids.clear();
+        const id = namespace.idFromName(objectName);
+        ids.set(objectName, (known = { id, text: id.toString() }));
+    }
+    return known;
+}
 /** Keys that had to go to one shard belong to several (nothing was applied). */
 export class SpansShards extends Error {
 }
@@ -113,7 +133,7 @@ export class ShardedClient {
         this.logWideHops = options.logWideHops ?? 0;
         this.presplitHint = options.presplitHint ?? 0;
         this.routeOf = options.routeOf ?? null;
-        this.identity = namespace.idFromName(nodeName(name, "")).toString();
+        this.identity = objectId(namespace, nodeName(name, "")).text;
     }
     get splits() {
         let set = knownSplits.get(this.identity);
@@ -163,7 +183,7 @@ export class ShardedClient {
     }
     stub(bits) {
         const ns = this.namespace;
-        const id = ns.idFromName(shardObjectName(this.name, bits));
+        const { id } = objectId(ns, shardObjectName(this.name, bits));
         return this.stubOptions ? ns.get(id, this.stubOptions) : ns.get(id);
     }
     /**

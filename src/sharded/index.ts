@@ -275,6 +275,8 @@ class NotReady extends Error {
   }
 }
 const HOLD_WAIT_MS = 2_000;
+/** Keys whose route hash a shard remembers. */
+const ROUTE_HASHES = 4_096;
 /**
  * How long a wiped shard refuses calls: long enough for a call that was in flight when it was
  * wiped to arrive and be refused, rather than make the shard again. After that the name is free
@@ -389,11 +391,20 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** The hash a key is owned by: `keyHash(routeOf(key))`. */
   protected routeHash(key: string): string {
-    if (this.routeOf === ShardedObject.prototype.routeOf) return keyHash(key);
-    const route = this.routeOf(key);
-    if (typeof route !== "string") throw new Error(`routeOf(${JSON.stringify(key)}) is not a string`);
-    return keyHash(route);
+    // A call asks for a key's hash several times (the route check, ownership, the write): remembered.
+    let hash = this.routeHashes.get(key);
+    if (hash !== undefined) return hash;
+    if (this.routeOf === ShardedObject.prototype.routeOf) hash = keyHash(key);
+    else {
+      const route = this.routeOf(key);
+      if (typeof route !== "string") throw new Error(`routeOf(${JSON.stringify(key)}) is not a string`);
+      hash = keyHash(route);
+    }
+    if (this.routeHashes.size >= ROUTE_HASHES) this.routeHashes.clear();
+    this.routeHashes.set(key, hash);
+    return hash;
   }
+  private readonly routeHashes = new Map<string, string>();
 
   /** Whether the subclass routes keys by something other than themselves. */
   protected routesByKey(): boolean {
@@ -499,8 +510,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * tables here, never outside: a write that skips the fence can land after the copy and be lost.
    * List every key whose rows `fn` touches. `fn` must be synchronous.
    */
-  protected transact<R>(keys: readonly string[], fn: () => R): Promise<R> {
-    return this.update(keys, () => ({ writes: new Map(), result: fn() }));
+  protected async transact<R>(keys: readonly string[], fn: () => R): Promise<R> {
+    // As `update`, without reading the keys' rows of `read`/`update`: `fn` reads what it needs.
+    await this.waitForHold(keys);
+    // No await from here on: the check and the transaction see the same split state.
+    this.assertOwner(keys);
+    return this.ctx.storage.transactionSync(fn);
   }
 
   /**

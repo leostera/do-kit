@@ -4,6 +4,25 @@
 import { hashBit, keyHash } from "./hash.js";
 import { hostBits, shardObjectName, nodeName, type CallAnswer, type NodeDescription, type ShardedObject, type StubOptions } from "./index.js";
 
+/**
+ * Object ids by name, per namespace binding: computing one from a name is not free, and a client
+ * asks for the same shards' ids on every call. Bounded; a namespace made per call (one scoped to a
+ * jurisdiction) is simply not remembered.
+ */
+const knownIds = new WeakMap<object, Map<string, { readonly id: DurableObjectId; readonly text: string }>>();
+const MAX_KNOWN_IDS = 20_000;
+export function objectId(namespace: DurableObjectNamespace<any>, objectName: string): { readonly id: DurableObjectId; readonly text: string } {
+  let ids = knownIds.get(namespace);
+  if (!ids) knownIds.set(namespace, (ids = new Map()));
+  let known = ids.get(objectName);
+  if (!known) {
+    if (ids.size >= MAX_KNOWN_IDS) ids.clear();
+    const id = namespace.idFromName(objectName);
+    ids.set(objectName, (known = { id, text: id.toString() }));
+  }
+  return known;
+}
+
 /** One shard's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface ShardResult<R> {
   readonly keys: readonly string[];
@@ -163,7 +182,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     this.logWideHops = options.logWideHops ?? 0;
     this.presplitHint = options.presplitHint ?? 0;
     this.routeOf = options.routeOf ?? null;
-    this.identity = namespace.idFromName(nodeName(name, "")).toString();
+    this.identity = objectId(namespace, nodeName(name, "")).text;
   }
 
   private get splits(): Set<string> {
@@ -216,7 +235,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   private stub(bits: string): DurableObjectStub<ShardedObject<never, unknown>> {
     const ns = this.namespace as unknown as DurableObjectNamespace<ShardedObject<never, unknown>>;
-    const id = ns.idFromName(shardObjectName(this.name, bits));
+    const { id } = objectId(ns, shardObjectName(this.name, bits));
     return this.stubOptions ? ns.get(id, this.stubOptions) : ns.get(id);
   }
 

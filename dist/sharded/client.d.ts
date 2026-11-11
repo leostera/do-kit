@@ -1,4 +1,8 @@
 import { type NodeDescription, type StubOptions } from "./index.js";
+export declare function objectId(namespace: DurableObjectNamespace<any>, objectName: string): {
+    readonly id: DurableObjectId;
+    readonly text: string;
+};
 /** One shard's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface ShardResult<R> {
     readonly keys: readonly string[];
