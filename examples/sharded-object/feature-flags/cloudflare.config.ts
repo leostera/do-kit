@@ -6,6 +6,9 @@ const NAME = "do-kit-example-feature-flags";
 export default defineConfig(() => ({
   worker: {
     name: NAME,
+    // Never on workers.dev or preview URLs: deploy it on a custom domain behind Cloudflare Access.
+    workersDev: false,
+    previewUrls: false,
     compatibilityDate: "2026-10-27",
     // Snapshots make splits fast on Cloudflare; locally, splits copy rows instead.
     compatibilityFlags: ["nodejs_compat", "durable_object_snapshots"],

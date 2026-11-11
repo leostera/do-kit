@@ -9,6 +9,9 @@ const NAME = process.env.TEST_WORKER_NAME ?? "do-kit-test";
 export default defineConfig(() => ({
   worker: {
     name: NAME,
+    // Never on workers.dev or preview URLs: deploy it on a custom domain behind Cloudflare Access.
+    workersDev: false,
+    previewUrls: false,
     compatibilityDate: "2026-10-27",
     compatibilityFlags: ["nodejs_compat", "durable_object_snapshots"],
     entrypoint,

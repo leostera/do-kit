@@ -31,7 +31,10 @@ workerd, the page reloads as you edit it, and state lives in the example's `.clo
 that folder to start over.
 
 Locally, splits copy rows; on Cloudflare they restore a storage snapshot, which is faster. To try
-an example on Cloudflare, run `bun run deploy` in its folder (it needs `cf auth login` first).
+an example on Cloudflare, add a custom domain to `domains` in its `cloudflare.config.ts`, put a
+Cloudflare Access application in front of it, and run `bun run deploy` in its folder (it needs
+`cf auth login` first). The examples turn workers.dev and preview URLs off, so they are reachable
+only on that domain, and they have no login of their own.
 
 ## How they are put together
 
