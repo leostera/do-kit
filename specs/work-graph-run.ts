@@ -86,8 +86,10 @@ export default defineSpec(
           /** Its storage holds the run (its name, its finished chunk) or its alarm is set. */
           held: true,
         }),
-        // Its finished chunk is stored before its alarm is set; its alarm survives a crash.
-        durable: ["finished", "held", "stopped"],
+        // The chunk it finished is kept in hand while it goes on to the next in the same invocation
+        // (stored only before it sets its alarm): a crash may lose the report, never the results.
+        // The chunk's lease then runs out, and whoever takes it finds the results stored.
+        durable: ["held", "stopped"],
         display: {
           icon: "server",
           status: (s) => (!s.held ? "wiped" : s.gone ? "gone" : s.stopped ? "stopped" : s.holding ? `${s.phase} ${s.holding}` : s.phase),

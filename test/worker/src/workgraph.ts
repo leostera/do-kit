@@ -52,6 +52,8 @@ export class GraphRunners extends WorkGraphRunner<GraphEnv> {
     this.ctx.abort("test restart");
   }
   protected override async chunkStarting(run: string, index: number): Promise<"run" | "abandon"> {
+    // "each": every chunk in an alarm invocation of its own, its report stored between them.
+    this.invocationMs = run.includes("each") ? 0 : 5_000;
     // "poison": every runner dies holding its lease, as on a chunk that needs more CPU than an invocation has.
     if (run.includes("poison")) throw new Error("test: the runner died on this chunk");
     return run.includes("lose") && index === 0 ? "abandon" : "run";

@@ -304,3 +304,13 @@ test("a chunk whose runners never report fails the run, instead of being leased 
   expect(status.error).toContain("never reported");
   expect(status.expired).toBe(2);
 }, 90_000);
+
+test("chunks run one an alarm invocation, their reports stored between, give the same results", async () => {
+  // By default small chunks run one after another in one invocation; "each" gives every chunk its own.
+  const run = `each-${unique()}`;
+  const shape: Shape = { trees: 12, size: 5, chainy: 0.4, joins: 2, seed: 8 };
+  const results = `each-results-${unique()}`;
+  await post("/workgraph", { op: "start", run, shape, results, runners: 3, chunkMs: 30, tickMs: 300 });
+  expect(await finished(run, 30_000)).toMatchObject({ state: "done", units: { computed: forest(shape).expected.size } });
+  await expectResults(run, shape, results, { chunkMs: 30 });
+}, 60_000);

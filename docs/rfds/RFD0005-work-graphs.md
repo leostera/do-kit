@@ -272,8 +272,10 @@ edge, units that do nothing, 5,000 to a chunk, took 0.11 to 0.12 ms of wall time
   one invocation, inputs included, and an isolate has 128 MB of memory.
 - A chunk holds at most `maxUnitsPerChunk` units (5,000), so with units much smaller than
   `chunkMs / 5,000` the chunks come out small, and the overhead per chunk grows with them: a
-  lease, a read and a write of the results store, and an alarm. With 16 runners on chunks that
-  cost nothing, each runner completed about 14 a second, about 70 ms of wall time a chunk.
+  lease, and a read and a write of the results store. On Cloudflare's network, 715 chunks of a
+  few milliseconds on 8 runners took 4.1 to 5.1 s, 46 to 58 ms of a runner's time a chunk. (They
+  took 10.0 and 10.3 s, 111 to 116 ms a chunk, when each chunk had an alarm invocation of its
+  own and a new stub for each call.)
 
 ### Inputs
 
@@ -438,12 +440,18 @@ One alarm invocation:
    A replayed unit is computed only if a needed unit is below it.
 4. It writes the new results, and any exported values, to `WorkGraphResults`. These writes are
    idempotent, by hash.
-5. It stores the chunk id as `finished`, and sets its alarm to now. The next invocation reports
-   the chunk done, and leases the next one, in one call.
+5. It reports the chunk done and leases the next one, in one call. While the invocation has
+   run for less than `invocationMs` (5 s), it goes on to that chunk here, if the chunk's cost
+   fits what is left of those 5 s. Otherwise it stores the report as `finished` and sets its
+   alarm to now, and the next invocation reports it and leases (or is given the same lease back).
 
-Each chunk runs in its own alarm invocation, and so has its own CPU budget. A runner that is
-evicted during step 3 or 4 has its alarm retried by the platform. The retry leases the same
-chunk, finds the results already written, and computes only what is missing.
+So a chunk that costs seconds runs in an alarm invocation of its own, with its own CPU budget,
+and chunks that cost milliseconds run one after another in one, without an alarm between each.
+A report kept in hand is lost if the runner is evicted: the chunk's lease then runs out, and
+whoever takes it finds its results stored. A runner that is evicted during step 3 or 4 has its
+alarm retried by the platform. The retry leases the same chunk, finds the results already
+written, and computes only what is missing. A runner keeps its stub of the coordinator and its
+client of the results store between chunks.
 
 A chunk leased for the first time in a run that writes to its own results store has nothing
 stored yet, so the coordinator says so (`fresh`) and the runner skips step 2 for the chunk's own

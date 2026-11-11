@@ -37,6 +37,13 @@ export abstract class WorkGraphRunner<Env = unknown> extends DurableObject<Env> 
   protected abstract coordinators(): DurableObjectNamespace<WorkGraphCoordinator<any>>;
   protected abstract results(): DurableObjectNamespace<WorkGraphResults<any>>;
 
+  /**
+   * How long one alarm invocation goes on taking chunks. Chunks that are small next to it run one
+   * after another in the same invocation; a chunk that costs more than what is left of it runs
+   * in the next. Keep it well under the CPU an invocation has, less a chunk.
+   */
+  protected invocationMs = 5_000;
+
   /** Told to stop (in memory: a stop also wipes storage, so a later instance finds nothing). */
   private stopping = false;
   /** The alarm's work in progress, which a stop waits for. */
@@ -110,24 +117,61 @@ export abstract class WorkGraphRunner<Env = unknown> extends DurableObject<Env> 
   private async step(): Promise<void> {
     const state = await this.ctx.storage.get<RunnerState>("state");
     if (!state || state.stopped) return;
-    const finished = (await this.ctx.storage.get<Finished>("finished")) ?? null;
-    const coordinators = this.coordinators();
-    const jurisdiction = this.ctx.id.jurisdiction;
-    const ns = jurisdiction ? coordinators.jurisdiction(jurisdiction as DurableObjectJurisdiction) : coordinators;
-    const answer = (await ns.get(ns.idFromName(state.run)).graphNext(state.index, finished)) as NextAnswer;
-    // The run is over: nothing of it stays here.
-    if ("done" in answer || "failed" in answer) return this.wipe();
-    this.live();
-    // The coordinator has the report: it is not sent again.
-    if (finished) await this.ctx.storage.delete("finished");
-    if ("wait" in answer) return void (await this.ctx.storage.setAlarm(Date.now() + answer.wait));
-    // (Tests: a runner lost holding its lease. It keeps its state, as a lost object would, until stopped.)
-    if ((await this.chunkStarting(state.run, state.index, answer.chunk, answer.attempt)) === "abandon") return void (await this.ctx.storage.put<RunnerState>("state", { ...state, stopped: true }));
-    const report = await this.runChunk(state, answer.chunk, answer.attempt, decodeBody(answer.body), answer.fresh === true);
-    this.live();
-    await this.ctx.storage.put<Finished>("finished", report);
-    await this.ctx.storage.setAlarm(Date.now());
+    const started = Date.now();
+    let finished = (await this.ctx.storage.get<Finished>("finished")) ?? null;
+    // Whether `finished` is in storage (from the invocation before) or only in hand (from this one).
+    let stored = finished !== null;
+    for (let chunks = 0; ; chunks++) {
+      let answer: NextAnswer;
+      try {
+        answer = (await this.coordinator(state.run).graphNext(state.index, finished)) as NextAnswer;
+      } catch (error) {
+        this.coordinatorStub = null;
+        throw error;
+      }
+      // The run is over: nothing of it stays here.
+      if ("done" in answer || "failed" in answer) return this.wipe();
+      this.live();
+      // The coordinator has the report: it is not sent again.
+      if (stored) await this.ctx.storage.delete("finished");
+      stored = false;
+      finished = null;
+      if ("wait" in answer) return void (await this.ctx.storage.setAlarm(Date.now() + answer.wait));
+      // After this invocation's first chunk: one that may not fit what is left of it goes to the
+      // next invocation, which is given this lease back.
+      if (chunks > 0 && Date.now() - started + (answer.cost ?? Number.POSITIVE_INFINITY) > this.invocationMs) return void (await this.ctx.storage.setAlarm(Date.now()));
+      // (Tests: a runner lost holding its lease. It keeps its state, as a lost object would, until stopped.)
+      if ((await this.chunkStarting(state.run, state.index, answer.chunk, answer.attempt)) === "abandon") return void (await this.ctx.storage.put<RunnerState>("state", { ...state, stopped: true }));
+      const report = await this.runChunk(state, answer.chunk, answer.attempt, decodeBody(answer.body), answer.fresh === true);
+      this.live();
+      // Small chunks go on in this invocation: the report goes with the next lease, with no alarm
+      // between. (Lost with a crash, the chunk's lease runs out, and its results are found stored.)
+      finished = report;
+      if (Date.now() - started < this.invocationMs) continue;
+      await this.ctx.storage.put<Finished>("finished", report);
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
   }
+
+  /** The run's coordinator, through one stub for as long as its calls succeed. */
+  private coordinator(run: string): DurableObjectStub<WorkGraphCoordinator<any>> {
+    if (this.coordinatorStub?.run !== run) {
+      const coordinators = this.coordinators();
+      const jurisdiction = this.ctx.id.jurisdiction;
+      const ns = jurisdiction ? coordinators.jurisdiction(jurisdiction as DurableObjectJurisdiction) : coordinators;
+      this.coordinatorStub = { run, stub: ns.get(ns.idFromName(run)) as DurableObjectStub<WorkGraphCoordinator<any>> };
+    }
+    return this.coordinatorStub.stub;
+  }
+  private coordinatorStub: { run: string; stub: DurableObjectStub<WorkGraphCoordinator<any>> } | null = null;
+
+  /** The results store's client, kept: it keeps its stubs of the store's shards. */
+  private resultsStore(name: string) {
+    if (this.store?.name !== name) this.store = { name, client: sharded(this.results(), name) };
+    return this.store.client;
+  }
+  private store: { name: string; client: ReturnType<typeof sharded<WorkGraphResults<any>>> } | null = null;
 
   /**
    * Computes a chunk and makes its results durable; the report is recorded only after. A compute
@@ -135,7 +179,7 @@ export abstract class WorkGraphRunner<Env = unknown> extends DurableObject<Env> 
    */
   private async runChunk(state: RunnerState, chunk: number, attempt: number, body: ChunkBody, fresh: boolean): Promise<Finished> {
     const started = Date.now();
-    const store = sharded(this.results(), state.results);
+    const store = this.resultsStore(state.results);
     const stored = new Map<string, string>();
     // A fresh chunk has nothing stored of its own: only what it takes from other chunks is read.
     const keys = keysToRead(body, fresh);

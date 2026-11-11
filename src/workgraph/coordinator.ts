@@ -21,7 +21,7 @@ export type Finished =
 /** What a runner is told to do next. */
 export type NextAnswer =
   /** `fresh`: nothing of this chunk can be stored yet (its first lease, in the run's own results store). */
-  | { readonly chunk: number; readonly attempt: number; readonly body: Uint8Array; readonly fresh?: boolean }
+  | { readonly chunk: number; readonly attempt: number; readonly body: Uint8Array; readonly fresh?: boolean; readonly cost?: number }
   | { readonly wait: number } | { readonly done: true } | { readonly failed: string };
 
 export interface StartOptions {
@@ -298,18 +298,18 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
   /** The runner's own lease back (it was evicted while computing it), or the next ready chunk. */
   private lease(runner: number, now: number): NextAnswer {
     const meta = this.meta!;
-    const own = this.sql.exec<{ id: number; attempts: number }>("SELECT id, attempts FROM graph_chunks WHERE state = 'leased' AND runner = ? LIMIT 1", runner).toArray()[0];
+    const own = this.sql.exec<{ id: number; attempts: number; cost: number }>("SELECT id, attempts, cost FROM graph_chunks WHERE state = 'leased' AND runner = ? LIMIT 1", runner).toArray()[0];
     if (own) {
       this.sql.exec("UPDATE graph_chunks SET lease_until = ? WHERE id = ?", now + meta.leaseMs, own.id);
-      return { chunk: own.id, attempt: own.attempts, body: this.body(own.id) };
+      return { chunk: own.id, attempt: own.attempts, body: this.body(own.id), cost: own.cost };
     }
-    const next = this.sql.exec<{ id: number; attempts: number }>("SELECT id, attempts FROM graph_chunks WHERE state = 'ready' ORDER BY round, id LIMIT 1").toArray()[0];
+    const next = this.sql.exec<{ id: number; attempts: number; cost: number }>("SELECT id, attempts, cost FROM graph_chunks WHERE state = 'ready' ORDER BY round, id LIMIT 1").toArray()[0];
     if (next) {
       this.sql.exec("UPDATE graph_chunks SET state = 'leased', runner = ?, lease_until = ?, attempts = attempts + 1 WHERE id = ?", runner, now + meta.leaseMs, next.id);
       // A chunk leased for the first time, writing to a store only this run uses, has no results
       // there yet: its runner need not look. (Leased again, or the same lease given back to a
       // runner that was evicted, it may have written some.)
-      return { chunk: next.id, attempt: next.attempts + 1, body: this.body(next.id), fresh: meta.ownResults && next.attempts === 0 };
+      return { chunk: next.id, attempt: next.attempts + 1, body: this.body(next.id), fresh: meta.ownResults && next.attempts === 0, cost: next.cost };
     }
     this.sql.exec("UPDATE graph_runners SET waiting = 1 WHERE runner = ?", runner);
     return { wait: Math.min(2_000, meta.tickMs) };
