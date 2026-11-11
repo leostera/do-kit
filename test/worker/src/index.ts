@@ -4,7 +4,8 @@
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
 //   POST /tree {cls, name, presplitHint?}  (every shard, as its objects describe themselves)
 import { MAX_KNOWN_OBJECTS, RouteMismatch } from "../../../src/sharded/client.ts";
-import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
+import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type AtomicMethod, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
+import type { AtomicStep } from "../../../src/sharded/atomic.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedListQuery } from "../../../src/indexed/index.ts";
 import { entryOf, globalIndexes } from "../../../src/indexed/entries.ts";
@@ -317,6 +318,18 @@ class CounterBase extends ShardedObject<Env, number> {
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY)");
     // A subclass table that both shards clean after a split (a stand-in for a listing).
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS listing (key TEXT PRIMARY KEY)");
+    // transferSlow: transfer, whose gather takes `ms` (its call's argument): a hold may appear meanwhile.
+    this.atomic = {
+      ...this.atomic,
+      transferSlow: {
+        ...this.atomic["transfer"]!,
+        gather: async (_keys: readonly string[], _payloads: readonly unknown[] | null, ms: number) => {
+          this.gathers++;
+          await new Promise((resolve) => setTimeout(resolve, ms));
+          return null;
+        },
+      } as never,
+    };
   }
 
   protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
@@ -359,6 +372,37 @@ class CounterBase extends ShardedObject<Env, number> {
 
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
     return this.env.COUNTERS as never;
+  }
+
+  /**
+   * RFD0008: moves amounts between counters, all or nothing; a counter may not go below zero.
+   * `gather` counts its calls (in memory), to see it runs before the check.
+   */
+  protected override atomic: Record<string, AtomicMethod<number, any, any, any, any>> = {
+    transfer: {
+      gather: async () => {
+        this.gathers++;
+        return null;
+      },
+      check: (current: ReadonlyMap<string, number>, keys: readonly string[], deltas: readonly unknown[] | null) => {
+        const after = keys.map((k, i) => (current.get(k) ?? 0) + (deltas![i] as number));
+        const low = keys.filter((_, i) => after[i]! < 0);
+        if (low.length > 0) return { refused: `below zero: ${low.join(", ")}` };
+        return { staged: keys.map((k, i) => [k, after[i]!] as [string, number]) };
+      },
+      apply: (_current: ReadonlyMap<string, number>, staged: [string, number][]) => ({ writes: new Map(staged), result: staged.map(([, v]) => v) }),
+    } satisfies AtomicMethod<number, null, [string, number][], string, number[]>,
+  };
+  private gathers = 0;
+
+  /** This object's atomic holds and outcomes (RFD0008), as stored. */
+  async atomicTables(): Promise<{ holds: { tx: string; keys: string; deadline: number }[]; outcomes: { tx: string; outcome: string }[]; gathers: number }> {
+    const has = (t: string) => this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?", t).one().n > 0;
+    return {
+      holds: has("sharded_atomic_holds") ? this.ctx.storage.sql.exec<{ tx: string; keys: string; deadline: number }>("SELECT tx, keys, deadline FROM sharded_atomic_holds").toArray() : [],
+      outcomes: has("sharded_atomic_outcomes") ? this.ctx.storage.sql.exec<{ tx: string; outcome: string }>("SELECT tx, outcome FROM sharded_atomic_outcomes").toArray() : [],
+      gathers: this.gathers,
+    };
   }
 
   async get(keys: readonly string[], _payloads: null): Promise<(number | null)[]> {
@@ -723,6 +767,15 @@ export default {
           return Response.json(await (sharded(ns, body.name).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(body.method, ...((body.args as unknown[]) ?? [])));
         case "/split":
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedSplit(body.name, body.bits));
+        case "/atomically": {
+          const routed = (body as { routeOf?: "refs" }).routeOf === "refs";
+          return Response.json(await sharded(ns, body.name, routed ? { routeOf: refRoute } : {}).atomically(body.keys, body.method, body.payloads ?? null, ...((body.args as unknown[]) ?? [])));
+        }
+        case "/atomicStep":
+          // One step of the protocol, as a client would send it: a caller that stops partway.
+          return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedAtomic(body.name, body.bits, (body as unknown as { step: AtomicStep }).step, body.keys, body.payloads ?? null, []));
+        case "/atomicTables":
+          return Response.json(await (ns.get(ns.idFromName(shardObjectName(body.name, body.bits))) as unknown as { atomicTables(): Promise<unknown> }).atomicTables());
         case "/describe":
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedDescribe());
         case "/workgraph":
