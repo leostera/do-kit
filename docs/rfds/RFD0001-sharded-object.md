@@ -128,6 +128,11 @@ headroom for the split itself.
    - **Logical:** the fallback where snapshots are unavailable. It copies every table and index,
      in batches of at most 4 MiB, paged by a stable key. Batches are tagged with the attempt's
      epoch, so a late batch cannot overwrite newer rows.
+
+   Either way the copy carries its attempt's epoch, and the new object refuses one that is not
+   newer than what it holds: a claimed copy may be all there is of its half (the original stops
+   owning the half once the claim answers), so a message of an abandoned attempt that arrives
+   late must not replace it.
 4. **Claim.** It calls `shardedClaim` on the new object until the copy answers that it is this
    attempt's copy.
 5. **Commit.** In one transaction, it becomes `bits + "0"`, records the right half for cleanup,
@@ -156,7 +161,12 @@ call. A non-empty object splits by load only.
   help a subclass filter its own tables until cleanup is done.
 - The alarm belongs to the base class. A subclass that defines `alarm` is refused at
   construction. Subclasses override `onAlarm()` and ask for it with `scheduleAlarm(at)`, which
-  keeps the earliest time asked for. `onAlarm` runs only on a serving shard.
+  keeps the earliest time asked for. `onAlarm` runs only on a serving shard. While it runs, the
+  time it was due stays stored, as a retry a second later: a shard restarted partway through
+  (evicted, redeployed, out of CPU) runs `onAlarm` again. So `onAlarm` runs at least once, and
+  must be safe to run again.
+- `update` writes only the keys it was given: a write to any other key was neither checked as
+  this shard's nor held for a split, so it is refused.
 
 ### Observability
 

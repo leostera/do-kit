@@ -610,3 +610,11 @@ test("wipe deletes a presplit object's shards, and never makes a shard it did no
   expect(await post<number>("/wipeAll", { cls: "presplit", name })).toBe(3);
   for (const bits of ["00", "01", "10", "11"]) expectWiped(await post<Report>("/storage", { cls: "presplit", name, bits }));
 }, 60_000);
+
+test("update refuses to write a key it did not list: it was not checked as this shard's, nor held for a split", async () => {
+  const name = `sneak-${Date.now()}`;
+  const response = await fetch(`${workerUrl()}/call`, { method: "POST", headers: requestHeaders(), body: JSON.stringify({ cls: "m", name, method: "sneak", keys: ["listed"], payloads: ["unlisted"] }) });
+  expect(response.status).toBe(500);
+  expect(await response.text()).toContain("not one of its keys");
+  expect(await call<(number | null)[]>("m", name, "get", ["listed", "unlisted"])).toEqual([null, null]);
+});

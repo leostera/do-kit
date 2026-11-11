@@ -197,7 +197,27 @@ export class FlakyDocs extends EvolvingDocs {
   async alarmNow(): Promise<void> {
     await this.ctx.storage.setAlarm(Date.now());
   }
+  /** The next onAlarm restarts this object partway through, once (as an eviction or a deploy would). */
+  async crashAlarmOnce(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_crash (n INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("INSERT INTO test_crash (n) VALUES (1)");
+  }
+  /** A message of split attempt `epoch`'s row copy, arriving now: "accepted", or why it was refused. */
+  async lateSchema(epoch: number): Promise<string> {
+    try {
+      await this.shardedReceiveSchema("", "", epoch, []);
+      return "accepted";
+    } catch (error) {
+      return `refused: ${String(error)}`;
+    }
+  }
   protected override async onAlarm(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_crash (n INTEGER NOT NULL)");
+    if (this.ctx.storage.sql.exec("SELECT n FROM test_crash").toArray().length) {
+      this.ctx.storage.sql.exec("DELETE FROM test_crash");
+      await this.ctx.storage.sync(); // as any I/O in onAlarm does: the writes so far are durable
+      this.ctx.abort("test: restarted partway through onAlarm");
+    }
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarm_ran (id TEXT NOT NULL)");
     this.ctx.storage.sql.exec("INSERT INTO test_alarm_ran (id) VALUES (?)", this.ctx.id.toString());
   }
@@ -325,6 +345,11 @@ class CounterBase extends ShardedObject<Env, number> {
       });
       return { writes, result };
     });
+  }
+
+  /** Writes a key it did not list (payloads[0]): refused. */
+  async sneak(keys: readonly string[], payloads: readonly string[]): Promise<number> {
+    return this.update(keys, () => ({ writes: new Map([[payloads[0]!, 1]]), result: 1 }));
   }
 
   /** Sets each key to its payload (any JSON, for large rows). */
@@ -572,7 +597,7 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     await ns.get(ns.idFromName(shardObjectName(body.name, body.args[1] as string))).failActivations(body.args[0] as boolean);
     return null;
   }
-  if (body.op === "wakeIn" || body.op === "alarmNow" || body.op === "alarmRan" || body.op === "dropAlarm") {
+  if (body.op === "wakeIn" || body.op === "alarmNow" || body.op === "alarmRan" || body.op === "dropAlarm" || body.op === "crashAlarmOnce" || body.op === "lateSchema") {
     const ns = env.FLAKY;
     const stub = ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
     return stub[body.op]!(body.args[0]);

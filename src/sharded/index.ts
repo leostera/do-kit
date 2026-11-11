@@ -276,6 +276,12 @@ class NotReady extends Error {
 }
 const HOLD_WAIT_MS = 2_000;
 /**
+ * How long a wiped shard refuses calls: long enough for a call that was in flight when it was
+ * wiped to arrive and be refused, rather than make the shard again. After that the name is free
+ * to use again.
+ */
+const WIPED_REFUSE_MS = 5_000;
+/**
  * How long a split waits for its new object's first call before going ahead anyway. A first call
  * can take seconds, and one that never returns must not leave the shard unable to split again:
  * the split's own calls to the new object retry, or give up.
@@ -415,8 +421,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private callerStubOptions: StubOptions | null = null;
   /** Whether this object's tables exist: they are made by its first write, not by every visit. */
   private schemaReady: boolean;
-  /** Wiped (shardedWipe) in this instance: it answers nothing more, so nothing writes here again. */
-  private wiped = false;
+  /** When this instance was wiped (shardedWipe): it refuses calls for WIPED_REFUSE_MS after. */
+  private wipedAt: number | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -438,7 +444,13 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   private assertNotWiped(): void {
-    if (this.wiped) throw new Error("this shard was wiped");
+    if (this.wipedAt === null) return;
+    if (Date.now() - this.wipedAt < WIPED_REFUSE_MS) throw new Error("this shard was wiped");
+    // Any call still in flight when it was wiped has long arrived: the name may be used again.
+    this.wipedAt = null;
+  }
+  private get wiped(): boolean {
+    return this.wipedAt !== null && Date.now() - this.wipedAt < WIPED_REFUSE_MS;
   }
 
   // ---- Reads and writes for subclasses ----
@@ -470,7 +482,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
         if (row) current.set(key, JSON.parse(row.value) as V);
       }
       const { writes, result } = decide(current);
+      const fenced = new Set(keys);
       for (const [key, value] of writes) {
+        // An unlisted key was neither checked as this shard's nor held for a split: its write could be lost.
+        if (!fenced.has(key)) throw new Error(`update wrote ${JSON.stringify(key)}, which is not one of its keys: list every key it writes`);
         if (value === null) this.sql.exec("DELETE FROM sharded_rows WHERE key = ?", key);
         else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), JSON.stringify(value));
       }
@@ -953,7 +968,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       if (snapshot) {
         t = Date.now();
         try {
-          steps.restoreInside = (await this.node(right).shardedRestore(snapshot)).scheduleMs;
+          steps.restoreInside = (await this.node(right).shardedRestore(snapshot, epoch)).scheduleMs;
         } catch (error) {
           // The sibling restarts right after replying; under load the restart can overtake the
           // reply. Claiming tells whether the restore took.
@@ -1114,6 +1129,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    */
   protected async scheduleAlarm(at: number | Date): Promise<void> {
     const time = typeof at === "number" ? at : at.getTime();
+    // During onAlarm the stored wake is its retry (see alarm): what is asked for meanwhile is kept
+    // aside, and stored once onAlarm returns.
+    if (this.onAlarmAsked !== undefined) {
+      this.onAlarmAsked = this.onAlarmAsked === null ? time : Math.min(this.onAlarmAsked, time);
+      return;
+    }
     const wake = this.loadWake();
     if (wake === null || time < wake) this.saveWake(time);
     if (this.meta?.state === "shard" || !this.meta) await this.armAlarm(time);
@@ -1143,6 +1164,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     void this.ctx.storage.getAlarm().then((at) => (at === null ? this.ctx.storage.setAlarm(Date.now()) : undefined));
   }
   private alarmCheckedAt = 0;
+
+  /** While onAlarm runs: the earliest time it (or a call meanwhile) asked for, or null. Else undefined. */
+  private onAlarmAsked: number | null | undefined = undefined;
 
   /** When the subclass asked for `onAlarm`, if it did. */
   private loadWake(): number | null {
@@ -1186,13 +1210,23 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // The subclass's turn, on a serving shard only: a copy's is armed when it is activated.
     const serving = this.meta!.state === "shard";
     const wake = this.loadWake();
+    let ran = false;
     if (serving && wake !== null && wake <= Date.now()) {
-      this.saveWake(null);
+      ran = true;
+      // Until onAlarm returns, the wake stays, as a retry: an object restarted partway through
+      // (evicted, redeployed, out of CPU) runs it again, instead of forgetting it was due.
+      const retry = Date.now() + ALARM_RETRY_MS;
+      this.saveWake(retry);
+      await this.ctx.storage.setAlarm(retry);
+      this.onAlarmAsked = null;
       try {
         await this.onAlarm();
+        this.saveWake(this.onAlarmAsked);
       } catch (error) {
         console.error(JSON.stringify({ event: "on-alarm-failed", node: this.nodeLabel(), error: String(error) }));
-        await this.scheduleAlarm(Date.now() + ALARM_RETRY_MS);
+        this.saveWake(Date.now() + ALARM_RETRY_MS);
+      } finally {
+        this.onAlarmAsked = undefined;
       }
     }
     const now = this.meta!;
@@ -1201,6 +1235,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     else if (now.cleanup.length > 0 || now.foreign) times.push(Date.now() + DELETE_PAUSE_MS);
     const next = this.loadWake();
     if (serving && next !== null) times.push(next);
+    // After onAlarm the alarm is its retry's: set it to what is due next, or clear it.
+    if (ran) return times.length > 0 ? this.ctx.storage.setAlarm(Math.min(...times)) : this.ctx.storage.deleteAlarm();
     if (times.length > 0) await this.armAlarm(Math.min(...times));
   }
 
@@ -1224,9 +1260,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** Nothing: a split calls it first to start this object, before it holds writes. */
   async shardedWarm(): Promise<void> {}
 
-  async shardedRestore(snapshot: DurableObjectSnapshot): Promise<{ scheduleMs: number }> {
+  async shardedRestore(snapshot: DurableObjectSnapshot, epoch?: number): Promise<{ scheduleMs: number }> {
     this.assertNotWiped();
     if (this.serving()) throw new Error("refusing to overwrite a serving shard");
+    this.refuseOlderAttempt(epoch);
     const started = Date.now();
     try {
       await this.ctx.storage.onNextSessionRestore!(snapshot);
@@ -1259,6 +1296,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   async shardedReceiveSchema(_name: string, _bits: string, epoch: number, objects: readonly { readonly name: string; readonly sql: string }[]): Promise<void> {
     this.assertNotWiped();
     if (this.serving()) throw new Error("refusing to change a serving shard");
+    this.refuseOlderAttempt(epoch);
     this.receiving = epoch;
     this.ctx.storage.transactionSync(() => {
       for (const t of this.tables()) this.sql.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(t)}`);
@@ -1296,6 +1334,20 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.meta = this.loadMeta();
     const meta = this.meta;
     return meta !== null && meta.name === name && meta.splitting === epoch && `${meta.bits}1` === bits && this.isUnclaimedCopy();
+  }
+
+  /**
+   * Refuses the copy of split attempt `epoch` if this object holds one at least as new. A claimed
+   * copy may be all there is of its half (its parent stops owning the half once the claim
+   * answers), so a message of an older attempt that arrives late must not replace it; nor may it
+   * replace a newer attempt's copy that is about to be claimed. (`epoch` undefined: a caller from
+   * before attempts were sent.)
+   */
+  private refuseOlderAttempt(epoch: number | undefined): void {
+    const meta = this.meta;
+    if (epoch === undefined || !meta) return;
+    if (meta.state === "copy" && meta.epoch >= epoch) throw new Error(`refusing the copy of split attempt ${epoch}: this object holds the claimed copy of attempt ${meta.epoch}`);
+    if (this.isUnclaimedCopy() && meta.splitting! > epoch) throw new Error(`refusing the copy of split attempt ${epoch}: this object holds the copy of attempt ${meta.splitting}`);
   }
 
   /** Storage copied verbatim from a splitting object and not claimed yet: it is not this object's. */
@@ -1375,7 +1427,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       if (meta.name !== name || hostBits(meta.bits) !== hostBits(bits)) throw new Error(`${nodeName(name, bits)} reached ${nodeName(meta.name, meta.bits)}`);
       if (meta.bits !== bits) return this.answered(meta.bits.startsWith(bits) ? this.moved(bits) : { stale: bits });
     }
-    this.wiped = true;
+    this.wipedAt = Date.now();
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     this.meta = null;

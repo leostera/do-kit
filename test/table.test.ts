@@ -375,3 +375,36 @@ test("a shard whose alarm was lost while a new shard waits to be activated sets 
   expect((await post<{ state: string }>("/describe", { cls: "flaky", name, bits: "1" })).state).toBe("shard");
   expect((await table<unknown[]>("flaky", name, "all", {})).length).toBe(20);
 }, 60_000);
+
+test("onAlarm runs again when the object restarts partway through it", async () => {
+  const name = `alarm-restart-${Date.now()}`;
+  await table("flaky", name, "put", makeDocs(1)[0]);
+  await table("flaky", name, "crashAlarmOnce", null, "");
+  await table("flaky", name, "wakeIn", 0, "").catch(() => {});
+  let ran: string[] = [];
+  for (let i = 0; i < 60 && ran.length === 0; i++) {
+    await Bun.sleep(250);
+    ran = (await table<{ ran: string[] }>("flaky", name, "alarmRan", null, "").catch(() => ({ ran: [] }))).ran;
+  }
+  // Once: the run that restarted wrote nothing, and the one after it is not followed by another.
+  expect(ran.length).toBe(1);
+  await Bun.sleep(2_500);
+  expect((await table<{ ran: string[] }>("flaky", name, "alarmRan", null, "")).ran.length).toBe(1);
+}, 60_000);
+
+test("a late message of an older split attempt cannot replace a claimed copy", async () => {
+  const name = `late-attempt-${Date.now()}`;
+  const rows = makeDocs(40);
+  for (const row of rows) await table("flaky", name, "put", row);
+  await table("flaky", name, "failActivations", true, "");
+  expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(true);
+  // The original has stopped owning the right half: the claimed copy is all there is of it.
+  const copy = await post<{ bits: string; state: string; storedRows: number }>("/describe", { cls: "flaky", name, bits: "1" });
+  expect(copy).toMatchObject({ bits: "1", state: "copy" });
+  expect(await table<string>("flaky", name, "lateSchema", 0, "1")).toContain("refused");
+  expect(await table<string>("flaky", name, "lateSchema", 1, "1")).toContain("refused"); // its own attempt's, again
+  expect(await post("/describe", { cls: "flaky", name, bits: "1" })).toMatchObject({ bits: "1", state: "copy", storedRows: copy.storedRows });
+  await table("flaky", name, "failActivations", false, "1");
+  const listed = await table<Versioned[]>("flaky", name, "all", {});
+  expect(listed.map((r) => r.row.name).sort()).toEqual(rows.map((r) => r.name).sort());
+}, 60_000);
