@@ -22,6 +22,9 @@ export default defineConfig(() => ({
       OLD_ALARM: bindings.durableObject({ worker: NAME, exportName: "OldAlarm" }),
       USERS: bindings.durableObject({ worker: NAME, exportName: "Users" }),
       USER_INDEXES: bindings.durableObject({ worker: NAME, exportName: "UserIndexes" }),
+      GRAPH_COORDINATORS: bindings.durableObject({ worker: NAME, exportName: "GraphCoordinators" }),
+      GRAPH_RUNNERS: bindings.durableObject({ worker: NAME, exportName: "GraphRunners" }),
+      GRAPH_RESULTS: bindings.durableObject({ worker: NAME, exportName: "GraphResults" }),
     },
     exports: {
       Counters: exports.durableObject({ storage: "sqlite" }),
@@ -33,6 +36,9 @@ export default defineConfig(() => ({
       OldAlarm: exports.durableObject({ storage: "sqlite" }),
       Users: exports.durableObject({ storage: "sqlite" }),
       UserIndexes: exports.durableObject({ storage: "sqlite" }),
+      GraphCoordinators: exports.durableObject({ storage: "sqlite" }),
+      GraphRunners: exports.durableObject({ storage: "sqlite" }),
+      GraphResults: exports.durableObject({ storage: "sqlite" }),
     },
   },
 }));

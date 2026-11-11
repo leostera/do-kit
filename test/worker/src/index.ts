@@ -6,8 +6,10 @@ import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedListQuery } from "../../../src/indexed/index.ts";
+import { graphRoute, type GraphEnv, type GraphRequest } from "./workgraph.ts";
+export { GraphCoordinators, GraphResults, GraphRunners } from "./workgraph.ts";
 
-interface Env {
+interface Env extends GraphEnv {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
   readonly AUTO_COUNTERS: DurableObjectNamespace<AutoCounters>;
   readonly PRESPLIT_COUNTERS: DurableObjectNamespace<PresplitCounters>;
@@ -556,6 +558,8 @@ export default {
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedSplit(body.name, body.bits));
         case "/describe":
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedDescribe());
+        case "/workgraph":
+          return Response.json(await graphRoute(env, body as unknown as GraphRequest));
         case "/indexed":
           return Response.json((await indexedOp(env, body as never)) ?? null);
         case "/table":
