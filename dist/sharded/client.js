@@ -1,7 +1,8 @@
 // The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { hashBit, hostBits, keyHash, shardObjectName, nodeName } from "./index.js";
+import { hashBit, keyHash } from "./hash.js";
+import { hostBits, shardObjectName, nodeName } from "./index.js";
 /** Keys that had to go to one shard belong to several (nothing was applied). */
 export class SpansShards extends Error {
 }
@@ -360,6 +361,40 @@ export class ShardedClient {
         for (let i = this.presplitTo; i <= bits.length; i++)
             this.splits.add(bits.slice(0, i));
         void this.saveCache();
+    }
+    /**
+     * Every shard of this tree, as its objects describe themselves (for operators): each shard at
+     * the presplit depth (this client's, else the one the root reports), then down every split. A
+     * shard never called is described as "new", and the walk goes on past it: in a presplit tree,
+     * shard 10 may never have been called while 11 has, and a walk down from the root stops at 10.
+     * Asks the objects, not this client's map of splits, so it sees splits no client here has met.
+     */
+    async describeTree() {
+        const describe = async (bits) => {
+            const id = this.namespace.idFromName(shardObjectName(this.name, bits));
+            const stub = this.namespace.get(id);
+            const node = await stub.shardedDescribe();
+            return { ...node, bits: node.state === "new" ? bits : node.bits, object: id.toString() };
+        };
+        const out = [];
+        // The object hosting `bits` hosts a deeper shard once `bits` has split: its left half stayed,
+        // and each right half along the way went to an object of its own.
+        const visit = async (bits) => {
+            const node = await describe(bits);
+            out.push(node);
+            if (node.state === "new")
+                return;
+            const rights = [];
+            for (let i = bits.length; i < node.bits.length; i++)
+                rights.push(`${node.bits.slice(0, i)}1`);
+            await Promise.all(rights.map(visit));
+        };
+        let depth = this.presplitTo;
+        if (depth === 0)
+            depth = (await describe("")).presplit;
+        const leaves = Array.from({ length: 2 ** depth }, (_, i) => (depth === 0 ? "" : i.toString(2).padStart(depth, "0")));
+        await Promise.all(leaves.map(visit));
+        return out.sort((a, b) => (a.bits < b.bits ? -1 : a.bits > b.bits ? 1 : 0));
     }
     async loadCache() {
         this.touch();

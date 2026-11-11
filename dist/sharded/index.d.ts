@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-export { SpansShards, ShardedClient, sharded, type ShardedClientOptions, type ShardResult } from "./client.js";
+export { hashBit, keyHash } from "./hash.js";
+export { SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 declare global {
     /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
     interface DurableObjectSnapshot {
@@ -175,10 +176,6 @@ export interface UpdateResult<V, R> {
     readonly writes: ReadonlyMap<string, V | null>;
     readonly result: R;
 }
-/** The first 64 bits of the key's SHA-256, as 16 hex digits: what ownership is decided on. */
-export declare function keyHash(key: string): string;
-/** Bit `i` (0-based, most significant first) of a 16-hex-digit hash. */
-export declare function hashBit(hash: string, i: number): "0" | "1";
 export declare function nodeName(name: string, bits: string): string;
 /** The bits of the object hosting a shard: its bits without trailing zeros. */
 export declare function hostBits(bits: string): string;

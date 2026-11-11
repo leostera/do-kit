@@ -16,7 +16,8 @@
 //
 // The protocol is modelled in specs/snapshot-split.ts and specs/lazy-presplit.ts.
 import { DurableObject } from "cloudflare:workers";
-import { createHash } from "node:crypto";
+import { hashBit, keyHash } from "./hash.js";
+export { hashBit, keyHash } from "./hash.js";
 export { SpansShards, ShardedClient, sharded } from "./client.js";
 /**
  * Split at half of what one object takes: about 800 calls/s on the edge, so 400, sustained for
@@ -51,15 +52,6 @@ export function checkSplitPolicy(policy) {
 }
 /** How many split attempts a shard remembers. */
 const SPLIT_HISTORY = 8;
-/** The first 64 bits of the key's SHA-256, as 16 hex digits: what ownership is decided on. */
-export function keyHash(key) {
-    return createHash("sha256").update(key).digest("hex").slice(0, 16);
-}
-/** Bit `i` (0-based, most significant first) of a 16-hex-digit hash. */
-export function hashBit(hash, i) {
-    const nibble = Number.parseInt(hash[i >> 2], 16);
-    return (nibble >> (3 - (i & 3))) & 1 ? "1" : "0";
-}
 function ownsHash(bits, hash) {
     for (let i = 0; i < bits.length; i++)
         if (hashBit(hash, i) !== bits[i])

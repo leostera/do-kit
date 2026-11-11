@@ -1,4 +1,4 @@
-import { type StubOptions } from "./index.js";
+import { type NodeDescription, type StubOptions } from "./index.js";
 /** One shard's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface ShardResult<R> {
     readonly keys: readonly string[];
@@ -100,8 +100,21 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     /** Drops what this client knows of the object's splits, here and in the colo: it was stale. */
     private forget;
     private learn;
+    /**
+     * Every shard of this tree, as its objects describe themselves (for operators): each shard at
+     * the presplit depth (this client's, else the one the root reports), then down every split. A
+     * shard never called is described as "new", and the walk goes on past it: in a presplit tree,
+     * shard 10 may never have been called while 11 has, and a walk down from the root stops at 10.
+     * Asks the objects, not this client's map of splits, so it sees splits no client here has met.
+     */
+    describeTree(): Promise<ShardDescription[]>;
     private loadCache;
     private saveCache;
+}
+/** One shard of a tree, as its object describes itself, with the shard's bits and the object's ID. */
+export interface ShardDescription extends NodeDescription {
+    /** The object's Durable Object ID. */
+    readonly object: string;
 }
 export declare function sharded<T extends Rpc.DurableObjectBranded>(namespace: DurableObjectNamespace<T>, name: string, options?: ShardedClientOptions): ShardedClient<T>;
 export {};
