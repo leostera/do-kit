@@ -57,6 +57,8 @@ export class ReadLeases {
      * asked back): when each ends by this source's clock (margin included), and whether it was asked back.
      */
     leases = new Map();
+    /** Numbers each grant, so a lease given back is told from a later one to the same holder. */
+    grants = 0;
     /** Keys with a held write: the row reads see until `until`. Each key is in `heldKeys` too. */
     held = new Map();
     /** When each key last changed (holdUntil sees every change): not leased to relays for WRITTEN_MS after. */
@@ -127,7 +129,7 @@ export class ReadLeases {
             for (const [h, l] of holders)
                 if (l.end <= now)
                     holders.delete(h);
-            holders.set(holder, { end: Math.max(holders.get(holder)?.end ?? 0, end), revoked: false });
+            holders.set(holder, { end: Math.max(holders.get(holder)?.end ?? 0, end), revoked: false, lease: ++this.grants });
         }
         this.sweep(now);
         return ms;
@@ -206,7 +208,10 @@ export class ReadLeases {
             end = Math.max(end, l.end);
         return end;
     }
-    /** The named holders of leases on `key` a held write waits for and hasn't asked back yet; each is marked asked. */
+    /**
+     * The named holders of leases on `key` a held write waits for and hasn't asked back yet, each
+     * with the lease it is asked for (pass it to `returned`); each is marked asked.
+     */
     toRevoke(key) {
         const now = Date.now();
         const held = this.held.get(key);
@@ -217,19 +222,23 @@ export class ReadLeases {
             if (holder === UNNAMED || l.revoked || l.end <= now)
                 continue;
             l.revoked = true;
-            out.push(holder);
+            out.push({ holder, lease: l.lease });
         }
         return out;
     }
     /**
-     * `holder` gave its lease on `key` back: it ends `inMs` from now (when the sub-leases it gave
-     * are over, by its clock: plus the margin), or now if none are out, if that is sooner. Returns when a write held on `key` is shown now.
+     * The holder asked by `toRevoke` gave that lease on `key` back: it ends `inMs` from now (when
+     * the sub-leases it gave are over, by its clock: plus the margin), or now if none are out, if
+     * that is sooner. Returns when a write held on `key` is shown now.
+     *
+     * A later lease to the same holder is left alone: an answer can come back after the hold it was
+     * for is over, the holder has taken a new lease, and the next write waits for that one.
      */
-    returned(key, holder, inMs) {
+    returned(key, revoked, inMs) {
         const now = Date.now();
-        const l = this.leases.get(key)?.get(holder);
+        const l = this.leases.get(key)?.get(revoked.holder);
         // None out: the relay dropped the lease before it answered, so no clock is involved.
-        if (l)
+        if (l && l.lease === revoked.lease)
             l.end = Math.min(l.end, inMs > 0 ? now + inMs + READ_LEASE_MARGIN_MS : now);
         const held = this.held.get(key);
         if (!held)

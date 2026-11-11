@@ -34,6 +34,11 @@ export interface HeldKeys {
     /** A key's hold is over. */
     delete(key: string): void;
 }
+/** A lease a held write asks back: who holds it, and which grant it is. */
+export interface Revoked {
+    readonly holder: number;
+    readonly lease: number;
+}
 export declare class ReadLeases<Row> {
     /** Until then every write is held: leases granted before a restart may still run. */
     private readonly holdAllUntil;
@@ -50,6 +55,8 @@ export declare class ReadLeases<Row> {
      * asked back): when each ends by this source's clock (margin included), and whether it was asked back.
      */
     private readonly leases;
+    /** Numbers each grant, so a lease given back is told from a later one to the same holder. */
+    private grants;
     /** Keys with a held write: the row reads see until `until`. Each key is in `heldKeys` too. */
     private readonly held;
     /** When each key last changed (holdUntil sees every change): not leased to relays for WRITTEN_MS after. */
@@ -100,13 +107,20 @@ export declare class ReadLeases<Row> {
     };
     /** When the last lease out on `key` ends (0 if none). */
     private leaseEnd;
-    /** The named holders of leases on `key` a held write waits for and hasn't asked back yet; each is marked asked. */
-    toRevoke(key: string): number[];
     /**
-     * `holder` gave its lease on `key` back: it ends `inMs` from now (when the sub-leases it gave
-     * are over, by its clock: plus the margin), or now if none are out, if that is sooner. Returns when a write held on `key` is shown now.
+     * The named holders of leases on `key` a held write waits for and hasn't asked back yet, each
+     * with the lease it is asked for (pass it to `returned`); each is marked asked.
      */
-    returned(key: string, holder: number, inMs: number): number;
+    toRevoke(key: string): Revoked[];
+    /**
+     * The holder asked by `toRevoke` gave that lease on `key` back: it ends `inMs` from now (when
+     * the sub-leases it gave are over, by its clock: plus the margin), or now if none are out, if
+     * that is sooner. Returns when a write held on `key` is shown now.
+     *
+     * A later lease to the same holder is left alone: an answer can come back after the hold it was
+     * for is over, the holder has taken a new lease, and the next write waits for that one.
+     */
+    returned(key: string, revoked: Revoked, inMs: number): number;
     /**
      * Before a write to these keys is shown: when every lease on them is over. If that is later than
      * now, reads keep seeing `before` (each key's row before the write) until then.
