@@ -94,6 +94,16 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private shardFor;
     private stub;
     /**
+     * Calls a shard through the stub this client keeps for it, making one on first use: a client
+     * that calls a shard again does not open it again. A stub whose call throws is dropped, and the
+     * next call makes a new one. A client belongs to the request (or the Durable Object) that made
+     * it; if another request uses it, its kept stubs are that first request's and cannot be used, so
+     * the call is made again on a stub of this request's (nothing was sent on the other).
+     */
+    private onShard;
+    private keep;
+    private readonly stubs;
+    /**
      * Calls `method(keys, payloads, ...args)` on every shard owning some of the keys, with its share
      * of them (and of `payloads`, aligned with `keys`). One result per shard.
      */

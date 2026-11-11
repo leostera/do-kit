@@ -10,6 +10,8 @@ import { hostBits, shardObjectName, nodeName } from "./index.js";
  */
 const knownIds = new WeakMap();
 const MAX_KNOWN_IDS = 20_000;
+/** Stubs a client keeps, one per shard it called. */
+const MAX_KEPT_STUBS = 256;
 export function objectId(namespace, objectName) {
     let ids = knownIds.get(namespace);
     if (!ids)
@@ -187,6 +189,35 @@ export class ShardedClient {
         return this.stubOptions ? ns.get(id, this.stubOptions) : ns.get(id);
     }
     /**
+     * Calls a shard through the stub this client keeps for it, making one on first use: a client
+     * that calls a shard again does not open it again. A stub whose call throws is dropped, and the
+     * next call makes a new one. A client belongs to the request (or the Durable Object) that made
+     * it; if another request uses it, its kept stubs are that first request's and cannot be used, so
+     * the call is made again on a stub of this request's (nothing was sent on the other).
+     */
+    async onShard(bits, call) {
+        const kept = this.stubs.get(bits);
+        const stub = kept ?? this.keep(bits);
+        try {
+            return await call(stub);
+        }
+        catch (error) {
+            if (this.stubs.get(bits) === stub)
+                this.stubs.delete(bits);
+            if (kept && /different request/i.test(String(error)))
+                return call(this.keep(bits));
+            throw error;
+        }
+    }
+    keep(bits) {
+        const stub = this.stub(bits);
+        if (this.stubs.size >= MAX_KEPT_STUBS)
+            this.stubs.delete(this.stubs.keys().next().value);
+        this.stubs.set(bits, stub);
+        return stub;
+    }
+    stubs = new Map();
+    /**
      * Calls `method(keys, payloads, ...args)` on every shard owning some of the keys, with its share
      * of them (and of `payloads`, aligned with `keys`). One result per shard.
      */
@@ -235,7 +266,7 @@ export class ShardedClient {
                 const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
                 const called = Date.now();
                 const groupHashes = positions.map((i) => hashes[i]);
-                const answer = (await this.stub(bits).shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo, groupHashes));
+                const answer = (await this.onShard(bits, (stub) => stub.shardedCall(this.name, bits, method, groupKeys, groupPayloads, args, this.stubOptions, this.presplitTo, groupHashes)));
                 took.push(Date.now() - called);
                 if ("ok" in answer)
                     out.push({ keys: groupKeys, positions, result: answer.ok });
@@ -286,7 +317,7 @@ export class ShardedClient {
                     await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
                     return;
                 }
-                const answer = (await this.stub(bits).shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo));
+                const answer = (await this.onShard(bits, (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo)));
                 if ("ok" in answer)
                     out.push(answer.ok);
                 else if ("moved" in answer) {

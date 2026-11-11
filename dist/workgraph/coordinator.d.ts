@@ -22,6 +22,7 @@ export type NextAnswer =
     readonly attempt: number;
     readonly body: Uint8Array;
     readonly fresh?: boolean;
+    readonly cost?: number;
 } | {
     readonly wait: number;
 } | {

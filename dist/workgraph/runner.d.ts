@@ -10,6 +10,12 @@ export declare abstract class WorkGraphRunner<Env = unknown> extends DurableObje
     protected abstract tasks(): Readonly<Record<string, AnyTask<Env>>>;
     protected abstract coordinators(): DurableObjectNamespace<WorkGraphCoordinator<any>>;
     protected abstract results(): DurableObjectNamespace<WorkGraphResults<any>>;
+    /**
+     * How long one alarm invocation goes on taking chunks. Chunks that are small next to it run one
+     * after another in the same invocation; a chunk that costs more than what is left of it runs
+     * in the next. Keep it well under the CPU an invocation has, less a chunk.
+     */
+    protected invocationMs: number;
     /** Told to stop (in memory: a stop also wipes storage, so a later instance finds nothing). */
     private stopping;
     /** The alarm's work in progress, which a stop waits for. */
@@ -36,6 +42,12 @@ export declare abstract class WorkGraphRunner<Env = unknown> extends DurableObje
     /** Throws Stopping once the runner is told to stop: called before each write. */
     private live;
     private step;
+    /** The run's coordinator, through one stub for as long as its calls succeed. */
+    private coordinator;
+    private coordinatorStub;
+    /** The results store's client, kept: it keeps its stubs of the store's shards. */
+    private resultsStore;
+    private store;
     /**
      * Computes a chunk and makes its results durable; the report is recorded only after. A compute
      * that throws is reported as the chunk's failure. Anything else throws, and the alarm is retried.

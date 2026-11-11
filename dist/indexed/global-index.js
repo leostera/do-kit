@@ -29,7 +29,7 @@ export class GlobalIndex extends ShardedObject {
             throw new Error("a GlobalIndex routes entries by their index route: routeOf is not supported");
     }
     /** How long a reservation may stay pending before the alarm asks its row shard. */
-    reservationTimeoutMs = 5_000;
+    reservationTimeoutMs = 30_000;
     /** How long an entry a row let go of is kept, so a late older change cannot bring it back. */
     tombstoneMs = 60 * 60_000;
     migrated = false;
