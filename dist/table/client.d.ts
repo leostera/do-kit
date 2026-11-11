@@ -1,5 +1,5 @@
 import { type ShardedClientOptions } from "../sharded/client.js";
-import { type GroupCount, type ListPage, type ListQuery, type Position, type RowShape, type ShardPage, type TableSchema, type ShardPageRequest, type Versioned, type WriteResult } from "./schema.js";
+import { type GroupCount, type ListPage, type ListQuery, type RowShape, type ShardPage, type TableSchema, type ShardPageRequest, type Versioned, type WriteResult } from "./schema.js";
 /** The `table*` methods, as the client calls them through the sharded client. */
 interface TableMethods {
     tableGet(keys: readonly string[], payloads: null): Promise<(Versioned<RowShape> | null)[]>;
@@ -74,18 +74,9 @@ export declare class TableClient<Row extends RowShape> {
     protected byPosition<R>(keys: readonly string[], method: keyof TableMethods, payloads: readonly unknown[] | null): Promise<R[]>;
 }
 /**
- * Merges one page from every shard: every shard reported every match up to the smallest frontier,
- * so rows up to it are complete. Returns them in order, up to `limit`, and where the next page
- * starts (null: done).
- */
-export declare function mergePages(pages: readonly ShardPage[], request: Pick<ShardPageRequest, "limit" | "direction">): {
-    rows: ShardPage["rows"][number][];
-    next: Position | null;
-};
-/**
  * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
  * `schema` the table it declares (the client routes rows by its primary key).
  */
 export declare function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>, options?: ShardedClientOptions): TableClient<Row>;
-export {};
+export { mergePages } from "./schema.js";
 //# sourceMappingURL=client.d.ts.map

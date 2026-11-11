@@ -41,10 +41,19 @@ export function planWorkGraph(graph, options = {}) {
     // Hashes, rounds and the span, parents and after units first.
     const chainCost = new Map();
     let span = 0;
+    let rounds = 0;
     for (const n of order) {
+        if (n.unit.cost > chunkMs)
+            throw new Error(`unit ${n.unit.key} costs ${n.unit.cost}, over chunkMs (${chunkMs}): a unit is never cut, so its chunk could not fit one invocation. Raise chunkMs, or make the unit smaller`);
         n.hash = byKey ? unitKeyHash(n.unit.task, n.unit.version, n.unit.key) : unitHash(n.unit.task, n.unit.version, n.unit.input, n.parent?.hash ?? null, Object.fromEntries(n.after.map((a) => [a.name, a.node.hash])));
-        n.round = Math.max(n.parent?.round ?? 0, ...n.after.map((a) => a.node.round + 1));
-        const before = Math.max(n.parent ? chainCost.get(n.parent) : 0, ...n.after.map((a) => chainCost.get(a.node)));
+        // Loops, not spreads into Math.max: a unit may run after more units than a call takes arguments.
+        n.round = n.parent?.round ?? 0;
+        let before = n.parent ? chainCost.get(n.parent) : 0;
+        for (const a of n.after) {
+            n.round = Math.max(n.round, a.node.round + 1);
+            before = Math.max(before, chainCost.get(a.node));
+        }
+        rounds = Math.max(rounds, n.round + 1);
         chainCost.set(n, before + n.unit.cost);
         span = Math.max(span, before + n.unit.cost);
     }
@@ -65,8 +74,13 @@ export function planWorkGraph(graph, options = {}) {
     }
     // Packing, per round: pieces that load are chunks of their own; the rest, first-fit decreasing.
     const byRound = new Map();
-    for (const p of pieces)
-        byRound.set(p.root.round, [...(byRound.get(p.root.round) ?? []), p]);
+    for (const p of pieces) {
+        const list = byRound.get(p.root.round);
+        if (list)
+            list.push(p);
+        else
+            byRound.set(p.root.round, [p]);
+    }
     const bins = [];
     for (const round of [...byRound.keys()].sort((a, b) => a - b)) {
         const open = [];
@@ -132,7 +146,7 @@ export function planWorkGraph(graph, options = {}) {
             throw new Error(`unit ${node.key} is not in this plan`);
         return hash;
     };
-    return { chunks, hashes, hashOf, work: units.reduce((sum, u) => sum + u.cost, 0), span, chunkSpan: chunkSpanOf(chunks), replayed, rounds: Math.max(0, ...nodes.map((n) => n.round)) + 1 };
+    return { chunks, hashes, hashOf, work: units.reduce((sum, u) => sum + u.cost, 0), span, chunkSpan: chunkSpanOf(chunks), replayed, rounds: Math.max(1, rounds) };
 }
 function indexUnits(units) {
     const byKey = new Map();
@@ -166,8 +180,13 @@ function topological(nodes) {
     for (const n of nodes) {
         const deps = [...(n.parent ? [n.parent] : []), ...n.after.map((a) => a.node)];
         waiting.set(n, deps.length);
-        for (const d of deps)
-            dependents.set(d, [...(dependents.get(d) ?? []), n]);
+        for (const d of deps) {
+            const list = dependents.get(d);
+            if (list)
+                list.push(n);
+            else
+                dependents.set(d, [n]);
+        }
     }
     const ready = nodes.filter((n) => waiting.get(n) === 0);
     const order = [];
@@ -204,18 +223,22 @@ function cutTree(root, chunkMs, maxUnits) {
                 stack.push([c, false]);
             continue;
         }
-        const children = [...n.children];
-        let cost = n.unit.cost + children.reduce((s, c) => s + weight.get(c).cost, 0);
-        let units = 1 + children.reduce((s, c) => s + weight.get(c).units, 0);
-        while ((cost > chunkMs || units > maxUnits) && children.length) {
-            let heaviest = 0;
-            for (let i = 1; i < children.length; i++)
-                if (weight.get(children[i]).cost > weight.get(children[heaviest]).cost)
-                    heaviest = i;
-            const [cut] = children.splice(heaviest, 1);
-            pieces.push(members(cut, kept));
-            cost -= weight.get(cut).cost;
-            units -= weight.get(cut).units;
+        let cost = n.unit.cost + n.children.reduce((s, c) => s + weight.get(c).cost, 0);
+        let units = 1 + n.children.reduce((s, c) => s + weight.get(c).units, 0);
+        let children = n.children;
+        if (cost > chunkMs || units > maxUnits) {
+            // Heaviest first (the first of equals), sorted once: a unit may have very many children.
+            const byWeight = [...n.children].sort((a, b) => weight.get(b).cost - weight.get(a).cost);
+            const cut = new Set();
+            for (const c of byWeight) {
+                if (cost <= chunkMs && units <= maxUnits)
+                    break;
+                cut.add(c);
+                pieces.push(members(c, kept));
+                cost -= weight.get(c).cost;
+                units -= weight.get(c).units;
+            }
+            children = n.children.filter((c) => !cut.has(c));
         }
         kept.set(n, children);
         weight.set(n, { cost, units });
@@ -278,15 +301,23 @@ function chunkSpanOf(chunks) {
     const left = new Map();
     for (const c of chunks) {
         left.set(c.id, c.needs.length);
-        for (const n of c.needs)
-            neededBy.set(n, [...(neededBy.get(n) ?? []), c.id]);
+        for (const n of c.needs) {
+            const list = neededBy.get(n);
+            if (list)
+                list.push(c.id);
+            else
+                neededBy.set(n, [c.id]);
+        }
     }
     const finish = new Map();
     const ready = chunks.filter((c) => c.needs.length === 0).map((c) => c.id);
     let span = 0;
     while (ready.length) {
         const c = byId.get(ready.pop());
-        const end = Math.max(0, ...c.needs.map((n) => finish.get(n))) + c.cost;
+        let end = 0;
+        for (const n of c.needs)
+            end = Math.max(end, finish.get(n));
+        end += c.cost;
         finish.set(c.id, end);
         span = Math.max(span, end);
         for (const d of neededBy.get(c.id) ?? []) {

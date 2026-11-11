@@ -38,6 +38,14 @@ export declare class ReadLeases<Row> {
      * less than MIN_LEASE_MS: the hold is never made longer.
      */
     grant(keys: readonly string[], holder?: number): number;
+    /**
+     * Forgets the keys whose leases are all over, at most once a lease's length: a key leased once
+     * and never again would otherwise stay here for as long as the source runs.
+     */
+    private sweep;
+    private sweptAt;
+    /** How many keys have a lease on record (for tests and operators). */
+    get leasedKeys(): number;
     /** What a held write on `key` waits for (ms from now): the latest named and unnamed lease, and the restart hold. For logs. */
     waitsOn(key: string): {
         named: number;

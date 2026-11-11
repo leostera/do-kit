@@ -1,6 +1,6 @@
 // The client of a sharded table: routes rows by key and merges listing pages from every shard.
 import { sharded } from "../sharded/client.js";
-import { comparePositions, decodeCursor, encodeCursor, pageRequest, queryFingerprint, } from "./schema.js";
+import { mergePages, decodeCursor, encodeCursor, pageRequest, queryFingerprint, } from "./schema.js";
 /** Rounds of shard calls one page may take to fill up, when shards returned less than needed. */
 const MAX_ROUNDS = 3;
 /**
@@ -123,38 +123,11 @@ function sumGroups(perShard) {
     return [...sums.values()].filter((c) => c.count !== 0);
 }
 /**
- * Merges one page from every shard: every shard reported every match up to the smallest frontier,
- * so rows up to it are complete. Returns them in order, up to `limit`, and where the next page
- * starts (null: done).
- */
-export function mergePages(pages, request) {
-    const cmp = (a, b) => comparePositions(a, b, request.direction);
-    let frontier = null;
-    for (const page of pages)
-        if (page.frontier && (!frontier || cmp(page.frontier, frontier) < 0))
-            frontier = page.frontier;
-    const seen = new Set();
-    const complete = pages
-        .flatMap((p) => p.rows)
-        .filter((r) => frontier === null || cmp(r.position, frontier) <= 0)
-        .filter((r) => {
-        // A key reported by two shards in one page (one before a split committed, one after).
-        if (seen.has(r.key))
-            return false;
-        seen.add(r.key);
-        return true;
-    })
-        .sort((a, b) => cmp(a.position, b.position));
-    const rows = complete.slice(0, request.limit);
-    if (rows.length === request.limit && (complete.length > request.limit || frontier !== null))
-        return { rows, next: rows.at(-1).position };
-    return { rows, next: frontier };
-}
-/**
  * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
  * `schema` the table it declares (the client routes rows by its primary key).
  */
 export function table(namespace, name, schema, options = {}) {
     return new TableClient(namespace, name, schema, options);
 }
+export { mergePages } from "./schema.js";
 //# sourceMappingURL=client.js.map

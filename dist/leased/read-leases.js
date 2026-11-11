@@ -88,7 +88,29 @@ export class ReadLeases {
                     holders.delete(h);
             holders.set(holder, { end: Math.max(holders.get(holder)?.end ?? 0, end), revoked: false });
         }
+        this.sweep(now);
         return ms;
+    }
+    /**
+     * Forgets the keys whose leases are all over, at most once a lease's length: a key leased once
+     * and never again would otherwise stay here for as long as the source runs.
+     */
+    sweep(now) {
+        if (now - this.sweptAt < READ_LEASE_MS)
+            return;
+        this.sweptAt = now;
+        for (const [key, holders] of this.leases) {
+            for (const [h, l] of holders)
+                if (l.end <= now)
+                    holders.delete(h);
+            if (holders.size === 0)
+                this.leases.delete(key);
+        }
+    }
+    sweptAt = 0;
+    /** How many keys have a lease on record (for tests and operators). */
+    get leasedKeys() {
+        return this.leases.size;
     }
     /** What a held write on `key` waits for (ms from now): the latest named and unnamed lease, and the restart hold. For logs. */
     waitsOn(key) {

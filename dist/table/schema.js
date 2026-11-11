@@ -202,4 +202,33 @@ export function decodeCursor(cursor, fingerprint) {
         throw new Error("not a cursor of this table");
     return p;
 }
+/**
+ * Merges one page from every shard: every shard reported every match up to the smallest frontier,
+ * so rows up to it are complete. Returns them in order, up to `limit`, and where the next page
+ * starts (null: done).
+ */
+export function mergePages(pages, request) {
+    const cmp = (a, b) => comparePositions(a, b, request.direction);
+    let frontier = null;
+    // (null, not falsy: the empty string is a position, that of a row whose key is "".)
+    for (const page of pages)
+        if (page.frontier !== null && (frontier === null || cmp(page.frontier, frontier) < 0))
+            frontier = page.frontier;
+    const seen = new Set();
+    const complete = pages
+        .flatMap((p) => p.rows)
+        .filter((r) => frontier === null || cmp(r.position, frontier) <= 0)
+        .filter((r) => {
+        // A key reported by two shards in one page (one before a split committed, one after).
+        if (seen.has(r.key))
+            return false;
+        seen.add(r.key);
+        return true;
+    })
+        .sort((a, b) => cmp(a.position, b.position));
+    const rows = complete.slice(0, request.limit);
+    if (rows.length === request.limit && (complete.length > request.limit || frontier !== null))
+        return { rows, next: rows.at(-1).position };
+    return { rows, next: frontier };
+}
 //# sourceMappingURL=schema.js.map

@@ -243,11 +243,12 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private callerStubOptions;
     /** Whether this object's tables exist: they are made by its first write, not by every visit. */
     private schemaReady;
-    /** Wiped (shardedWipe) in this instance: it answers nothing more, so nothing writes here again. */
-    private wiped;
+    /** When this instance was wiped (shardedWipe): it refuses calls for WIPED_REFUSE_MS after. */
+    private wipedAt;
     constructor(ctx: DurableObjectState, env: Env);
     private ensureSchema;
     private assertNotWiped;
+    private get wiped();
     /** The current rows of these keys (absent keys are missing from the map). */
     protected read(keys: readonly string[]): Promise<Map<string, V>>;
     /**
@@ -444,6 +445,8 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      */
     private checkAlarm;
     private alarmCheckedAt;
+    /** While onAlarm runs: the earliest time it (or a call meanwhile) asked for, or null. Else undefined. */
+    private onAlarmAsked;
     /** When the subclass asked for `onAlarm`, if it did. */
     private loadWake;
     private saveWake;
@@ -459,7 +462,7 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     /** Schedules this object's storage to be replaced by the snapshot, then restarts to apply it. */
     /** Nothing: a split calls it first to start this object, before it holds writes. */
     shardedWarm(): Promise<void>;
-    shardedRestore(snapshot: DurableObjectSnapshot): Promise<{
+    shardedRestore(snapshot: DurableObjectSnapshot, epoch?: number): Promise<{
         scheduleMs: number;
     }>;
     /**
@@ -481,6 +484,14 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     shardedReceive(_name: string, _bits: string, epoch: number, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void>;
     /** The logical copy is complete: it holds the source's meta, from this split. */
     shardedReceiveDone(name: string, bits: string, epoch: number): Promise<boolean>;
+    /**
+     * Refuses the copy of split attempt `epoch` if this object holds one at least as new. A claimed
+     * copy may be all there is of its half (its parent stops owning the half once the claim
+     * answers), so a message of an older attempt that arrives late must not replace it; nor may it
+     * replace a newer attempt's copy that is about to be claimed. (`epoch` undefined: a caller from
+     * before attempts were sent.)
+     */
+    private refuseOlderAttempt;
     /** Storage copied verbatim from a splitting object and not claimed yet: it is not this object's. */
     private isUnclaimedCopy;
     /**

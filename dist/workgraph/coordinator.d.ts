@@ -43,6 +43,11 @@ export interface StartOptions {
     readonly leaseMs?: number;
     /** A chunk whose compute fails this many times fails the run (default 3). */
     readonly maxAttempts?: number;
+    /**
+     * A chunk whose lease runs out after it was leased this many times fails the run (default 5): its
+     * runners never report, as when the chunk needs more CPU than an invocation has.
+     */
+    readonly maxLeases?: number;
     /** A runner that has not called for this long is woken while work remains (default 30 s). */
     readonly wakeAfterMs?: number;
     /** How often the alarm checks leases and runners (default 5 s). */
@@ -158,8 +163,12 @@ export declare abstract class WorkGraphCoordinator<Env = unknown> extends Durabl
     private wipe;
     /** Leases that ran out go back to ready, quiet runners are woken, and the deadline is kept; once the run ends, its cleanup. */
     alarm(): Promise<void>;
-    private waitingRunners;
-    /** Wakes the runners told to wait, so a chunk that just became ready does not wait for their poll. */
+    /** Up to `count` runners told to wait, no longer marked waiting: one for each chunk there is to take. */
+    private takeWaiting;
+    /**
+     * Wakes as many waiting runners as chunks just became ready, so a ready chunk does not wait for
+     * a poll, and a runner with nothing to take is not woken for it. (The others poll.)
+     */
     private wakeWaiting;
     private resultsStore;
     private runner;

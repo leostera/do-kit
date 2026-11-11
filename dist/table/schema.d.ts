@@ -149,4 +149,13 @@ export declare function queryFingerprint(request: Pick<ShardPageRequest, "index"
 export declare function shortDigest(text: string): string;
 export declare function encodeCursor(fingerprint: string, position: Position): string;
 export declare function decodeCursor(cursor: string, fingerprint: string): Position;
+/**
+ * Merges one page from every shard: every shard reported every match up to the smallest frontier,
+ * so rows up to it are complete. Returns them in order, up to `limit`, and where the next page
+ * starts (null: done).
+ */
+export declare function mergePages(pages: readonly ShardPage[], request: Pick<ShardPageRequest, "limit" | "direction">): {
+    rows: ShardPage["rows"][number][];
+    next: Position | null;
+};
 //# sourceMappingURL=schema.d.ts.map

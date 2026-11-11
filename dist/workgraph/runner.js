@@ -31,8 +31,17 @@ export class WorkGraphRunner extends DurableObject {
     }
     /** After computing a chunk, before writing its results (tests throw here, as an eviction would). */
     async chunkComputed(_run, _index, _chunk, _attempt) { }
-    /** Starts pulling chunks of run `run` as runner `index`, writing results to the store `results`. */
-    async graphRun(run, index, results) {
+    /**
+     * Starts pulling chunks of run `run` as runner `index`, writing results to the store `results`.
+     * With `ensure` (the coordinator's alarm, for a runner gone quiet): starts it only if its start
+     * never reached it, and otherwise wakes it, keeping the chunk it has to report.
+     */
+    async graphRun(run, index, results, ensure = false) {
+        // A run's name may be used again after it was stopped and wiped here.
+        this.stopping = false;
+        const state = await this.ctx.storage.get("state");
+        if (ensure && state?.run === run)
+            return this.graphWake();
         await this.ctx.storage.put("state", { run, index, results, stopped: false });
         await this.ctx.storage.delete("finished");
         await this.ctx.storage.setAlarm(Date.now());

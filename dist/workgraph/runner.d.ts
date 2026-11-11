@@ -18,8 +18,12 @@ export declare abstract class WorkGraphRunner<Env = unknown> extends DurableObje
     protected chunkStarting(_run: string, _index: number, _chunk: number, _attempt: number): Promise<"run" | "abandon">;
     /** After computing a chunk, before writing its results (tests throw here, as an eviction would). */
     protected chunkComputed(_run: string, _index: number, _chunk: number, _attempt: number): Promise<void>;
-    /** Starts pulling chunks of run `run` as runner `index`, writing results to the store `results`. */
-    graphRun(run: string, index: number, results: string): Promise<void>;
+    /**
+     * Starts pulling chunks of run `run` as runner `index`, writing results to the store `results`.
+     * With `ensure` (the coordinator's alarm, for a runner gone quiet): starts it only if its start
+     * never reached it, and otherwise wakes it, keeping the chunk it has to report.
+     */
+    graphRun(run: string, index: number, results: string, ensure?: boolean): Promise<void>;
     /**
      * Stops for good: waits for the chunk in hand to stop (it writes nothing more), then deletes this
      * runner's storage and alarm. Idempotent, and it makes nothing on a runner that holds nothing.
