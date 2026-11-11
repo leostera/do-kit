@@ -5,6 +5,6 @@
 // shown and acknowledged only once every lease on it is over or given back, so a read never misses
 // an acknowledged write and never goes back. These are the pieces a source and its relays embed;
 // the objects, their storage and their calls are the app's.
-export { MIN_LEASE_MS, READ_LEASE_MARGIN_MS, READ_LEASE_MS, RENEW_MS, ReadLeases, WRITTEN_MS, type Change, type HeldKey, type HeldKeys } from "./read-leases.js";
+export { MIN_LEASE_MS, READ_LEASE_MARGIN_MS, READ_LEASE_MS, RENEW_MS, ReadLeases, WRITTEN_MS, type Change, type HeldKey, type HeldKeys, type Revoked } from "./read-leases.js";
 export { HOT_READS, MAX_RELAYS, RELAY_FANOUT, RELAY_READS, RelayPlan, relayIndex, relayParent } from "./relay-plan.js";
 export { QUIET_MS, RelayReads, type SourceAnswer, type RelayAnswer } from "./relay-reads.js";

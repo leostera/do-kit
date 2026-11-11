@@ -69,6 +69,12 @@ export interface HeldKeys {
   delete(key: string): void;
 }
 
+/** A lease a held write asks back: who holds it, and which grant it is. */
+export interface Revoked {
+  readonly holder: number;
+  readonly lease: number;
+}
+
 export class ReadLeases<Row> {
   /** Until then every write is held: leases granted before a restart may still run. */
   private readonly holdAllUntil: number;
@@ -84,7 +90,9 @@ export class ReadLeases<Row> {
    * The leases out on each key, by holder (a relay's index; UNNAMED for holders that can't be
    * asked back): when each ends by this source's clock (margin included), and whether it was asked back.
    */
-  private readonly leases = new Map<string, Map<number, { end: number; revoked: boolean }>>();
+  private readonly leases = new Map<string, Map<number, { end: number; revoked: boolean; lease: number }>>();
+  /** Numbers each grant, so a lease given back is told from a later one to the same holder. */
+  private grants = 0;
   /** Keys with a held write: the row reads see until `until`. Each key is in `heldKeys` too. */
   private readonly held = new Map<string, { row: Row | undefined; until: number }>();
   /** When each key last changed (holdUntil sees every change): not leased to relays for WRITTEN_MS after. */
@@ -149,7 +157,7 @@ export class ReadLeases<Row> {
       let holders = this.leases.get(key);
       if (!holders) this.leases.set(key, (holders = new Map()));
       for (const [h, l] of holders) if (l.end <= now) holders.delete(h);
-      holders.set(holder, { end: Math.max(holders.get(holder)?.end ?? 0, end), revoked: false });
+      holders.set(holder, { end: Math.max(holders.get(holder)?.end ?? 0, end), revoked: false, lease: ++this.grants });
     }
     this.sweep(now);
     return ms;
@@ -223,29 +231,36 @@ export class ReadLeases<Row> {
     return end;
   }
 
-  /** The named holders of leases on `key` a held write waits for and hasn't asked back yet; each is marked asked. */
-  toRevoke(key: string): number[] {
+  /**
+   * The named holders of leases on `key` a held write waits for and hasn't asked back yet, each
+   * with the lease it is asked for (pass it to `returned`); each is marked asked.
+   */
+  toRevoke(key: string): Revoked[] {
     const now = Date.now();
     const held = this.held.get(key);
     if (!held || held.until <= now) return [];
-    const out: number[] = [];
+    const out: Revoked[] = [];
     for (const [holder, l] of this.leases.get(key) ?? []) {
       if (holder === UNNAMED || l.revoked || l.end <= now) continue;
       l.revoked = true;
-      out.push(holder);
+      out.push({ holder, lease: l.lease });
     }
     return out;
   }
 
   /**
-   * `holder` gave its lease on `key` back: it ends `inMs` from now (when the sub-leases it gave
-   * are over, by its clock: plus the margin), or now if none are out, if that is sooner. Returns when a write held on `key` is shown now.
+   * The holder asked by `toRevoke` gave that lease on `key` back: it ends `inMs` from now (when
+   * the sub-leases it gave are over, by its clock: plus the margin), or now if none are out, if
+   * that is sooner. Returns when a write held on `key` is shown now.
+   *
+   * A later lease to the same holder is left alone: an answer can come back after the hold it was
+   * for is over, the holder has taken a new lease, and the next write waits for that one.
    */
-  returned(key: string, holder: number, inMs: number): number {
+  returned(key: string, revoked: Revoked, inMs: number): number {
     const now = Date.now();
-    const l = this.leases.get(key)?.get(holder);
+    const l = this.leases.get(key)?.get(revoked.holder);
     // None out: the relay dropped the lease before it answered, so no clock is involved.
-    if (l) l.end = Math.min(l.end, inMs > 0 ? now + inMs + READ_LEASE_MARGIN_MS : now);
+    if (l && l.lease === revoked.lease) l.end = Math.min(l.end, inMs > 0 ? now + inMs + READ_LEASE_MARGIN_MS : now);
     const held = this.held.get(key);
     if (!held) return now;
     const until = Math.min(held.until, Math.max(now, this.leaseEnd(key), this.holdAllUntil));

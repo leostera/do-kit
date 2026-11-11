@@ -108,14 +108,15 @@ describe("leases asked back", () => {
     at(100);
     const shownAt = leases.holdUntil([{ key: "main", before: "old" }]);
     expect(shownAt).toBe(T0 + READ_LEASE_MS + READ_LEASE_MARGIN_MS);
-    expect(leases.toRevoke("main").sort()).toEqual([0, 3]);
+    const asked = leases.toRevoke("main").sort((a, b) => a.holder - b.holder);
+    expect(asked.map((r) => r.holder)).toEqual([0, 3]);
     // Asked already: a second push held meanwhile doesn't ask again.
     expect(leases.toRevoke("main")).toEqual([]);
     // One gave it back with no sub-lease out: the other still holds the push.
-    expect(leases.returned("main", 0, 0)).toBe(shownAt);
+    expect(leases.returned("main", asked[0]!, 0)).toBe(shownAt);
     expect(leases.visible("main", "new")).toBe("old");
     // Both gave it back with no sub-lease out: shown now, not when the leases would have ended.
-    expect(leases.returned("main", 3, 0)).toBe(T0 + 100);
+    expect(leases.returned("main", asked[1]!, 0)).toBe(T0 + 100);
     expect(leases.visible("main", "new")).toBe("new");
   });
 
@@ -136,8 +137,27 @@ describe("leases asked back", () => {
     leases.grant(["main"], 0);
     expect(leases.toRevoke("main")).toEqual([]);
     leases.holdUntil([{ key: "main", before: "old" }]);
-    leases.toRevoke("main");
-    expect(leases.returned("main", 0, 200)).toBe(T0 + 200 + READ_LEASE_MARGIN_MS);
+    const [asked] = leases.toRevoke("main");
+    expect(leases.returned("main", asked!, 200)).toBe(T0 + 200 + READ_LEASE_MARGIN_MS);
+  });
+
+  test("an answer that comes back after a later lease to the same relay leaves that lease alone", () => {
+    at(0);
+    const leases = leaf();
+    leases.grant(["main"], 0);
+    leases.holdUntil([{ key: "main", before: "v0" }]);
+    const [asked] = leases.toRevoke("main");
+    // The relay's answer is slow: the hold ends with the lease, the push is shown, and once main is
+    // no longer written to the relay leases again.
+    at(READ_LEASE_MS + READ_LEASE_MARGIN_MS);
+    expect(leases.visible("main", "v1")).toBe("v1");
+    at(WRITTEN_MS);
+    expect(leases.grant(["main"], 0)).toBe(READ_LEASE_MS);
+    const newEnd = T0 + WRITTEN_MS + READ_LEASE_MS + READ_LEASE_MARGIN_MS;
+    // The answer about the first lease arrives: the relay still serves v1 from the second one.
+    leases.returned("main", asked!, 0);
+    expect(leases.holdUntil([{ key: "main", before: "v1" }])).toBe(newEnd);
+    expect(leases.visible("main", "v2")).toBe("v1");
   });
 });
 
@@ -311,7 +331,8 @@ describe("a source restarted while a write is held", () => {
     leases.holdUntil([{ key: "main", before: "old" }]);
     at(50);
     // Every lease on main is over now, so nothing is left for a restart to wait for.
-    expect(leases.returned("main", 0, 0)).toBe(T0 + 50);
+    const [asked] = leases.toRevoke("main");
+    expect(leases.returned("main", asked!, 0)).toBe(T0 + 50);
     expect(held.load()).toEqual([]);
     at(60);
     expect(new ReadLeases<string>(horizons.at(-1)!, () => {}, held).readableAt(["main"])).toBeLessThanOrEqual(T0 + 60);
@@ -325,7 +346,8 @@ describe("a source restarted while a write is held", () => {
     leases.grant(["main"], 0);
     const first = leases.holdUntil([{ key: "main", before: "old" }]);
     at(50);
-    const shownAt = leases.returned("main", 0, 200);
+    const [asked] = leases.toRevoke("main");
+    const shownAt = leases.returned("main", asked!, 200);
     expect(shownAt).toBeLessThan(first);
     expect(held.load()).toEqual([{ key: "main", until: shownAt }]);
     at(60);
