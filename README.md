@@ -296,9 +296,10 @@ readers ──► isolate sub-lease ──► relay (lease from the source, rene
   the holder ending 150 ms early by its own, so only clock rates must agree), holds a write to a
   leased key until its leases are over or given back, and asks named holders to give them back.
   Before granting, it stores how far its leases may reach, so a restarted source holds every
-  write until then. The row reads see while a write is held is stored too, through the source's
-  `HeldRows` (three synchronous calls over its own storage): call `holdUntil` in the transaction
-  that commits the write, and a restarted source goes on showing what it showed. A key written in the last `WRITTEN_MS` (10 s) isn't leased to relays: they
+  write until then. The keys with a held write are stored too, through the source's `HeldKeys`
+  (three synchronous calls over its own storage): call `holdUntil` in the transaction that
+  commits the write, and wait until `readableAt(keys)` before answering a read, so a restarted
+  source answers no read of a key it was holding a write on until every lease from before is over. A key written in the last `WRITTEN_MS` (10 s) isn't leased to relays: they
   read it through, so a lease never holds the next write.
 - **`RelayReads<V>`**, in a relay: answers from its lease and renews it early; without one, asks
   share a source read that started after they arrived. `fresh()` is a value at least as new as

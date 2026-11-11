@@ -433,18 +433,29 @@ either accept stale reads or build this themselves.
 
 - **A held write across a restart (fixed).** The built pieces (`ReadLeases`) commit a write at
   once and show the row from before it until the leases on its key end: the overlay alternative,
-  not the waiting write this RFD proposes. That row was kept only in memory, so a source restarted
-  while a write was held lost it. It then showed the write, while relays whose leases were granted
-  before the restart still answered with the row from before it: for up to one lease, a read could
-  go back.
+  not the waiting write this RFD proposes. That row is in memory, so a source restarted while a
+  write is held has lost it. It then showed the write, while relays whose leases were granted
+  before the restart still answered with the row from before it: for up to one lease, a read
+  could go back.
 
-  The row is now stored. `ReadLeases` takes the source's `HeldRows` (`load`, `put`, `delete`,
-  synchronous), writes each hold's row and end as it sets them, and loads them when the source
-  starts. A source calls `holdUntil` in the transaction that commits the write, so the write and
-  the row from before it are stored together. A restored hold ends when it would have: by then
-  every lease on its key is over. The other choice, reads waiting out the horizon after a restart
-  as writes do, was passed over: the horizon is stored up to 5 s ahead, so every restart of a
-  source with leases out (each deploy) would stall its reads for seconds.
+  A restarted source can't decide by its clock whether such a hold is over: it may run on another
+  machine, `RESTART_SKEW_MS` ahead or behind. Ahead, it would end a restored hold while a lease
+  still runs; holding longer to allow for that would hide a write acknowledged just before the
+  restart. So it doesn't answer until it is sure:
+
+  - `ReadLeases` takes the source's `HeldKeys` (`load`, `put`, `delete`, synchronous) and stores
+    each key with a held write and the hold's end, as it sets them. A source calls `holdUntil` in
+    the transaction that commits the write, so the two are stored together.
+  - A restarted source loads them, and `readableAt(keys)` says when reads of those keys may be
+    answered: the stored end plus the skew. The source waits until then before `visible` and
+    `grant`, then shows the write. Other keys are read at once.
+  - A key is deleted from storage when its hold is over (read, swept, or its leases given back),
+    unless a restart's wait on it still runs.
+
+  A first fix stored the row and restored the hold as it was; a model with a restart on a faster
+  clock showed a read still going back. Making every read wait out the horizon after a restart, as
+  writes do, was passed over: the horizon is stored up to 5 s ahead, so each restart of a source
+  with leases out would stall all its reads for seconds, not only those of the keys being written.
 
 - How a `LeaseRelay` subclass reads values of a `ShardedTable`: decoded rows, or the stored form.
 - Whether the client fixes one `draw` per isolate, or one per key, to spread isolates better over

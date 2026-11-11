@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
-import { MIN_LEASE_MS, WRITTEN_MS, READ_LEASE_MARGIN_MS, READ_LEASE_MS, ReadLeases, RENEW_MS, type HeldRow, type HeldRows } from "../src/leased/read-leases.ts";
+import { MIN_LEASE_MS, WRITTEN_MS, READ_LEASE_MARGIN_MS, READ_LEASE_MS, ReadLeases, RENEW_MS, type HeldKey, type HeldKeys } from "../src/leased/read-leases.ts";
 
 const T0 = new Date("2026-01-01T00:00:00Z").getTime();
 const at = (ms: number) => setSystemTime(new Date(T0 + ms));
 afterEach(() => setSystemTime());
 
-/** A source's storage for held rows, as a Durable Object's SQLite would keep them: it outlives the ReadLeases. */
-function storage<Row = string>(): HeldRows<Row> {
-  const rows = new Map<string, HeldRow<Row>>();
+/** A source's storage for its held keys, as a Durable Object's SQLite would keep them: it outlives the ReadLeases. */
+function storage(): HeldKeys {
+  const rows = new Map<string, HeldKey>();
   return { load: () => [...rows.values()], put: (held) => void rows.set(held.key, held), delete: (key) => void rows.delete(key) };
 }
 
 /** A fresh leaf (no lease horizon stored). */
-function leaf(horizons: number[] = [], held: HeldRows<string> = storage()) {
+function leaf(horizons: number[] = [], held: HeldKeys = storage()) {
   return new ReadLeases<string>(0, (h) => horizons.push(h), held);
 }
 function makeHot(leases: ReadLeases<string>, name: string): number {
@@ -90,7 +90,7 @@ describe("read leases", () => {
 
 test("holdsAny is true while a push waits for a lease, and false once the lease is over", () => {
   at(0);
-  const leases = new ReadLeases<number>(0, () => {}, storage<number>());
+  const leases = new ReadLeases<number>(0, () => {}, storage());
   expect(leases.grant(["main"])).toBe(READ_LEASE_MS);
   expect(leases.holdsAny()).toBe(false);
   expect(leases.holdUntil([{ key: "main", before: 1 }])).toBe(T0 + READ_LEASE_MS + READ_LEASE_MARGIN_MS);
@@ -175,10 +175,14 @@ test("keys whose leases are over are forgotten, not kept for as long as the sour
 });
 
 // A write commits at once; until the leases on its key are over, reads see the row from before
-// it. That row must outlive the source: relays holding leases from before a restart still answer
-// with it, so a source that forgot it would show the write first, and a later read through a
-// relay would go back.
+// it, kept in memory. A restarted source has lost that row, and can't tell by its clock (it may
+// be on another machine, RESTART_SKEW_MS off) whether the hold is over: holders with leases from
+// before the restart may still answer with the row from before the write. So the keys with a held
+// write are stored, and a restarted source answers no read of them until their holds, plus the
+// skew, have passed. Then it shows the write. A read that waits is never wrong; one answered
+// early could show the write before a holder shows the row from before it.
 describe("a source restarted while a write is held", () => {
+  const SKEW = 1000;
   /** A source with a lease out on main and a write held on it; its storage and stored horizon. */
   function stopped() {
     at(0);
@@ -189,41 +193,116 @@ describe("a source restarted while a write is held", () => {
     const shownAt = leases.holdUntil([{ key: "main", before: "old" }]);
     return { held, horizon: horizons.at(-1)!, shownAt };
   }
-  const restarted = (s: { held: HeldRows<string>; horizon: number }) => new ReadLeases<string>(s.horizon, () => {}, s.held);
+  const restarted = (s: { held: HeldKeys; horizon: number }) => new ReadLeases<string>(s.horizon, () => {}, s.held);
 
-  test("keeps showing the row from before it, until the hold it had ends", () => {
+  test("answers no read of the key until the hold it had, plus the skew, has passed; then shows the write", () => {
     const s = stopped();
     at(100);
     const leases = restarted(s);
-    expect(leases.visible("main", "new")).toBe("old");
-    expect(leases.holdsAny()).toBe(true);
-    expect(leases.shownAt("main")).toBe(s.shownAt);
-    setSystemTime(new Date(s.shownAt));
+    expect(leases.readableAt(["main"])).toBe(s.shownAt + SKEW);
+    // Other keys are read at once.
+    expect(leases.readableAt(["side"])).toBeLessThanOrEqual(T0 + 100);
+    expect(leases.readableAt(["side", "main"])).toBe(s.shownAt + SKEW);
+    setSystemTime(new Date(s.shownAt + SKEW));
+    expect(leases.readableAt(["main"])).toBeLessThanOrEqual(s.shownAt + SKEW);
     expect(leases.visible("main", "new")).toBe("new");
   });
 
-  test("a row that did not exist before the write is kept as such", () => {
+  test("a read of every key waits for the last of them", () => {
     at(0);
     const held = storage();
-    const leases = leaf([], held);
-    makeHot(leases, "main");
-    leases.holdUntil([{ key: "main", before: undefined }]);
-    expect(new ReadLeases<string>(T0 + 5000, () => {}, held).visible("main", "new")).toBeUndefined();
+    const horizons: number[] = [];
+    const leases = leaf(horizons, held);
+    leases.grant(["a"]);
+    const first = leases.holdUntil([{ key: "a", before: "1" }]);
+    at(300);
+    leases.grant(["b"]);
+    const second = leases.holdUntil([{ key: "b", before: "1" }]);
+    expect(second).toBeGreaterThan(first);
+    at(400);
+    const leasesAfter = new ReadLeases<string>(horizons.at(-1)!, () => {}, held);
+    expect(leasesAfter.readableAt()).toBe(second + SKEW);
+    expect(leasesAfter.readableAt(["a", "b"])).toBe(second + SKEW);
+    expect(leasesAfter.readableAt(["b", "a"])).toBe(second + SKEW);
+    expect(leasesAfter.readableAt(["a"])).toBe(first + SKEW);
   });
 
-  test("a write after the restart keeps reads on the row from before the first", () => {
+  test("a source that never stopped answers every read at once", () => {
+    at(0);
+    const leases = leaf();
+    makeHot(leases, "main");
+    leases.holdUntil([{ key: "main", before: "old" }]);
+    expect(leases.readableAt(["main"])).toBeLessThanOrEqual(T0);
+    expect(leases.readableAt()).toBeLessThanOrEqual(T0);
+  });
+
+  test("a second restart waits as long: the key stays stored until its wait is over", () => {
+    const s = stopped();
+    at(100);
+    restarted(s);
+    at(200);
+    expect(restarted(s).readableAt(["main"])).toBe(s.shownAt + SKEW);
+    setSystemTime(new Date(s.shownAt + SKEW));
+    expect(restarted(s).readableAt(["main"])).toBeLessThanOrEqual(s.shownAt + SKEW);
+    expect(s.held.load()).toEqual([]);
+  });
+
+  test("a write after the restart is held by the restart rule, and a later restart waits for it", () => {
     const s = stopped();
     at(100);
     const leases = restarted(s);
     const shownAt = leases.holdUntil([{ key: "main", before: "new" }]);
-    expect(leases.visible("main", "newer")).toBe("old");
-    // Held by the restart rule, and stored again: a second restart shows the same.
     expect(shownAt).toBeGreaterThan(s.horizon);
-    expect(restarted(s).visible("main", "newer")).toBe("old");
-    expect(restarted(s).shownAt("main")).toBe(shownAt);
+    at(200);
+    expect(restarted(s).readableAt(["main"])).toBe(shownAt + SKEW);
   });
 
-  test("a lease given back before the restart ended the hold early, and the restart keeps that end", () => {
+  test("a key still waited for stays stored when a hold on it ends in this run", () => {
+    // Three runs: the second's write is held by the restart rule, past the horizon; the third
+    // waits for that plus the skew, while its own write's hold (the restart rule again) ends sooner.
+    const s = stopped();
+    at(100);
+    const second = restarted(s).holdUntil([{ key: "main", before: "new" }]);
+    at(200);
+    const third = restarted(s);
+    const wait = third.readableAt(["main"]);
+    const hold = third.holdUntil([{ key: "main", before: "newer" }]);
+    expect([wait, hold]).toEqual([second + SKEW, second]);
+    // The hold is over, the wait is not: a fourth run must wait as long.
+    setSystemTime(new Date(hold));
+    expect(third.visible("main", "newest")).toBe("newest");
+    expect(restarted(s).readableAt(["main"])).toBe(wait);
+  });
+
+  test("a restart after a hold's end, within the skew, still waits: its clock may be ahead", () => {
+    const s = stopped();
+    setSystemTime(new Date(s.shownAt + 10));
+    expect(restarted(s).readableAt(["main"])).toBe(s.shownAt + SKEW);
+  });
+
+  test("a wait that is over leaves the key stored while this run holds a write on it", () => {
+    const s = stopped();
+    at(100);
+    const leases = restarted(s);
+    const wait = leases.readableAt(["main"]);
+    const hold = leases.holdUntil([{ key: "main", before: "new" }]);
+    expect(hold).toBeGreaterThan(wait + READ_LEASE_MS);
+    setSystemTime(new Date(wait + READ_LEASE_MS));
+    leases.grant(["other"]);
+    expect(s.held.load()).toEqual([{ key: "main", until: hold }]);
+    expect(restarted(s).readableAt(["main"])).toBe(hold + SKEW);
+  });
+
+  test("a wait that is over is forgotten in storage by the sweep", () => {
+    const s = stopped();
+    at(100);
+    const leases = restarted(s);
+    setSystemTime(new Date(s.shownAt + SKEW + READ_LEASE_MS));
+    leases.grant(["other"]);
+    expect(s.held.load()).toEqual([]);
+  });
+
+  test("a lease given back ends the hold early, and the stored end with it", () => {
     at(0);
     const held = storage();
     const horizons: number[] = [];
@@ -231,32 +310,51 @@ describe("a source restarted while a write is held", () => {
     leases.grant(["main"], 0);
     leases.holdUntil([{ key: "main", before: "old" }]);
     at(50);
-    const shownAt = leases.returned("main", 0, 0);
-    expect(shownAt).toBe(T0 + 50);
-    // Shown and acknowledged at 50: a restart must not go back to the row from before.
+    // Every lease on main is over now, so nothing is left for a restart to wait for.
+    expect(leases.returned("main", 0, 0)).toBe(T0 + 50);
+    expect(held.load()).toEqual([]);
     at(60);
-    expect(new ReadLeases<string>(horizons.at(-1)!, () => {}, held).visible("main", "new")).toBe("new");
+    expect(new ReadLeases<string>(horizons.at(-1)!, () => {}, held).readableAt(["main"])).toBeLessThanOrEqual(T0 + 60);
   });
 
-  test("a hold that is over is forgotten in storage too: when read, and by the sweep", () => {
-    const s = stopped();
-    expect(s.held.load().length).toBe(1);
-    setSystemTime(new Date(s.shownAt));
-    const leases = restarted(s);
-    expect(s.held.load().length).toBe(0);
-    // Held again, never read again: the sweep (on a later grant) drops it.
+  test("a lease given back with sub-leases out moves the stored end to theirs", () => {
+    at(0);
+    const held = storage();
+    const horizons: number[] = [];
+    const leases = leaf(horizons, held);
+    leases.grant(["main"], 0);
+    const first = leases.holdUntil([{ key: "main", before: "old" }]);
+    at(50);
+    const shownAt = leases.returned("main", 0, 200);
+    expect(shownAt).toBeLessThan(first);
+    expect(held.load()).toEqual([{ key: "main", until: shownAt }]);
+    at(60);
+    expect(new ReadLeases<string>(horizons.at(-1)!, () => {}, held).readableAt(["main"])).toBe(shownAt + SKEW);
+  });
+
+  test("a hold that is over is forgotten in storage: when the key is read, and by the sweep", () => {
+    at(0);
+    const held = storage();
+    const leases = leaf([], held);
+    makeHot(leases, "main");
+    const shownAt = leases.holdUntil([{ key: "main", before: "old" }]);
+    expect(held.load().length).toBe(1);
+    setSystemTime(new Date(shownAt));
+    leases.visible("main", "new");
+    expect(held.load()).toEqual([]);
+    // Held, never read again: the sweep (on a later grant) drops it.
+    makeHot(leases, "side");
     const again = leases.holdUntil([{ key: "side", before: "a" }]);
-    expect(s.held.load().length).toBe(1);
+    expect(held.load().length).toBe(1);
     setSystemTime(new Date(again + READ_LEASE_MS));
     leases.grant(["other"]);
-    expect(s.held.load().length).toBe(0);
+    expect(held.load()).toEqual([]);
   });
 
   test("a write to a key with no lease out is shown at once and stores nothing", () => {
     at(0);
     const held = storage();
-    const leases = leaf([], held);
-    leases.holdUntil([{ key: "cold", before: "old" }]);
-    expect(held.load().length).toBe(0);
+    leaf([], held).holdUntil([{ key: "cold", before: "old" }]);
+    expect(held.load()).toEqual([]);
   });
 });

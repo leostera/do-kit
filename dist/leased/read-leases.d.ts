@@ -16,22 +16,21 @@ export interface Change<Row> {
     readonly key: string;
     readonly before: Row | undefined;
 }
-/** A held write on a key: the row reads see (the one before the write; undefined if there was none) until `until`. */
-export interface HeldRow<Row> {
+/** A key with a held write, and when the hold ends by the clock of the source that set it. */
+export interface HeldKey {
     readonly key: string;
-    readonly row: Row | undefined;
     readonly until: number;
 }
 /**
- * Where a source keeps its held rows, so they outlive it: its own durable storage, written
+ * Where a source keeps its held keys, so they outlive it: its own durable storage, written
  * synchronously. `put` runs inside `holdUntil`, so call `holdUntil` in the transaction that
- * commits the write: the row from before it and the write are then stored together or not at all.
+ * commits the write: the write and its key are then stored together or not at all.
  */
-export interface HeldRows<Row> {
-    /** Every row stored: read once, when the source starts. */
-    load(): readonly HeldRow<Row>[];
-    /** A key's hold began, or its end changed: replaces the key's row. */
-    put(held: HeldRow<Row>): void;
+export interface HeldKeys {
+    /** Every key stored: read once, when the source starts. */
+    load(): readonly HeldKey[];
+    /** A key's hold began, or its end changed: replaces the key's entry. */
+    put(held: HeldKey): void;
     /** A key's hold is over. */
     delete(key: string): void;
 }
@@ -40,21 +39,33 @@ export declare class ReadLeases<Row> {
     private readonly holdAllUntil;
     private horizon;
     private readonly storeHorizon;
-    private readonly heldRows;
+    private readonly heldKeys;
+    /**
+     * Keys that had a held write when this source last stopped: when their reads may be answered
+     * (the stored hold's end plus RESTART_SKEW_MS).
+     */
+    private readonly unsettled;
     /**
      * The leases out on each key, by holder (a relay's index; UNNAMED for holders that can't be
      * asked back): when each ends by this source's clock (margin included), and whether it was asked back.
      */
     private readonly leases;
-    /** Keys with a held write: the row reads see until `until`. Each entry is in `heldRows` too. */
+    /** Keys with a held write: the row reads see until `until`. Each key is in `heldKeys` too. */
     private readonly held;
     /** When each key last changed (holdUntil sees every change): not leased to relays for WRITTEN_MS after. */
     private readonly changedAt;
     /**
      * `horizon`: how far leases granted before this run may reach (stored by `storeHorizon`).
-     * `heldRows`: the holds this source had when it last ran, and where it keeps them from now on.
+     * `heldKeys`: the keys this source held writes on when it last ran, and where it keeps them
+     * from now on.
      */
-    constructor(horizon: number, storeHorizon: (horizon: number) => void, heldRows: HeldRows<Row>);
+    constructor(horizon: number, storeHorizon: (horizon: number) => void, heldKeys: HeldKeys);
+    /**
+     * When reads of `keys` (of every key, without them) may be answered: now, or, after a restart,
+     * once the holds the source had on them when it stopped are over on any clock. Wait until then
+     * before `visible` and `grant`: this source no longer has the rows from before those writes.
+     */
+    readableAt(keys?: readonly string[]): number;
     /**
      * A lease on `keys` (ms; 0 if none). A held write waits for the leases out now, so a lease
      * granted while one is held ends by then (with the margin), and none is given if that leaves
@@ -66,9 +77,16 @@ export declare class ReadLeases<Row> {
      * and never again would otherwise stay here for as long as the source runs.
      */
     private sweep;
-    /** A key's hold is over: forgotten here and in storage. */
+    /**
+     * A key's hold is over: forgotten here, and in storage unless reads of the key still wait out a
+     * restart (a later restart must wait as long).
+     */
     private release;
-    /** Sets a key's hold, here and in storage. */
+    /**
+     * Sets a key's hold, here and in storage. A hold set after a restart ends no earlier than the
+     * restart rule's (`holdAllUntil`), which is past every hold stored before it: replacing a key's
+     * stored end never shortens what a later restart waits for.
+     */
     private hold;
     private sweptAt;
     /** How many keys have a lease on record (for tests and operators). */
