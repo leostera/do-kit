@@ -17,6 +17,8 @@ const COUNT_GROUPS = "sharded_table_count_groups";
  * version read before a delete cannot land on the row written since. Copied with every split.
  */
 const VERSIONS = "sharded_table_versions";
+/** Indexes being built over rows that were there before them: how far each has got. */
+const BUILDS = "sharded_table_builds";
 const INDEX_PREFIX = "sharded_table_ix_";
 /** Each index keeps one hidden column of index keys (see encodeIndexKey), indexed alone. */
 const KEY_COLUMN_PREFIX = "_ix_";
@@ -51,6 +53,12 @@ export interface PutOptions {
  */
 export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObject<Env, never> {
   protected abstract readonly table: TableSchema<Row>;
+  /**
+   * Rows whose key a new index is given per call, while it is built over rows that were there
+   * before it. A shard with more answers "not ready" and goes on with the next call, so building
+   * an index over millions of rows never needs more CPU than one call has.
+   */
+  protected indexBuildRows = 10_000;
   private migrated = false;
   /** SQLite's index on the primary key, for listings in key order. */
   private keyIndex = "";
@@ -231,6 +239,17 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     return { ok: true, version: 0 };
   }
 
+  /** Up to `limit` of the rows this shard owns, in key order, after `afterKey` (null: from the first). */
+  protected ownedRowsAfter(afterKey: string | null, limit: number): Versioned<Row>[] {
+    this.migrate();
+    const [lo, hi] = this.ownedHashRange();
+    const pk = this.q(this.table.primaryKey);
+    return this.db
+      .exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE (? IS NULL OR ${pk} > ?) AND _hash >= ? AND _hash <= ? ORDER BY ${pk} LIMIT ?`, afterKey, afterKey, lo, hi, limit)
+      .toArray()
+      .map((found) => ({ row: this.decode(found), version: found._version as number }));
+  }
+
   /** The highest version a deleted row of this shard had (0: none). */
   private deletedVersion(): number {
     return this.db.exec<{ version: number }>(`SELECT version FROM ${VERSIONS} WHERE name = 'deleted'`).toArray()[0]?.version ?? 0;
@@ -353,17 +372,32 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     const sqlIndexes = this.db.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND substr(name, 1, ?) = ?`, TABLE, INDEX_PREFIX.length, INDEX_PREFIX).toArray();
     for (const { name } of sqlIndexes) if (!wanted.some((ix) => ix.sqlIndex === name)) this.db.exec(`DROP INDEX IF EXISTS "${name}"`);
     for (const { name } of existing) if (name.startsWith(KEY_COLUMN_PREFIX) && !wanted.some((ix) => ix.keyColumn === name)) this.db.exec(`ALTER TABLE ${TABLE} DROP COLUMN "${name}"`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${BUILDS} (ix TEXT PRIMARY KEY NOT NULL, after TEXT) WITHOUT ROWID`);
+    for (const { ix } of this.db.exec<{ ix: string }>(`SELECT ix FROM ${BUILDS}`).toArray()) if (!wanted.some((w) => w.keyColumn === ix)) this.db.exec(`DELETE FROM ${BUILDS} WHERE ix = ?`, ix);
+    let budget = this.indexBuildRows;
     for (const ix of wanted) {
       if (!have.has(ix.keyColumn)) {
         this.db.exec(`ALTER TABLE ${TABLE} ADD COLUMN "${ix.keyColumn}" TEXT`);
-        // A new index on existing rows: fill in their keys, a page at a time (never every row in
-        // memory). It all commits together: the writes of one synchronous call are atomic.
-        for (let after: SqlValue = null; ; ) {
-          const page = this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE (? IS NULL OR ${pk} > ?) ORDER BY ${pk} LIMIT ?`, after, after, BACKFILL_PAGE).toArray();
-          for (const stored of page) this.db.exec(`UPDATE ${TABLE} SET "${ix.keyColumn}" = ? WHERE ${pk} = ?`, this.indexKey(ix, stored), stored[schema.primaryKey]!);
-          if (page.length < BACKFILL_PAGE) break;
-          after = page.at(-1)![schema.primaryKey]!;
+        this.db.exec(`INSERT OR REPLACE INTO ${BUILDS} (ix, after) VALUES (?, NULL)`, ix.keyColumn);
+      }
+      // A new index on existing rows: fill in their keys in key order, a page at a time, and at
+      // most `indexBuildRows` a call. How far it got is stored, so the next call goes on from there
+      // (rows written meanwhile get their key from the write). The index serves once every row has one.
+      const build = this.db.exec<{ after: string | null }>(`SELECT after FROM ${BUILDS} WHERE ix = ?`, ix.keyColumn).toArray()[0];
+      for (let after: SqlValue = build?.after ?? null; build; ) {
+        if (budget <= 0) {
+          this.db.exec(`UPDATE ${BUILDS} SET after = ? WHERE ix = ?`, after, ix.keyColumn);
+          this.notReady();
         }
+        const limit = Math.min(BACKFILL_PAGE, budget);
+        const page = this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE (? IS NULL OR ${pk} > ?) ORDER BY ${pk} LIMIT ?`, after, after, limit).toArray();
+        for (const stored of page) this.db.exec(`UPDATE ${TABLE} SET "${ix.keyColumn}" = ? WHERE ${pk} = ?`, this.indexKey(ix, stored), stored[schema.primaryKey]!);
+        budget -= page.length;
+        if (page.length < limit) {
+          this.db.exec(`DELETE FROM ${BUILDS} WHERE ix = ?`, ix.keyColumn);
+          break;
+        }
+        after = page.at(-1)![schema.primaryKey]!;
       }
       this.db.exec(`CREATE INDEX IF NOT EXISTS "${ix.sqlIndex}" ON ${TABLE} ("${ix.keyColumn}")`);
     }

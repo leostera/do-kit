@@ -93,6 +93,12 @@ at a time, drops indexes no longer declared, and counts new count groups from th
 Removing or retyping a column is not supported: add a new one. A cursor is refused once its
 index is redefined.
 
+A new index over rows that are already there is built at most `indexBuildRows` (10,000) rows a
+call. A shard with more stores how far it got and answers "not ready"; the client retries, and the
+next call goes on from there. So an index over millions of rows is built in slices, each within
+one call's CPU, and the shard serves again once every row is in it. (New count groups are still
+counted in one call.)
+
 ### Writes
 
 - `put(row, { ifVersion })` inserts or replaces a whole row. `patch(key, changes, { ifVersion })`

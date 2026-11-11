@@ -565,6 +565,15 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return ownsHash(this.meta.bits, this.routeHash(key));
   }
 
+  /**
+   * Ends the call as "not ready": nothing more is done, and the client backs off and calls again.
+   * For work a shard does in slices before it can serve (building an index over its rows): each
+   * call does a slice, commits it, and ends here until the work is done.
+   */
+  protected notReady(): never {
+    throw new NotReady(Date.now());
+  }
+
   /** This shard's name (`${name}#${bits}`), once it has one. */
   protected nodeLabel(): string {
     if (!this.meta) throw new Error("node has no name yet");

@@ -353,6 +353,10 @@ test("a new index on a table with many rows lists every row", async () => {
   const listed = await evolve<Versioned[]>("all", { index: "byStars", limit: 1000 });
   expect(listed.length).toBe(rows.length);
   expect(new Set(listed.map((r) => r.row.name)).size).toBe(rows.length);
+  // Built 300 rows a call: the shard answered "not ready" until every row had its key, and each
+  // call went on from where the last stopped.
+  const shard = await post<{ counters: { notReady: number } }>("/describe", { cls: "evolving", name, bits: "" });
+  expect(shard.counters.notReady).toBeGreaterThanOrEqual(4);
 }, 120_000);
 
 test("a shard whose alarm was lost while a new shard waits to be activated sets it again", async () => {
