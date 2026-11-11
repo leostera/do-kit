@@ -176,6 +176,46 @@ See [`bench/README.md`](../bench/README.md).
 - Two fixes went in while measuring: pages first scanned rows instead of seeking (10,000 rows listed at a third of the speed of 2,000), and every shard returned a full page (16 shards moved 800 rows to list 50).
 - An index stored by sort order (range-partitioned) would let a page touch one or two index shards. That is the next layer.
 
+## Indexed tables
+
+`IndexedTable` against `ShardedTable`, on the same 10,000 rows of 1 KiB, on 1, 4 and 16 shards. The indexed table adds a unique global index on `email` and one on `(team, createdAt)`, each on as many index shards as there are row shards ("16 + 16"). Updates are one-row puts of existing rows, each moving both index entries; creates are new rows, only if absent, so the indexed table reserves the email first; reads are a lookup by email through the index, against a get by key; a listing is one page of 50 rows newest first, of one team from one index shard, against the whole table from every shard. 10 s per point, measured on the edge on 2026-11-11 ([raw data](../bench/results/indexed.json)).
+
+![Indexed table updates](bench/indexed-write-throughput.svg)
+
+![Indexed table creates](bench/indexed-create-throughput.svg)
+
+| Updates | 1 shard | 1 + 1 indexed | 16 shards | 16 + 16 indexed |
+|---|---|---|---|---|
+| 1 in flight | 11/s, p50 92 ms | 14/s, p50 68 ms | 13/s, p50 72 ms | 10/s, p50 98 ms |
+| 64 | 584/s, p50 89 ms | 268/s, p50 235 ms | 540/s, p50 91 ms | 370/s, p50 144 ms |
+| 256 | 1,037/s, p50 270 ms | 393/s, p50 536 ms, 208 failed | 1,694/s, p50 91 ms | 843/s, p50 194 ms, 54 failed |
+| 1,024 | 1,158/s, 4,073 failed | 650/s, 22,043 failed | 4,708/s, p50 135 ms | 2,677/s, p50 275 ms |
+
+| Creates | 1 shard | 1 + 1 indexed | 16 shards | 16 + 16 indexed |
+|---|---|---|---|---|
+| 1 in flight | 23/s, p50 44 ms | 6/s, p50 154 ms | 18/s, p50 58 ms | 3/s, p50 231 ms |
+| 64 | 506/s, p50 99 ms | 159/s, p50 391 ms | 492/s, p50 106 ms | 186/s, p50 332 ms |
+| 256 | 878/s, p50 281 ms | 216/s, p50 1,269 ms | 1,664/s, p50 97 ms | 624/s, p50 380 ms |
+| 1,024 | 951/s, 6,929 failed | 184/s, p50 4,711 ms | 3,999/s, p50 162 ms | 1,259/s, p50 564 ms |
+
+![Indexed table reads](bench/indexed-read-throughput.svg)
+
+![Indexed table listings](bench/indexed-list-throughput.svg)
+
+| List pages | 1 shard | 1 + 1 indexed | 16 shards | 16 + 16 indexed |
+|---|---|---|---|---|
+| 1 in flight | 112/s, p50 9 ms | 22/s, p50 47 ms | 28/s, p50 31 ms | 97/s, p50 11 ms |
+| 64 | 404/s, p50 129 ms | 627/s, p50 77 ms | 365/s, p50 164 ms | 1,021/s, p50 47 ms |
+| 256 | 438/s, p50 576 ms | 653/s, p50 371 ms | 583/s, p50 446 ms | 2,314/s, p50 63 ms |
+| 1,024 | 393/s, 168 failed | 473/s, p50 1,853 ms | not measured* | 7,930/s, p50 96 ms |
+
+\* The driver Worker loses its connection fanning 1,024 pages out to 16 shards at once; that is the load generator, not the table.
+
+- **Writes cost about two to three times as much.** An update or create makes three calls in a row (reserve on the index, write the row, deliver the entries) and returns only once the index has them, so at one in flight a create takes 150–230 ms against 45–60 ms, and an indexed table needs about twice the shards for the same write rate. It still scales with shards: 16 + 16 shards take 2,677 updates/s and 1,259 creates/s with no failed calls.
+- **Listings within a partition scale with shards; whole-table listings do not.** A team's page reads one index shard, so 16 + 16 shards serve 7,930 pages/s at 1,024 in flight with p50 96 ms, while a whole-table page asks every shard and stays near one object's 400–580 pages/s.
+- **Lookups by email cost one call, as reads by key do,** and scale the same: 8,144/s on 16 index shards at 1,024 in flight.
+- **One object is the ceiling, as before.** With 1 + 1 shards, calls fail once one index shard is overloaded, from 256 in flight. A few creates at 16 in flight (7 of 515) answered `IndexPending`: the row was written but its entries were not delivered in time, and the alarm delivers them later.
+
 ## Presplitting
 
 Presplitting is now lazy: no shard above `initialDepth` is created, each shard at that depth creates itself on its first call (asking the root for the tree's depth, once), and every "moved" answer tells the client the depth, so it routes straight to it. A first call costs at most two hops and one object creation, whatever the depth. Before, a client learned one level per answer, so each isolate asked the shards above (shared by every key) for every path, and those overloaded under many isolates. The measurements below are of the eager presplit it replaced.

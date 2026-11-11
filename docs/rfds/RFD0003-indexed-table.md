@@ -352,8 +352,11 @@ changes go through the client, which reserves first.
    - unique conflicts, lookups, listings within a partition;
    - reservations abandoned by `ifVersion` failures and by killed writers;
    - splits of row and index shards during writes.
-3. **Benchmarks on the edge:** create with a unique index, lookup, and list within a partition,
-   against `ShardedTable` (fan-out listing, no uniqueness) at 1, 4 and 16 shards.
+3. **Benchmarks on the edge** (done, [docs/performance.md](../performance.md#indexed-tables)):
+   create with a unique index, lookup, and list within a partition, against `ShardedTable`
+   (fan-out listing, no uniqueness) at 1, 4 and 16 shards. Writes cost two to three times a
+   plain write and still scale with shards; listings within a partition scale with shards
+   (7,930 pages/s on 16 + 16 shards) where fan-out listings stay near one object's.
 4. **Phase 2:** a separate spec for range splits, then the core change, then range-partitioned
    listings.
 
