@@ -220,7 +220,13 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private receiving;
     /** The stub options of the last routed call (in memory only): see `stubOptions`. */
     private callerStubOptions;
+    /** Whether this object's tables exist: they are made by its first write, not by every visit. */
+    private schemaReady;
+    /** Wiped (shardedWipe) in this instance: it answers nothing more, so nothing writes here again. */
+    private wiped;
     constructor(ctx: DurableObjectState, env: Env);
+    private ensureSchema;
+    private assertNotWiped;
     /** The current rows of these keys (absent keys are missing from the map). */
     protected read(keys: readonly string[]): Promise<Map<string, V>>;
     /**
@@ -470,6 +476,15 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private outside;
     /** Starts serving, if this is the copy of attempt `epoch`. */
     shardedActivate(name: string, bits: string, epoch: number): Promise<boolean>;
+    /**
+     * Deletes this shard's storage and alarm, if it serves `bits` (the client's `wipe` visits every
+     * shard). A shard that is splitting, or a copy not yet serving, answers "not ready", and the
+     * client comes back once the split is over and visits both halves. An object that holds nothing
+     * stays empty: this creates nothing. From then on this instance refuses every call.
+     */
+    shardedWipe(name: string, bits: string): Promise<CallAnswer<{
+        wiped: boolean;
+    }>>;
     /** The right half of an empty shard's initial split: empty, and serving at once. */
     shardedDescribe(): Promise<NodeDescription>;
 }

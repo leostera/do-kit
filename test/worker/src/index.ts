@@ -6,6 +6,7 @@ import { MAX_KNOWN_OBJECTS } from "../../../src/sharded/client.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedListQuery } from "../../../src/indexed/index.ts";
+import { storageReport, type StorageReport } from "./storage-report.ts";
 import { graphRoute, type GraphEnv, type GraphRequest } from "./workgraph.ts";
 export { GraphCoordinators, GraphResults, GraphRunners } from "./workgraph.ts";
 
@@ -216,6 +217,11 @@ export class OldAlarm extends ShardedObject<Env, number> {
 }
 
 class CounterBase extends ShardedObject<Env, number> {
+  /** What this object holds (tables, keys, alarm): to check a wipe left nothing. */
+  async storage(): Promise<StorageReport> {
+    return storageReport(this.ctx.storage);
+  }
+
   /** The stub options this shard would make its stubs with now (see `stubOptions`). */
   async seenStubOptions(keys: readonly string[], _payloads: null): Promise<unknown[]> {
     return keys.map(() => this.stubOptions());
@@ -564,6 +570,10 @@ export default {
           return Response.json((await indexedOp(env, body as never)) ?? null);
         case "/table":
           return Response.json((await tableOp(env, body as never)) ?? null);
+        case "/wipeAll":
+          return Response.json(await sharded(ns, body.name).wipe());
+        case "/storage":
+          return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).storage());
         case "/wipe":
           await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).wipe().catch(() => {});
           return Response.json(null);

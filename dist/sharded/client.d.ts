@@ -83,6 +83,14 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
     private route;
     /** Calls `method(...args)` on every shard. */
     scan<M extends ScanMethods<T>>(method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<Result<T[M]>[]>;
+    /**
+     * Deletes every shard's storage and alarm: the whole sharded object, for one that is done with.
+     * Waits out splits in progress (both halves are then wiped). Nothing may write to the object
+     * meanwhile: a write after its shard is wiped would make that shard again. The root's object
+     * goes last, since it is how the others are found: a wipe that fails partway can run again.
+     * Returns how many shards held something.
+     */
+    wipe(): Promise<number>;
     /** How many shards this client knows of: one more than its known splits. There may be more. */
     knownShardCount(): Promise<number>;
     /** The known splits seen in answers (for tests and operators); the presplit levels are not listed. */

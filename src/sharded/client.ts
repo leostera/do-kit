@@ -1,7 +1,7 @@
 // The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { hashBit, keyHash, shardObjectName, nodeName, type CallAnswer, type ShardedObject, type StubOptions } from "./index.js";
+import { hashBit, hostBits, keyHash, shardObjectName, nodeName, type CallAnswer, type ShardedObject, type StubOptions } from "./index.js";
 
 /** One shard's answer: the keys it was given (in the caller's order) and what it returned. */
 export interface ShardResult<R> {
@@ -295,6 +295,60 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       await visit("", 0);
       if (!stale) return out;
       if (attempt >= 3) throw new Error(`sharded ${this.name}: scan did not settle`);
+      this.forget();
+    }
+  }
+
+  /**
+   * Deletes every shard's storage and alarm: the whole sharded object, for one that is done with.
+   * Waits out splits in progress (both halves are then wiped). Nothing may write to the object
+   * meanwhile: a write after its shard is wiped would make that shard again. The root's object
+   * goes last, since it is how the others are found: a wipe that fails partway can run again.
+   * Returns how many shards held something.
+   */
+  async wipe(): Promise<number> {
+    await this.loadCache();
+    for (let attempt = 0; ; attempt++) {
+      let wiped = 0;
+      let stale = false;
+      let root: string | null = null;
+      const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
+      const visit = async (bits: string, depth: number, last = false): Promise<void> => {
+        if (depth > MAX_HOPS) throw new Error(`sharded ${this.name}: wipe did not settle`);
+        if (stale) return;
+        if (this.isSplit(bits)) {
+          await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
+          return;
+        }
+        // The root's object, at the leftmost shard of a tree that has split: after the rest.
+        if (bits !== "" && hostBits(bits) === "" && !last) {
+          root = bits;
+          return;
+        }
+        const answer = (await this.stub(bits).shardedWipe(this.name, bits)) as CallAnswer<{ wiped: boolean }>;
+        if ("ok" in answer) wiped += answer.ok.wiped ? 1 : 0;
+        else if ("moved" in answer) {
+          this.learn(answer.moved, answer.presplit);
+          await visit(bits, depth + 1);
+        } else if ("stale" in answer) stale = true;
+        else {
+          await backoff.next();
+          await visit(bits, depth);
+        }
+      };
+      await visit("", 0);
+      // A deeper split of the root's object than this client knew defers its leftmost shard again.
+      while (!stale && root !== null) {
+        const last: string = root;
+        root = null;
+        await visit(last, 0, true);
+      }
+      if (!stale) {
+        // What this client learned of the object's splits is of no more use.
+        this.forget();
+        return wiped;
+      }
+      if (attempt >= 3) throw new Error(`sharded ${this.name}: wipe did not settle`);
       this.forget();
     }
   }

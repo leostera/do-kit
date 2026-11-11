@@ -178,6 +178,10 @@ export class ShardedObject extends DurableObject {
     receiving = null;
     /** The stub options of the last routed call (in memory only): see `stubOptions`. */
     callerStubOptions = null;
+    /** Whether this object's tables exist: they are made by its first write, not by every visit. */
+    schemaReady;
+    /** Wiped (shardedWipe) in this instance: it answers nothing more, so nothing writes here again. */
+    wiped = false;
     constructor(ctx, env) {
         super(ctx, env);
         // The alarm is the base class's: it runs splits' work, and a subclass's code after it would
@@ -186,8 +190,19 @@ export class ShardedObject extends DurableObject {
             throw new Error(`${new.target.name} overrides alarm(): a sharded object's alarm belongs to the base class. Override onAlarm() and schedule it with scheduleAlarm() instead.`);
         }
         this.sql = ctx.storage.sql;
+        // An object only visited (a lazy shard asked whether it exists, a wiped one) stays empty.
+        this.schemaReady = this.sql.exec("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sharded_meta'").one().n > 0;
+        this.meta = this.schemaReady ? this.loadMeta() : null;
+    }
+    ensureSchema() {
+        if (this.schemaReady)
+            return;
         this.sql.exec(SCHEMA);
-        this.meta = this.loadMeta();
+        this.schemaReady = true;
+    }
+    assertNotWiped() {
+        if (this.wiped)
+            throw new Error("this shard was wiped");
     }
     // ---- Reads and writes for subclasses ----
     /** The current rows of these keys (absent keys are missing from the map). */
@@ -382,6 +397,7 @@ export class ShardedObject extends DurableObject {
     // ---- The routed call ----
     /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
     async shardedCall(name, bits, method, keys, payloads, args, stubOptions = null, presplitTo = 0) {
+        this.assertNotWiped();
         this.callerStubOptions = stubOptions;
         const answer = await this.arriveOrCreate(name, bits, presplitTo);
         if (answer)
@@ -407,6 +423,7 @@ export class ShardedObject extends DurableObject {
     }
     /** A call to every shard: `method(...args)`, with no keys. */
     async shardedScan(name, bits, method, args, stubOptions = null, presplitTo = 0) {
+        this.assertNotWiped();
         this.callerStubOptions = stubOptions;
         const answer = await this.arriveOrCreate(name, bits, presplitTo);
         if (answer)
@@ -481,6 +498,7 @@ export class ShardedObject extends DurableObject {
     }
     /** The root's answer to a new shard: the tree's presplit depth, creating the root if it is new. */
     async shardedTreeDepth(name) {
+        this.assertNotWiped();
         if (!this.meta)
             this.create(name, "0".repeat(this.policy.initialDepth ?? 0));
         if (this.meta.name !== name || hostBits(this.meta.bits) !== "")
@@ -532,6 +550,7 @@ export class ShardedObject extends DurableObject {
         return row ? JSON.parse(row.value) : null;
     }
     saveMeta(meta) {
+        this.ensureSchema();
         this.meta = meta;
         this.sql.exec("INSERT INTO sharded_meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", JSON.stringify(meta));
     }
@@ -583,6 +602,7 @@ export class ShardedObject extends DurableObject {
     }
     /** Splits now if this object hosts the shard `bits` (also an operator's lever). */
     async shardedSplit(name, bits) {
+        this.assertNotWiped();
         if (this.arrive(name, bits))
             return false;
         return this.split();
@@ -913,10 +933,13 @@ export class ShardedObject extends DurableObject {
     alarmCheckedAt = 0;
     /** When the subclass asked for `onAlarm`, if it did. */
     loadWake() {
+        if (!this.schemaReady)
+            return null;
         const row = this.sql.exec("SELECT value FROM sharded_meta WHERE key = 'wake'").toArray()[0];
         return row ? Number(row.value) : null;
     }
     saveWake(time) {
+        this.ensureSchema();
         if (time === null)
             this.sql.exec("DELETE FROM sharded_meta WHERE key = 'wake'");
         else
@@ -929,6 +952,8 @@ export class ShardedObject extends DurableObject {
      * is work left. Subclasses cannot override it (the constructor refuses): see `onAlarm`.
      */
     async alarm() {
+        if (this.wiped)
+            return;
         const meta = this.meta;
         // A verbatim copy not claimed yet carries the source's alarm: it is not this object's.
         if (!meta || this.isUnclaimedCopy())
@@ -996,6 +1021,7 @@ export class ShardedObject extends DurableObject {
     /** Nothing: a split calls it first to start this object, before it holds writes. */
     async shardedWarm() { }
     async shardedRestore(snapshot) {
+        this.assertNotWiped();
         if (this.serving())
             throw new Error("refusing to overwrite a serving shard");
         const started = Date.now();
@@ -1026,6 +1052,7 @@ export class ShardedObject extends DurableObject {
      * From here on this object takes the batches of attempt `epoch` only.
      */
     async shardedReceiveSchema(_name, _bits, epoch, objects) {
+        this.assertNotWiped();
         if (this.serving())
             throw new Error("refusing to change a serving shard");
         this.receiving = epoch;
@@ -1036,6 +1063,7 @@ export class ShardedObject extends DurableObject {
             for (const o of objects)
                 this.sql.exec(o.sql);
         });
+        this.schemaReady = true;
     }
     /**
      * One batch of the logical copy, from attempt `epoch`: rows of one table. The first batch wipes
@@ -1089,6 +1117,7 @@ export class ShardedObject extends DurableObject {
      * becomes that shard, not serving yet, and deletes the rows of the half it does not own.
      */
     async shardedClaim(name, bits, parent, epoch) {
+        this.assertNotWiped();
         const meta = this.meta;
         if (!meta || meta.name !== name)
             return false;
@@ -1117,6 +1146,7 @@ export class ShardedObject extends DurableObject {
     }
     /** Starts serving, if this is the copy of attempt `epoch`. */
     async shardedActivate(name, bits, epoch) {
+        this.assertNotWiped();
         const meta = this.meta;
         if (!meta || meta.name !== name)
             return false;
@@ -1134,9 +1164,40 @@ export class ShardedObject extends DurableObject {
         }
         return true;
     }
+    /**
+     * Deletes this shard's storage and alarm, if it serves `bits` (the client's `wipe` visits every
+     * shard). A shard that is splitting, or a copy not yet serving, answers "not ready", and the
+     * client comes back once the split is over and visits both halves. An object that holds nothing
+     * stays empty: this creates nothing. From then on this instance refuses every call.
+     */
+    async shardedWipe(name, bits) {
+        const meta = this.meta;
+        if (this.wiped || !meta) {
+            // Nothing here (a shard never made, or wiped already), unless an unclaimed copy sits here.
+            if (!this.schemaReady || this.wiped)
+                return { ok: { wiped: false } };
+        }
+        if (meta) {
+            if (this.isUnclaimedCopy() || meta.state === "copy" || this.hold || this.warming || meta.splitting !== null || meta.activate !== null)
+                return this.answered({ notReady: bits });
+            if (meta.name !== name || hostBits(meta.bits) !== hostBits(bits))
+                throw new Error(`${nodeName(name, bits)} reached ${nodeName(meta.name, meta.bits)}`);
+            if (meta.bits !== bits)
+                return this.answered(meta.bits.startsWith(bits) ? this.moved(bits) : { stale: bits });
+        }
+        this.wiped = true;
+        await this.ctx.storage.deleteAlarm();
+        await this.ctx.storage.deleteAll();
+        this.meta = null;
+        this.schemaReady = false;
+        this.calls.clear();
+        return { ok: { wiped: true } };
+    }
     /** The right half of an empty shard's initial split: empty, and serving at once. */
     async shardedDescribe() {
         const meta = this.meta;
+        if (!this.schemaReady)
+            return { bits: "", presplit: 0, state: "new", rows: 0, storedRows: 0, callsPerSecond: 0, lastSplit: null, lastSplitError: null, splits: [], counters: { ...this.counters } };
         const storedRows = this.sql.exec("SELECT COUNT(*) AS n FROM sharded_rows").one().n;
         let rows = storedRows;
         if (meta) {

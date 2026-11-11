@@ -536,3 +536,54 @@ test("stub options go with every call, and shards make their stubs with them", a
   expect(await post("/call", { cls: "m", name, method: "get", keys: KEYS, payloads: null, stubOptions })).toEqual(KEYS.map(() => 1));
   expect(await call("m", name, "seenStubOptions", KEYS)).toEqual(KEYS.map(() => null));
 }, 60_000);
+
+interface Report {
+  tables: { name: string; rows: number }[];
+  keys: number;
+  alarm: number | null;
+}
+
+/** Nothing of the base class's: no sharded_* table, no key, no alarm; and no row in any table. */
+function expectWiped(report: Report) {
+  expect(report.tables.filter((t) => t.name.startsWith("sharded_"))).toEqual([]);
+  expect(report.tables.filter((t) => t.rows > 0)).toEqual([]);
+  expect(report.keys).toBe(0);
+  expect(report.alarm).toBeNull();
+}
+
+test("wipe deletes every shard's storage and alarm, across splits, and a second wipe finds nothing", async () => {
+  const name = `wipe-${Date.now()}`;
+  const many = Array.from({ length: 600 }, (_, i) => `row-${i}`);
+  await call("m", name, "add", many, many.map(() => 1));
+  // Two splits: the root's object hosts "0", and "1" splits into "10" and "11".
+  const settle = async (bits: string[]) => {
+    for (let i = 0; i < 100; i++) {
+      const described = await Promise.all(bits.map((b) => describe("m", name, b)));
+      if (described.every((d, j) => d.bits === bits[j] && d.state === "shard" && d.storedRows === d.rows)) return;
+      await Bun.sleep(100);
+    }
+    throw new Error("the split did not settle");
+  };
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "" })).toBe(true);
+  await settle(["0", "1"]);
+  expect(await post<boolean>("/split", { cls: "m", name, bits: "1" })).toBe(true);
+  await settle(["0", "10", "11"]);
+  const before = await Promise.all(["", "1", "11"].map((bits) => post<Report>("/storage", { cls: "m", name, bits })));
+  for (const r of before) expect(r.tables.find((t) => t.name === "sharded_meta")?.rows).toBeGreaterThan(0);
+  expect(await post<number>("/wipeAll", { cls: "m", name })).toBe(3);
+  // Each object, by the name of the shard it hosted: the root's, "1"'s, and "11"'s.
+  for (const bits of ["", "1", "11"]) expectWiped(await post<Report>("/storage", { cls: "m", name, bits }));
+  expect(await post<number>("/wipeAll", { cls: "m", name })).toBe(0);
+}, 60_000);
+
+test("wipe deletes a presplit object's shards, and never makes a shard it did not have", async () => {
+  const name = `wipe-presplit-${Date.now()}`;
+  // Keys of three of the four shards only: the fourth is never made.
+  const keys = KEYS.filter((k) => !/^[c-f]/.test(createHash("sha256").update(k).digest("hex")));
+  await call("presplit", name, "add", keys, keys.map(() => 1));
+  // (describe makes nothing; a scan would make every shard.)
+  const states = await Promise.all(["00", "01", "10", "11"].map((bits) => describe("presplit", name, bits)));
+  expect(states.map((d) => d.state)).toEqual(["shard", "shard", "shard", "new"]);
+  expect(await post<number>("/wipeAll", { cls: "presplit", name })).toBe(3);
+  for (const bits of ["00", "01", "10", "11"]) expectWiped(await post<Report>("/storage", { cls: "presplit", name, bits }));
+}, 60_000);

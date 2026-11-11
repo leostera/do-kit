@@ -387,6 +387,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private receiving: number | null = null;
   /** The stub options of the last routed call (in memory only): see `stubOptions`. */
   private callerStubOptions: StubOptions | null = null;
+  /** Whether this object's tables exist: they are made by its first write, not by every visit. */
+  private schemaReady: boolean;
+  /** Wiped (shardedWipe) in this instance: it answers nothing more, so nothing writes here again. */
+  private wiped = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -396,8 +400,19 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       throw new Error(`${new.target.name} overrides alarm(): a sharded object's alarm belongs to the base class. Override onAlarm() and schedule it with scheduleAlarm() instead.`);
     }
     this.sql = ctx.storage.sql;
+    // An object only visited (a lazy shard asked whether it exists, a wiped one) stays empty.
+    this.schemaReady = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sharded_meta'").one().n > 0;
+    this.meta = this.schemaReady ? this.loadMeta() : null;
+  }
+
+  private ensureSchema(): void {
+    if (this.schemaReady) return;
     this.sql.exec(SCHEMA);
-    this.meta = this.loadMeta();
+    this.schemaReady = true;
+  }
+
+  private assertNotWiped(): void {
+    if (this.wiped) throw new Error("this shard was wiped");
   }
 
   // ---- Reads and writes for subclasses ----
@@ -590,6 +605,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
   async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0): Promise<CallAnswer<unknown>> {
+    this.assertNotWiped();
     this.callerStubOptions = stubOptions;
     const answer = await this.arriveOrCreate(name, bits, presplitTo);
     if (answer) return this.answered(answer);
@@ -610,6 +626,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** A call to every shard: `method(...args)`, with no keys. */
   async shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0): Promise<CallAnswer<unknown>> {
+    this.assertNotWiped();
     this.callerStubOptions = stubOptions;
     const answer = await this.arriveOrCreate(name, bits, presplitTo);
     if (answer) return this.answered(answer);
@@ -681,6 +698,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** The root's answer to a new shard: the tree's presplit depth, creating the root if it is new. */
   async shardedTreeDepth(name: string): Promise<number> {
+    this.assertNotWiped();
     if (!this.meta) this.create(name, "0".repeat(this.policy.initialDepth ?? 0));
     if (this.meta!.name !== name || hostBits(this.meta!.bits) !== "") throw new Error(`${nodeName(name, "")} reached ${nodeName(this.meta!.name, this.meta!.bits)}`);
     return this.meta!.presplit ?? 0;
@@ -727,6 +745,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   private saveMeta(meta: Meta): void {
+    this.ensureSchema();
     this.meta = meta;
     this.sql.exec("INSERT INTO sharded_meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", JSON.stringify(meta));
   }
@@ -779,6 +798,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** Splits now if this object hosts the shard `bits` (also an operator's lever). */
   async shardedSplit(name: string, bits: string): Promise<boolean> {
+    this.assertNotWiped();
     if (this.arrive(name, bits)) return false;
     return this.split();
   }
@@ -1092,11 +1112,13 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** When the subclass asked for `onAlarm`, if it did. */
   private loadWake(): number | null {
+    if (!this.schemaReady) return null;
     const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_meta WHERE key = 'wake'").toArray()[0];
     return row ? Number(row.value) : null;
   }
 
   private saveWake(time: number | null): void {
+    this.ensureSchema();
     if (time === null) this.sql.exec("DELETE FROM sharded_meta WHERE key = 'wake'");
     else this.sql.exec("INSERT INTO sharded_meta (key, value) VALUES ('wake', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(time));
   }
@@ -1108,6 +1130,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * is work left. Subclasses cannot override it (the constructor refuses): see `onAlarm`.
    */
   override async alarm(): Promise<void> {
+    if (this.wiped) return;
     const meta = this.meta;
     // A verbatim copy not claimed yet carries the source's alarm: it is not this object's.
     if (!meta || this.isUnclaimedCopy()) return;
@@ -1168,6 +1191,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   async shardedWarm(): Promise<void> {}
 
   async shardedRestore(snapshot: DurableObjectSnapshot): Promise<{ scheduleMs: number }> {
+    this.assertNotWiped();
     if (this.serving()) throw new Error("refusing to overwrite a serving shard");
     const started = Date.now();
     try {
@@ -1199,6 +1223,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * From here on this object takes the batches of attempt `epoch` only.
    */
   async shardedReceiveSchema(_name: string, _bits: string, epoch: number, objects: readonly { readonly name: string; readonly sql: string }[]): Promise<void> {
+    this.assertNotWiped();
     if (this.serving()) throw new Error("refusing to change a serving shard");
     this.receiving = epoch;
     this.ctx.storage.transactionSync(() => {
@@ -1206,6 +1231,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       this.meta = null;
       for (const o of objects) this.sql.exec(o.sql);
     });
+    this.schemaReady = true;
   }
 
   /**
@@ -1257,6 +1283,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * becomes that shard, not serving yet, and deletes the rows of the half it does not own.
    */
   async shardedClaim(name: string, bits: string, parent: string, epoch: number): Promise<boolean> {
+    this.assertNotWiped();
     const meta = this.meta;
     if (!meta || meta.name !== name) return false;
     if (meta.bits === bits) return meta.epoch === epoch && meta.state === "copy"; // claimed already
@@ -1282,6 +1309,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /** Starts serving, if this is the copy of attempt `epoch`. */
   async shardedActivate(name: string, bits: string, epoch: number): Promise<boolean> {
+    this.assertNotWiped();
     const meta = this.meta;
     if (!meta || meta.name !== name) return false;
     if (meta.bits !== bits) return meta.state === "shard" && meta.splitting === null && meta.bits.startsWith(bits); // serving, and split since
@@ -1296,9 +1324,36 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return true;
   }
 
+  /**
+   * Deletes this shard's storage and alarm, if it serves `bits` (the client's `wipe` visits every
+   * shard). A shard that is splitting, or a copy not yet serving, answers "not ready", and the
+   * client comes back once the split is over and visits both halves. An object that holds nothing
+   * stays empty: this creates nothing. From then on this instance refuses every call.
+   */
+  async shardedWipe(name: string, bits: string): Promise<CallAnswer<{ wiped: boolean }>> {
+    const meta = this.meta;
+    if (this.wiped || !meta) {
+      // Nothing here (a shard never made, or wiped already), unless an unclaimed copy sits here.
+      if (!this.schemaReady || this.wiped) return { ok: { wiped: false } };
+    }
+    if (meta) {
+      if (this.isUnclaimedCopy() || meta.state === "copy" || this.hold || this.warming || meta.splitting !== null || meta.activate !== null) return this.answered({ notReady: bits });
+      if (meta.name !== name || hostBits(meta.bits) !== hostBits(bits)) throw new Error(`${nodeName(name, bits)} reached ${nodeName(meta.name, meta.bits)}`);
+      if (meta.bits !== bits) return this.answered(meta.bits.startsWith(bits) ? this.moved(bits) : { stale: bits });
+    }
+    this.wiped = true;
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    this.meta = null;
+    this.schemaReady = false;
+    this.calls.clear();
+    return { ok: { wiped: true } };
+  }
+
   /** The right half of an empty shard's initial split: empty, and serving at once. */
   async shardedDescribe(): Promise<NodeDescription> {
     const meta = this.meta;
+    if (!this.schemaReady) return { bits: "", presplit: 0, state: "new", rows: 0, storedRows: 0, callsPerSecond: 0, lastSplit: null, lastSplitError: null, splits: [], counters: { ...this.counters } };
     const storedRows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows").one().n;
     let rows = storedRows;
     if (meta) {
