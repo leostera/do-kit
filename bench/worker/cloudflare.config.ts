@@ -1,11 +1,18 @@
+// The load and split benchmark Worker, driven by bench/run.ts. Only on a custom domain
+// (BENCH_HOSTNAME) behind an Access application, and with a bearer token (BENCH_TOKEN);
+// workers.dev and preview URLs are off.
 import { bindings, defineConfig, exports } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
 const NAME = process.env.BENCH_WORKER_NAME ?? "do-kit-bench";
+const HOSTNAME = process.env.BENCH_HOSTNAME;
 
 export default defineConfig(() => ({
   worker: {
     name: NAME,
+    domains: HOSTNAME ? [HOSTNAME] : [],
+    workersDev: false,
+    previewUrls: false,
     compatibilityDate: "2026-10-29",
     compatibilityFlags: ["nodejs_compat", "durable_object_snapshots"],
     // A split benchmark runs writers for minutes in one request.

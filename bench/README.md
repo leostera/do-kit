@@ -41,18 +41,19 @@ cd bench/worker
 bun install
 # A random token that guards the endpoints, kept out of git:
 echo "BENCH_TOKEN=$(openssl rand -hex 32)" > .dev.vars
-cf deploy --secrets-file .dev.vars
+# On a custom domain of yours, behind an Access application: workers.dev is off.
+BENCH_HOSTNAME=do-kit-bench.<your-zone> cf deploy --secrets-file .dev.vars
 ```
 
 Then run it from the repository root:
 
 ```sh
 set -a; . bench/worker/.dev.vars; set +a
-BENCH_URL=https://<your-worker>.workers.dev bun run bench:run
+BENCH_URL=https://do-kit-bench.<your-zone> BENCH_ACCESS_TOKEN=$(cloudflared access token -app=https://do-kit-bench.<your-zone>) bun run bench:run
 bun run bench:plot
 ```
 
-If the Worker is behind Cloudflare Access, set `BENCH_ACCESS_TOKEN` to a short-lived token (`cloudflared access token -app=$BENCH_URL`). It is sent as a header and never written to results.
+`BENCH_ACCESS_TOKEN` is a short-lived Access token. It is sent as a header and never written to results.
 
 Results depend on placement, load, runtime version and the day. Run more than once before drawing conclusions.
 
