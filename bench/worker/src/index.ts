@@ -1,16 +1,28 @@
 import { DurableObject } from "cloudflare:workers";
 import { nodeName, sharded, ShardedObject, shardObjectName, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
+import { GlobalIndex, IndexedTable, indexedTable, type IndexedTableClient } from "../../../src/indexed/index.ts";
+import { entryOf, globalIndexes as globalIndexesOf } from "../../../src/indexed/entries.ts";
 import { splittable as twoCopySplittable, SplittableObject as TwoCopySplittableObject } from "./two-copy/index.ts";
 import { splittable as legacySplittable, SplittableObject as LegacySplittableObject } from "./legacy/index.ts";
 
 const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget;
-const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64"];
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget;
+const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16"];
 /** A ShardedTable that starts as this many shards and never splits by load: "table-1" is one object. */
 type TableTarget = "table-1" | "table-4" | "table-16" | "table-64";
 const isTable = (t: Target): t is TableTarget => t.startsWith("table-");
+/**
+ * An IndexedTable whose rows and index entries each start as this many shards and never split by
+ * load: the same rows as a table target, plus a unique global index on email and one on team.
+ */
+type IndexedTarget = "indexed-1" | "indexed-4" | "indexed-16";
+const isIndexed = (t: Target): t is IndexedTarget => t.startsWith("indexed-");
+/** Rows, or rows and entries, on shards: the targets the table driver serves. */
+const isRows = (t: Target): t is TableTarget | IndexedTarget => isTable(t) || isIndexed(t);
+/** Teams rows belong to: an indexed listing reads one team's partition. */
+const TEAMS = 64;
 /** Drivers per fleet: one fleet object starts and gathers this many drivers, as one Worker did before. */
 const DRIVERS_PER_FLEET = 256;
 /** The most drivers one measurement starts (32 fleets). */
@@ -18,7 +30,8 @@ const MAX_DRIVERS = 8192;
 /** Calls each driver keeps in flight: one driver completes only about 90 calls/s, however many it keeps. */
 const CALLS_PER_DRIVER = 16;
 /** "list": one page of 50 rows, newest first, each worker walking its own cursor (tables only). */
-type Operation = "read" | "write" | "list";
+/** "create": a new row each time, only if absent (`ifVersion: 0`); tables only. */
+type Operation = "read" | "write" | "list" | "create";
 /**
  * How keys are chosen: "uniform" over `keyCount` keys, one "hot" key, or "control-plane": a handful
  * (`keyCount`) of popular objects, mostly read. Key shape does not matter beyond that: keys are
@@ -66,18 +79,31 @@ interface Env {
   readonly TABLE_4: DurableObjectNamespace<Table4>;
   readonly TABLE_16: DurableObjectNamespace<Table16>;
   readonly TABLE_64: DurableObjectNamespace<Table64>;
+  readonly INDEXED_1: DurableObjectNamespace<Indexed1>;
+  readonly INDEXED_4: DurableObjectNamespace<Indexed4>;
+  readonly INDEXED_16: DurableObjectNamespace<Indexed16>;
+  readonly INDEX_1: DurableObjectNamespace<Index1>;
+  readonly INDEX_4: DurableObjectNamespace<Index4>;
+  readonly INDEX_16: DurableObjectNamespace<Index16>;
 }
 
 // ---- Sharded tables: the same rows, indexes and queries on 1, 4, 16 and 64 shards ----
 
-type BenchRow = { name: string; createdAt: number; owner: string; size: number; payload: string };
+type BenchRow = { name: string; createdAt: number; owner: string; size: number; payload: string; email: string; team: string };
 const benchRows = defineTable<BenchRow>({
   primaryKey: "name",
-  columns: { name: "text", createdAt: "integer", owner: "text", size: "integer", payload: "text" },
+  columns: { name: "text", createdAt: "integer", owner: "text", size: "integer", payload: "text", email: "text", team: "text" },
   indexes: { byCreated: ["createdAt"], byOwner: ["owner", "createdAt"] },
 });
+/** The same rows and per-shard indexes, plus global indexes: a unique email, and teams newest first. */
+const indexedRows = defineTable<BenchRow>({
+  ...benchRows,
+  globalIndexes: { byEmail: { columns: ["email"], unique: true }, byTeam: { columns: ["team", "createdAt"], partition: 1 } },
+});
+const keyNumber = (key: string) => Number(key.slice(key.lastIndexOf("-") + 1)) || 0;
+const teamOf = (n: number) => `team-${n % TEAMS}`;
 function benchRow(key: string, payloadBytes: number): BenchRow {
-  return { name: key, createdAt: Date.now(), owner: `owner-${key.length % 16}`, size: payloadBytes, payload: "x".repeat(payloadBytes) };
+  return { name: key, createdAt: Date.now(), owner: `owner-${key.length % 16}`, size: payloadBytes, payload: "x".repeat(payloadBytes), email: `${key}@example.com`, team: teamOf(keyNumber(key)) };
 }
 
 abstract class TableBench extends ShardedTable<Env, BenchRow> {
@@ -108,6 +134,73 @@ export class Table64 extends TableBench {
     return this.env.TABLE_64 as never;
   }
 }
+abstract class IndexedBench extends IndexedTable<Env, BenchRow> {
+  protected table = indexedRows;
+}
+abstract class IndexBench extends GlobalIndex<Env> {}
+export class Indexed1 extends IndexedBench {
+  protected override splitPolicy = tablePolicy(0);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEXED_1 as never;
+  }
+  protected indexNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEX_1 as never;
+  }
+}
+export class Indexed4 extends IndexedBench {
+  protected override splitPolicy = tablePolicy(2);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEXED_4 as never;
+  }
+  protected indexNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEX_4 as never;
+  }
+}
+export class Indexed16 extends IndexedBench {
+  protected override splitPolicy = tablePolicy(4);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEXED_16 as never;
+  }
+  protected indexNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEX_16 as never;
+  }
+}
+export class Index1 extends IndexBench {
+  protected override splitPolicy = tablePolicy(0);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEX_1 as never;
+  }
+  protected rowNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEXED_1 as never;
+  }
+}
+export class Index4 extends IndexBench {
+  protected override splitPolicy = tablePolicy(2);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEX_4 as never;
+  }
+  protected rowNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEXED_4 as never;
+  }
+}
+export class Index16 extends IndexBench {
+  protected override splitPolicy = tablePolicy(4);
+  protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEX_16 as never;
+  }
+  protected rowNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.INDEXED_16 as never;
+  }
+}
+function indexedClient(env: Env, target: IndexedTarget, name: string): IndexedTableClient<BenchRow> {
+  const [rows, entries] = { "indexed-1": [env.INDEXED_1, env.INDEX_1], "indexed-4": [env.INDEXED_4, env.INDEX_4], "indexed-16": [env.INDEXED_16, env.INDEX_16] }[target];
+  return indexedTable(rows as never, entries as never, name, indexedRows);
+}
+/** The client of a table or indexed target. */
+function rowsClient(env: Env, target: TableTarget | IndexedTarget, name: string): TableClient<BenchRow> {
+  return isIndexed(target) ? indexedClient(env, target, name) : tableClient(env, target, name);
+}
+
 function tableClient(env: Env, target: TableTarget, name: string): TableClient<BenchRow> {
   const ns = { "table-1": env.TABLE_1, "table-4": env.TABLE_4, "table-16": env.TABLE_16, "table-64": env.TABLE_64 }[target];
   return table(ns as never, name, benchRows);
@@ -374,9 +467,18 @@ export class BenchDriver extends DurableObject<Env> {
       await this.write(config.target, config.objectName, keys, keys.map(() => value));
       return;
     }
-    if (isTable(config.target)) {
-      if (config.operation === "write" || config.driverIndex !== 0) return;
-      const t = tableClient(this.env, config.target, config.objectName);
+    if (isRows(config.target)) {
+      if (config.driverIndex !== 0) return;
+      const t = rowsClient(this.env, config.target, config.objectName);
+      // One driver creates the objects (a row shard, and an indexed table's index shards, are placed
+      // near their first caller), as one app would: drivers racing from five regions would place
+      // the rows and their index on different continents.
+      if (config.operation === "create") {
+        await t.put(benchRow("key-0", config.payloadBytes), { ifVersion: 0 }).catch(() => {});
+        return;
+      }
+      // Seeded once per object: every level of a run measures the same rows.
+      if ((await t.count().catch(() => 0)) >= config.keyCount) return;
       for (let i = 0; i < config.keyCount; i += 100) {
         const rows = Array.from({ length: Math.min(100, config.keyCount - i) }, (_, j) => ({ row: benchRow(`key-${i + j}`, config.payloadBytes) }));
         for (let attempt = 0; ; attempt++) {
@@ -454,22 +556,37 @@ export class BenchDriver extends DurableObject<Env> {
     let maxLatencyMs = 0;
     let sequence = config.driverIndex;
     const errorSamples = new Set<string>();
+    /** New keys this driver created: one count for all its workers. */
+    let created = 0;
 
     const tableWorker = async (): Promise<void> => {
-      const t = tableClient(this.env, config.target as TableTarget, config.objectName);
+      const target = config.target as TableTarget | IndexedTarget;
+      const t = rowsClient(this.env, target, config.objectName);
+      const indexed = isIndexed(target) ? (t as IndexedTableClient<BenchRow>) : null;
+      // An indexed listing reads one team's partition: each caller its own team.
+      const team = teamOf(sequence);
       let cursor: string | null = null;
       while (Date.now() < stopAt) {
         const key = keyFor(config, sequence++);
         const before = performance.now();
         try {
-          if (config.operation === "write") {
+          if (config.operation === "create") {
+            // Keys no run has written: this measurement's start, the driver, a count.
+            const result = await t.put(benchRow(`new-${config.startAt}-${config.driverIndex}-${created++}`, config.payloadBytes), { ifVersion: 0 });
+            if (!result.ok) throw new Error(`create refused: ${JSON.stringify(result)}`);
+            bytes += config.payloadBytes;
+          } else if (config.operation === "write") {
             await t.put(benchRow(key, config.payloadBytes));
             bytes += config.payloadBytes;
           } else if (config.operation === "read") {
-            const found = await t.get(key);
+            // An indexed target reads by email, through its unique index; a table by key.
+            const found = indexed ? await indexed.lookup("byEmail", [`${key}@example.com`]) : await t.get(key);
+            if (indexed && !found) throw new Error(`lookup missed ${key}`);
             bytes += found ? config.payloadBytes : 0;
           } else {
-            const page: Awaited<ReturnType<typeof t.list>> = await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor });
+            const page: Awaited<ReturnType<typeof t.list>> = indexed
+              ? await indexed.list({ index: "byTeam", partition: [team], direction: "desc", limit: 50, cursor })
+              : await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor });
             cursor = page.cursor;
             bytes += page.rows.length * config.payloadBytes;
           }
@@ -486,7 +603,7 @@ export class BenchDriver extends DurableObject<Env> {
     };
 
     const worker = async (): Promise<void> => {
-      if (isTable(config.target)) return tableWorker();
+      if (isRows(config.target)) return tableWorker();
       while (Date.now() < stopAt) {
         const seq = sequence++;
         const key = keyFor(config, seq);
@@ -550,8 +667,9 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   const keyCount = body.keyCount ?? 10_000;
   const payloadBytes = body.payloadBytes ?? 1024;
   if (!TARGETS.includes(target as Target)) throw new Error(`target must be one of ${TARGETS.join(", ")}`);
-  if (operation !== "read" && operation !== "write" && operation !== "list") throw new Error("operation must be read, write or list");
-  if (operation === "list" && !isTable(target as Target)) throw new Error("list is for table targets");
+  if (operation !== "read" && operation !== "write" && operation !== "list" && operation !== "create") throw new Error("operation must be read, write, list or create");
+  if (operation === "create" && !isRows(target as Target)) throw new Error("create is for table targets");
+  if (operation === "list" && !isRows(target as Target)) throw new Error("list is for table targets");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
   if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > MAX_DRIVERS * CALLS_PER_DRIVER) throw new Error(`concurrency must be an integer from 1 to ${MAX_DRIVERS * CALLS_PER_DRIVER}`);
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");
@@ -832,6 +950,37 @@ async function handle(request: Request, env: Env): Promise<Response> {
       );
       return Response.json({ calls, wallMs: Date.now() - started, latencyMs: latencyMs.sort((x, y) => x - y) });
     }
+    // Where an indexed write's time goes, from this Worker: the reservation, then the row write
+    // (which delivers its entries before answering), next to a plain table's write.
+    if (request.method === "POST" && path === "/indexed-probe") {
+      const body = (await request.json()) as { objectName: string; writes?: number };
+      const n = Math.min(body.writes ?? 20, 100);
+      type Raw = { call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{ result: unknown[] }[]> };
+      const index = sharded(env.INDEX_4, body.objectName) as unknown as Raw;
+      const rows = sharded(env.INDEXED_4, body.objectName) as unknown as Raw;
+      const plain = sharded(env.TABLE_4, body.objectName) as unknown as Raw;
+      const ix = globalIndexesOf(indexedRows).find((g) => g.name === "byEmail")!;
+      const times: { reserve: number; write: number; writeNoToken: number; table: number }[] = [];
+      for (let i = 0; i < n; i++) {
+        const row = benchRow(`probe-${i}`, 1024);
+        const e = entryOf(indexedRows, ix, row)!;
+        let t = performance.now();
+        const [r] = await index.call([e.route], "indexReserve", [{ entry: e.entry, owner: row.name }]);
+        const reserve = performance.now() - t;
+        const token = (r!.result[0] as { reserved: number }).reserved;
+        t = performance.now();
+        await rows.call([row.name], "tablePut", [{ row, tokens: { byEmail: token } }]);
+        const write = performance.now() - t;
+        t = performance.now();
+        await rows.call([row.name], "tablePut", [{ row: { ...row, size: 1 } }]); // same email: needs no token
+        const writeNoToken = performance.now() - t;
+        t = performance.now();
+        await plain.call([row.name], "tablePut", [{ row }]);
+        times.push({ reserve, write, writeNoToken, table: performance.now() - t });
+      }
+      const med = (k: keyof (typeof times)[number]) => times.map((x) => x[k]).sort((a, b) => a - b)[Math.floor(times.length / 2)]!;
+      return Response.json({ colo: (request as unknown as { cf?: { colo?: string } }).cf?.colo, median: { reserve: med("reserve"), write: med("write"), writeNoToken: med("writeNoToken"), table: med("table") } });
+    }
     if (request.method !== "POST" || path !== "/measure") return new Response("Not found", { status: 404 });
     let input: ReturnType<typeof validate>;
     try {
@@ -843,7 +992,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
     // One driver tops out at about 90 calls/s, whatever its concurrency: 16 in-flight calls each, so
     // the drivers are not what is measured. Fleets of 256 drivers start them.
     // A listing calls every shard for each page: drivers scale with the calls, not the pages.
-    const fanOut = input.operation === "list" && isTable(input.target) ? Number(input.target.slice("table-".length)) : 1;
+    // An indexed create is two calls (reserve, then write): drivers scale with those too.
+    const fanOut = input.operation === "list" && isTable(input.target) ? Number(input.target.slice("table-".length)) : input.operation === "create" && isIndexed(input.target) ? 2 : 1;
     const driverCount = Math.min(MAX_DRIVERS, input.concurrency, Math.max(Math.min(16, input.concurrency), Math.ceil((input.concurrency * fanOut) / CALLS_PER_DRIVER)));
     const perDriver = Math.ceil(input.concurrency / driverCount);
     const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount, concurrency: perDriver }));
@@ -867,10 +1017,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (input.target === "split") topology = await describeTree(env, input.objectName);
     if (input.target === "legacy") topology = await describeLegacyTree(env, input.objectName);
     if (input.target === "presplit") topology = await describeTree(env, input.objectName, "", env.PRESPLIT as never);
-    if (isTable(input.target)) {
-      const leaves = Number(input.target.slice("table-".length));
+    if (isRows(input.target)) {
+      const leaves = Number(input.target.slice(input.target.indexOf("-") + 1));
       // Counting asks every shard: one still overloaded from the run answers nothing.
-      const rows = await tableClient(env, input.target, input.objectName).count().catch(() => -1);
+      const rows = await rowsClient(env, input.target, input.objectName).count().catch(() => -1);
       topology = { leaves, rows, depth: Math.log2(leaves) };
     }
     // Walking 4,096 shards is 8,191 calls. A presplit tree is complete, so the depth of the shards on

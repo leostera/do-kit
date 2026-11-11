@@ -292,6 +292,36 @@ if (tableResults) {
   graphs["table-read-throughput"] = chart({ title: "Table reads: rows per second", subtitle: tSub("One-row gets by primary key"), xLabel: "Concurrent in-flight reads", yLabel: "reads / s", xTicks: tLevels, series: tSeries("read", (p) => p.operationsPerSecond) });
 }
 
+// ---- IndexedTable vs ShardedTable: the same rows on 1, 4 and 16 shards (bench/results/indexed.json) ----
+const indexedFile = join(import.meta.dir, "results", "indexed.json");
+const indexedResults = await readFile(indexedFile, "utf8").then((t) => JSON.parse(t) as { points: (Omit<Point, "target" | "operation"> & { target: string; operation: string })[] }).catch(() => null);
+if (indexedResults) {
+  // Same color per shard count; the indexed table solid, the sharded table dashed.
+  const SERIES = [
+    ["indexed-1", "IndexedTable, 1 + 1 shards", "#667085", undefined],
+    ["indexed-4", "IndexedTable, 4 + 4 shards", "#2e86ab", undefined],
+    ["indexed-16", "IndexedTable, 16 + 16 shards", "#e4572e", undefined],
+    ["table-1", "ShardedTable, 1 shard", "#667085", "10 8"],
+    ["table-4", "ShardedTable, 4 shards", "#2e86ab", "10 8"],
+    ["table-16", "ShardedTable, 16 shards", "#e4572e", "10 8"],
+  ] as const;
+  const levels = [...new Set(indexedResults.points.map((p) => p.concurrency))].sort((a, b) => a - b);
+  const series = (operation: string, value: (p: Point) => number) =>
+    SERIES.filter(([t]) => indexedResults.points.some((p) => p.target === t && p.operation === operation)).map(([t, label, color, dash]) => ({
+      label,
+      color,
+      ...(dash ? { dash } : {}),
+      points: indexedResults.points.filter((p) => p.target === t && p.operation === operation).map((p): [number, number] => [p.concurrency, value(p as unknown as Point)]),
+    }));
+  const sub = (what: string) => `10,000 rows of 1 KiB; IndexedTable adds a unique index on email and one on (team, createdAt). ${what}, 10 s per point`;
+  graphs["indexed-write-throughput"] = chart({ title: "Updates: rows per second", subtitle: sub("One-row puts of existing rows, each rewriting every index entry"), xLabel: "Concurrent in-flight writes", yLabel: "writes / s", xTicks: levels, series: series("write", (p) => p.operationsPerSecond) });
+  graphs["indexed-create-throughput"] = chart({ title: "Creates: rows per second", subtitle: sub("New rows, only if absent; the indexed table reserves the email first"), xLabel: "Concurrent in-flight creates", yLabel: "creates / s", xTicks: levels, series: series("create", (p) => p.operationsPerSecond) });
+  graphs["indexed-read-throughput"] = chart({ title: "Reads: by email through the index, or by key", subtitle: sub("IndexedTable: lookup by email. ShardedTable: get by key"), xLabel: "Concurrent in-flight reads", yLabel: "reads / s", xTicks: levels, series: series("read", (p) => p.operationsPerSecond) });
+  graphs["indexed-list-throughput"] = chart({ title: "Listings: pages per second", subtitle: sub("Pages of 50 newest first. IndexedTable: one team's, from one index shard. ShardedTable: the whole table, from every shard"), xLabel: "Concurrent in-flight pages", yLabel: "pages / s", xTicks: levels, series: series("list", (p) => p.operationsPerSecond) });
+  graphs["indexed-list-p99"] = chart({ title: "Listings: p99 latency", subtitle: sub("Pages of 50 newest first"), xLabel: "Concurrent in-flight pages", yLabel: "p99 latency (ms)", xTicks: levels, series: series("list", (p) => p.latencyMs.p99) });
+  graphs["indexed-write-p50"] = chart({ title: "Updates: median latency", subtitle: sub("One-row puts of existing rows"), xLabel: "Concurrent in-flight writes", yLabel: "p50 latency (ms)", xTicks: levels, series: series("write", (p) => p.latencyMs.p50) });
+}
+
 for (const [name, svg] of Object.entries(graphs)) await writeFile(join(outDir, `${name}.svg`), svg);
 console.log(`Wrote ${Object.keys(graphs).length} graphs to docs/bench/`);
 
