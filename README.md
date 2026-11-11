@@ -220,7 +220,7 @@ await t.list({ index: "byTeam", partition: ["core"], direction: "desc", limit: 5
 An invocation gets at most 5 minutes of CPU. Some work is a graph of pure pieces with far more than that in total: resolving the deltas of a large git pack, rebuilding a derived index, an import of many objects. You write the graph; do-kit cuts it into **chunks** that each fit one invocation, and **runners** (Durable Objects) pull them from a **coordinator**, one chunk per alarm. Each unit's result is stored before its chunk counts as done, under a hash of its inputs (or of its key), so a retried chunk, a runner evicted partway, and a later run all do the same thing: compute what is missing.
 
 ```ts
-import { defineTask, planWorkGraph, workGraphOf, workGraphResults, workGraphRun } from "@leostera/do-kit";
+import { defineTask, ownResultsName, planWorkGraph, workGraphOf, workGraphResults, workGraphRun } from "@leostera/do-kit";
 
 // A task is a pure function: (input, parent's value, results it runs after) → { result, value }.
 // This one resolves a slice of a pack's delta forest: whole trees, about 10 s of CPU. It writes its
@@ -243,10 +243,13 @@ const refs = slicesOf(pack).map((s, i) => g.add(slice, `pack-1234/slice-${i}`, {
 const plan = planWorkGraph(g, { chunkMs: 30_000, identity: "key" });
 const run = workGraphRun(env.GRAPH_COORDINATORS, "pack-1234");
 await run.submit(plan);
-await run.start({ runners: 32, results: "packs" });
+await run.start({ runners: 32, deadlineMs: 15 * 60_000 });
 await run.status(); // later: { state: "done", units: { computed, reused }, busyMs, ... }
-await workGraphResults(env.GRAPH_RESULTS, "packs").get(plan, refs[0]); // { objects, digest } | undefined
+await workGraphResults(env.GRAPH_RESULTS, ownResultsName("pack-1234")).get(plan, refs[0]); // { objects, digest } | undefined
+await run.delete(); // or wait: an hour after it ends, nothing of the run is left
 ```
+
+- **Runs leave nothing behind.** Once a run is done, failed, deleted or past its deadline, its runners delete their storage and alarms, and so do the coordinator and the run's own results store (shared ones, given as `results`, are yours to keep). The status is kept for `keepStatusMs`, an hour by default, so you can start a run per request.
 
 - **Make units coarse.** Running a unit costs the layer about 0.11 to 0.12 ms of wall time on the edge (its result read and written, and its share of its chunk's calls), and planning it about 0.03 ms more (measured locally). So a unit should cost at least about 10 ms, for an overhead near 1%: batch fine-grained work, such as one delta of 0.1 ms, into one unit. Hundreds to tens of thousands of units per run is the range it is built for.
 - **Keep outputs in your storage**, written by `compute` under the unit's own key, and return a receipt: results and values are capped at 1 MiB, as JSON.

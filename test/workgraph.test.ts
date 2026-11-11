@@ -156,3 +156,118 @@ test("identity by key: a later run with the same keys reuses them, whatever thei
   expect((await runOf(after, "key")).units).toMatchObject({ computed: 0, reused: 9 });
   expect((await runOf(after, "inputs")).units).toMatchObject({ computed: 1, reused: 8 });
 }, 120_000);
+
+// ---- Nothing left behind: every object a run touched ends with no storage and no alarm ----
+
+interface Report {
+  tables: { name: string; rows: number }[];
+  keys: number;
+  alarm: number | null;
+}
+interface Left {
+  coordinator: Report;
+  runners: Report[];
+  results: Report[];
+}
+
+const left = (run: string, runners: number, results?: string) => post<Left>("/workgraph", { op: "storage", run, runners, ...(results ? { results } : {}) });
+const empty = { tables: [], keys: 0, alarm: null };
+
+/** What the run's objects hold, each from a new instance: one whose constructor makes nothing. */
+async function leftAfterRestart(run: string, runners: number, results?: string): Promise<Left> {
+  await post("/workgraph", { op: "restart", run, runners, ...(results ? { results } : {}) });
+  // A status call to the gone run, then the report: neither may make anything.
+  expect(await post("/workgraph", { op: "status", run })).toBeNull();
+  return left(run, runners, results);
+}
+
+function expectNothingLeft(l: Left) {
+  expect(l.coordinator).toEqual(empty);
+  for (const r of l.runners) expect(r).toEqual(empty);
+  for (const r of l.results) expect(r).toEqual(empty);
+}
+
+/** Polls until the run's status is gone. */
+async function gone(run: string, timeoutMs = 60_000) {
+  const until = Date.now() + timeoutMs;
+  while ((await post<RunStatus | null>("/workgraph", { op: "status", run })) !== null) {
+    if (Date.now() > until) throw new Error(`run ${run} was not wiped`);
+    await Bun.sleep(200);
+  }
+}
+
+test("a done run keeps only its status, then nothing: not a lost runner, nor its own results store", async () => {
+  // Runner 0 abandons its first chunk and keeps its state, as a lost object would; its lease runs out.
+  const run = `lose-tidy-${unique()}`;
+  const shape: Shape = { trees: 20, size: 6, chainy: 0.3, joins: 0, seed: 5 };
+  await post("/workgraph", { op: "start", run, shape, runners: 2, chunkMs: 30, leaseMs: 1_500, tickMs: 300, keepStatusMs: 3_000 });
+  const status = await finished(run);
+  expect(status).toMatchObject({ state: "done", expired: 1, ownResults: true, results: `${run}/results` });
+  // Kept: the status, and the run's results, until keepStatusMs is up.
+  for (let i = 0; (await post<RunStatus>("/workgraph", { op: "status", run })).cleanup !== "kept"; i++) {
+    if (i > 100) throw new Error("the runners were not stopped");
+    await Bun.sleep(100);
+  }
+  const stored = await post<Record<string, unknown>>("/workgraph", { op: "results", run, shape, chunkMs: 30 });
+  expect(stored).toEqual(Object.fromEntries(forest(shape).expected));
+  const kept = await left(run, 2);
+  expect(kept.coordinator.tables).toEqual([{ name: "graph_meta", rows: 1 }]);
+  expect(kept.coordinator.alarm).not.toBeNull();
+  for (const r of kept.runners) expect(r).toEqual(empty);
+  await gone(run);
+  expectNothingLeft(await left(run, 2));
+  expectNothingLeft(await leftAfterRestart(run, 2));
+}, 90_000);
+
+test("a failed run leaves nothing once its status time is up", async () => {
+  const run = `boom-tidy-${unique()}`;
+  const shape: Shape = { trees: 4, size: 3, chainy: 0, joins: 0, seed: 1, boom: true };
+  await post("/workgraph", { op: "start", run, shape, runners: 2, chunkMs: 1_000, tickMs: 300, keepStatusMs: 500 });
+  expect((await finished(run)).state).toBe("failed");
+  await gone(run);
+  expectNothingLeft(await left(run, 2));
+}, 60_000);
+
+test("delete cancels a run partway, runners evicted mid-chunk included, and leaves nothing", async () => {
+  // Each chunk throws once after computing, as an eviction would: runners wait on their alarm's retry.
+  const run = `evict-delete-${unique()}`;
+  const shape: Shape = { trees: 40, size: 6, chainy: 0.3, joins: 0, seed: 9 };
+  await post("/workgraph", { op: "start", run, shape, runners: 3, chunkMs: 20, tickMs: 300 });
+  await Bun.sleep(1_500);
+  const before = await post<RunStatus>("/workgraph", { op: "status", run });
+  expect(before.state).toBe("running");
+  expect(before.chunks.done).toBeLessThan(before.chunks.total);
+  expect(await post("/workgraph", { op: "delete", run })).toBeNull();
+  expectNothingLeft(await left(run, 3));
+  // Idempotent: deleting what is gone is nothing, and makes nothing.
+  expect(await post("/workgraph", { op: "delete", run })).toBeNull();
+  expectNothingLeft(await left(run, 3));
+  expectNothingLeft(await leftAfterRestart(run, 3));
+}, 60_000);
+
+test("a run past its deadline fails, and leaves nothing, though its only runner is lost", async () => {
+  // One runner, which abandons its first chunk: nothing else would end the run.
+  const run = `lose-deadline-${unique()}`;
+  const shape: Shape = { trees: 10, size: 4, chainy: 0.3, joins: 0, seed: 3 };
+  await post("/workgraph", { op: "start", run, shape, runners: 1, chunkMs: 30, leaseMs: 60_000, tickMs: 300, deadlineMs: 1_500, keepStatusMs: 1_000 });
+  const status = await finished(run);
+  expect(status.state).toBe("failed");
+  expect(status.error).toContain("deadline");
+  await gone(run);
+  expectNothingLeft(await left(run, 1));
+  expectNothingLeft(await leftAfterRestart(run, 1));
+}, 60_000);
+
+test("a shared results store outlives the run; the run itself leaves nothing", async () => {
+  const run = `shared-tidy-${unique()}`;
+  const results = `shared-${unique()}`;
+  const shape: Shape = { trees: 10, size: 5, chainy: 0.3, joins: 0, seed: 4 };
+  await post("/workgraph", { op: "start", run, shape, results, runners: 2, chunkMs: 30, tickMs: 300, keepStatusMs: 1_000 });
+  expect((await finished(run)).ownResults).toBe(false);
+  await gone(run);
+  const l = await left(run, 2, results);
+  expect(l.coordinator).toEqual(empty);
+  for (const r of l.runners) expect(r).toEqual(empty);
+  expect(l.results.some((r) => r.tables.some((t) => t.name === "sharded_rows" && t.rows > 0))).toBe(true);
+  await expectResults(run, shape, results, { chunkMs: 30 });
+}, 60_000);

@@ -22,6 +22,9 @@ export class BenchCoordinator extends WorkGraphCoordinator<Env> {
   protected runners() {
     return this.env.RUNNERS;
   }
+  protected results() {
+    return this.env.RESULTS;
+  }
 }
 
 interface Faults {

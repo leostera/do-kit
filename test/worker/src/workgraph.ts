@@ -4,7 +4,9 @@
 // chunk it leases and never runs again.
 import { encodeBody } from "../../../src/workgraph/body.ts";
 import { planWorkGraph } from "../../../src/workgraph/plan.ts";
-import { WorkGraphCoordinator } from "../../../src/workgraph/coordinator.ts";
+import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, shardObjectName } from "../../../src/sharded/index.ts";
+import { ownResultsName, runnerName, WorkGraphCoordinator } from "../../../src/workgraph/coordinator.ts";
+import { storageReport, type StorageReport } from "./storage-report.ts";
 import { WorkGraphRunner } from "../../../src/workgraph/runner.ts";
 import { WorkGraphResults } from "../../../src/workgraph/results.ts";
 import { workGraphResults, workGraphRun } from "../../../src/workgraph/client.ts";
@@ -20,6 +22,16 @@ export class GraphCoordinators extends WorkGraphCoordinator<GraphEnv> {
   protected runners() {
     return this.env.GRAPH_RUNNERS;
   }
+  protected results() {
+    return this.env.GRAPH_RESULTS;
+  }
+  async storage(): Promise<StorageReport> {
+    return storageReport(this.ctx.storage);
+  }
+  /** Ends this instance: the next call makes a new one, which runs the constructor again. */
+  async restart(): Promise<void> {
+    this.ctx.abort("test restart");
+  }
 }
 
 export class GraphRunners extends WorkGraphRunner<GraphEnv> {
@@ -31,6 +43,13 @@ export class GraphRunners extends WorkGraphRunner<GraphEnv> {
   }
   protected results() {
     return this.env.GRAPH_RESULTS;
+  }
+  async storage(): Promise<StorageReport> {
+    return storageReport(this.ctx.storage);
+  }
+  /** Ends this instance: the next call makes a new one, which runs the constructor again. */
+  async restart(): Promise<void> {
+    this.ctx.abort("test restart");
   }
   protected override async chunkStarting(run: string, index: number): Promise<"run" | "abandon"> {
     return run.includes("lose") && index === 0 ? "abandon" : "run";
@@ -44,16 +63,31 @@ export class GraphRunners extends WorkGraphRunner<GraphEnv> {
   }
 }
 
+/** Presplit into four shards, so a run's own store is several objects to wipe. */
 export class GraphResults extends WorkGraphResults<GraphEnv> {
+  protected override splitPolicy = checkSplitPolicy({ ...DEFAULT_SPLIT_POLICY, initialDepth: 2 });
   protected nodes() {
     return this.env.GRAPH_RESULTS;
   }
+  async storage(): Promise<StorageReport> {
+    return storageReport(this.ctx.storage);
+  }
+  /** Ends this instance: the next call makes a new one, which runs the constructor again. */
+  async restart(): Promise<void> {
+    this.ctx.abort("test restart");
+  }
 }
 
+/** The objects a results store's four shards live in. */
+const RESULT_SHARDS = ["", "01", "10", "11"];
+
 export interface GraphRequest {
-  op: "start" | "status" | "results";
+  op: "start" | "status" | "results" | "delete" | "storage" | "restart";
   run: string;
-  results: string;
+  /** A shared results store; without it, the run's own. */
+  results?: string;
+  deadlineMs?: number;
+  keepStatusMs?: number;
   shape?: Shape;
   /** Instead of a forest: slices of bytes. */
   slices?: Slices;
@@ -68,15 +102,33 @@ export interface GraphRequest {
 
 export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unknown> {
   const run = workGraphRun(env.GRAPH_COORDINATORS, body.run);
+  const resultsName = body.results ?? ownResultsName(body.run);
   if (body.op === "status") return run.status();
+  if (body.op === "delete") return run.delete();
+  if (body.op === "restart") {
+    const stubs = [
+      env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)),
+      ...Array.from({ length: body.runners ?? 4 }, (_, i) => env.GRAPH_RUNNERS.get(env.GRAPH_RUNNERS.idFromName(runnerName(body.run, i)))),
+      ...RESULT_SHARDS.map((bits) => env.GRAPH_RESULTS.get(env.GRAPH_RESULTS.idFromName(shardObjectName(resultsName, bits)))),
+    ];
+    await Promise.allSettled(stubs.map((stub) => stub.restart()));
+    return null;
+  }
+  if (body.op === "storage") {
+    // Everything the run may have touched: its coordinator, each runner, each results shard.
+    const coordinator = await env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).storage();
+    const runners = await Promise.all(Array.from({ length: body.runners ?? 4 }, (_, i) => env.GRAPH_RUNNERS.get(env.GRAPH_RUNNERS.idFromName(runnerName(body.run, i))).storage()));
+    const results = await Promise.all(RESULT_SHARDS.map((bits) => env.GRAPH_RESULTS.get(env.GRAPH_RESULTS.idFromName(shardObjectName(resultsName, bits))).storage()));
+    return { coordinator, runners, results };
+  }
   const { g } = body.slices ? slices(body.slices) : forest(body.shape!);
   const plan = planWorkGraph(g, { ...(body.chunkMs ? { chunkMs: body.chunkMs } : {}), ...(body.replayMs !== undefined ? { replayMs: body.replayMs } : {}), ...(body.identity ? { identity: body.identity } : {}) });
   if (body.op === "results") {
     const keys = g.units.map((u) => u.key);
-    const values = await workGraphResults(env.GRAPH_RESULTS, body.results).many(plan, keys.map((key) => ({ key, task: "" })));
+    const values = await workGraphResults(env.GRAPH_RESULTS, resultsName).many(plan, keys.map((key) => ({ key, task: "" })));
     return Object.fromEntries(keys.map((k, i) => [k, values[i] ?? null]));
   }
   await run.submit(plan);
-  const status = await run.start({ runners: body.runners ?? 4, results: body.results, ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}), ...(body.tickMs ? { tickMs: body.tickMs } : {}), ...(body.wakeAfterMs ? { wakeAfterMs: body.wakeAfterMs } : {}) });
+  const status = await run.start({ runners: body.runners ?? 4, ...(body.results ? { results: body.results } : {}), ...(body.deadlineMs ? { deadlineMs: body.deadlineMs } : {}), ...(body.keepStatusMs !== undefined ? { keepStatusMs: body.keepStatusMs } : {}), ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}), ...(body.tickMs ? { tickMs: body.tickMs } : {}), ...(body.wakeAfterMs ? { wakeAfterMs: body.wakeAfterMs } : {}) });
   return { chunks: plan.chunks.length, work: plan.work, span: plan.span, units: g.units.length, bodyBytes: plan.chunks.map((c) => encodeBody(c).byteLength), status };
 }

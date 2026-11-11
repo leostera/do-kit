@@ -15,7 +15,20 @@ export declare class WorkGraphRun {
     submit(plan: WorkGraphPlan): Promise<RunStatus>;
     /** Starts `runners` runners. */
     start(options: StartOptions): Promise<RunStatus>;
+    /**
+     * The run's status: kept for `keepStatusMs` after it ends, then null (as for a run never
+     * submitted).
+     */
     status(): Promise<RunStatus | null>;
+    /**
+     * Cancels the run if it has not ended, and wipes it: its runners, chunks, status, its own
+     * results store (not a shared one), and its coordinator. Idempotent. Waits up to `waitMs`
+     * (default 60 s) for its runners to stop, a runner finishing the chunk it is writing first; past
+     * that, it returns the status, and the run's alarm finishes the job.
+     */
+    delete(options?: {
+        readonly waitMs?: number;
+    }): Promise<RunStatus | null>;
 }
 /** A run of a work graph, by name: one coordinator object. */
 export declare function workGraphRun(coordinators: DurableObjectNamespace<WorkGraphCoordinator<any>>, name: string): WorkGraphRun;

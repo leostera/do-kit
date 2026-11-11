@@ -4,7 +4,7 @@
 - Status: Draft (built)
 - Author: `leostera`
 - Start Date: `2026-11-10`
-- Updated: `2026-11-11`
+- Updated: `2026-11-12`
 - Discussion PR: none
 - Tracking Issue: none
 
@@ -21,6 +21,8 @@ each unit's **result** into a store keyed by a hash of the unit's inputs. A run 
 every chunk is done. A runner evicted partway through a chunk takes it up again from its alarm,
 and a runner that never comes back loses its lease to another runner. Because results are keyed
 by a hash of the unit's inputs, a later run reuses every result whose inputs did not change.
+A run is ephemeral: once it ends, it leaves no object behind holding anything, so an app can
+start one per request.
 
 In short, it is a build system's executor for Durable Objects. It is a new layer,
 `@leostera/do-kit/workgraph`, made of plain Durable Objects, with
@@ -183,12 +185,16 @@ are identified by the units' keys, and no input is hashed (see Identity):
 const plan = planWorkGraph(g, { chunkMs: 30_000, identity: "key" });
 const run = workGraphRun(env.GRAPH_COORDINATORS, "pack-1234");
 await run.submit(plan);
-await run.start({ runners: 32, results: "packs" });
+await run.start({ runners: 32, deadlineMs: 15 * 60_000 });
 
 // Later, or polled:
 await run.status(); // { state: "done", chunks: { done: 176, ... }, units: { computed, reused }, busyMs, ... }
-const receipt = await workGraphResults(env.GRAPH_RESULTS, "packs").get(plan, b); // Receipt | undefined
+const receipt = await workGraphResults(env.GRAPH_RESULTS, ownResultsName("pack-1234")).get(plan, b); // Receipt | undefined
+await run.delete(); // or let its status expire: then nothing of the run is left
 ```
+
+Without `results`, the run gets a results store of its own, wiped with it. A store shared by
+runs (`results: "index"`) is what makes later runs incremental, and is the app's to keep.
 
 What happens:
 1. `planWorkGraph` hashes every unit: by default its task's name and version, its input, its
@@ -199,6 +205,9 @@ What happens:
 3. Each runner's alarm leases a chunk, computes it, writes its results, and completes it. The same
    call leases the next chunk. One chunk is one alarm invocation, with its own CPU budget.
 4. Once every chunk is done, the run is done, and every unit's result is in `WorkGraphResults`.
+5. The coordinator stops every runner, each of which deletes its storage and alarm. It keeps
+   only the run's status, for an hour by default, then wipes the run's own results store and
+   itself.
 
 With the default identity, a later run over a graph that shares most units plans the same hashes
 for them. Its runners find those results already stored, and compute only the units that are new.
@@ -224,6 +233,10 @@ sequenceDiagram
     R->>C: complete(17), and lease the next
   end
   C-->>W: status: done
+  C->>R: stop
+  R->>R: delete storage and alarm
+  C->>S: wipe (its own store)
+  C->>C: delete storage and alarm
 ```
 
 ## Reference-level explanation
@@ -328,13 +341,21 @@ Methods:
 - `graphSubmit(chunks)` adds chunks in batches, with their bodies encoded. It is idempotent per
   chunk id, and a no-op once the run is sealed, so a retried submission is harmless. `graphSeal()` ends
   submission, and checks that every needed chunk exists.
-- `graphStart(runners)` records the runner count, wakes each runner, and arms the alarm.
+- `graphStart(name, { runners, results?, deadlineMs?, keepStatusMs?, ... })` records the runner
+  count, the results store (the run's own, `ownResultsName(run)`, unless one is named), the
+  deadline (24 h by default) and how long to keep the status (1 h), wakes each runner, and arms
+  the alarm. It refuses a run never submitted.
 - `graphNext(runner, finished)` completes the runner's `finished` chunk, if any (with its counts or
   its error), and leases it the next one. It answers:
   - `{ chunk, attempt }`;
   - `{ wait: ms }` when nothing is ready yet;
-  - `{ done }`, or `{ failed: error }`.
-- `graphStatus()`.
+  - `{ done }`, or `{ failed: error }`. These it also answers, writing nothing, once the run has
+    ended or is gone.
+- `graphStatus()`: the run's status, or null once the run is wiped (or was never submitted).
+- `graphDelete(name)`: cancels the run if it has not ended, and wipes it at once, without keeping
+  the status. It returns null once nothing is left, or the status while runners are still
+  stopping (the alarm goes on). The client's `run.delete()` calls it until it returns null, for up
+  to a minute. It is idempotent, and on a run that is gone it makes nothing.
 
 Leasing:
 - A runner that already holds a lease gets the same chunk back, with the same attempt. This is
@@ -358,7 +379,34 @@ The alarm, every 5 s until the run ends:
 - **Wake.** A runner that has not called for 30 s is woken, if work remains. A runner's own alarm
   is retried at most 6 times by the platform, so a runner whose retries ran out would otherwise
   stay asleep.
-- **Done.** Once every chunk is done, the run is done, and the alarm stops.
+- **Deadline.** A run past its deadline fails. A run submitted and never started fails a day after
+  its first submission.
+- **Done.** Once every chunk is done, the run is done, and its cleanup begins.
+
+### Ending a run
+
+A run ends done, failed (a chunk out of attempts, or the deadline), or cancelled (deleted). It
+then leaves nothing behind, in three steps, each driven by the coordinator's alarm until it has
+happened:
+1. **Stop the runners.** The coordinator calls `graphStop()` on every runner that has not yet
+   answered it, and records each answer in `graph_stopped`. A runner deletes its storage and its
+   alarm, and answers. One writing a chunk finishes the write first, then stops before reporting
+   it. A runner that got `{ done }` or `{ failed }` has already wiped itself, and a runner lost for
+   good is reached as well: the call starts a new instance of its object, which finds it empty or
+   wipes it. A stop that fails or takes over a minute is asked again from the alarm.
+2. **Keep the status.** Once every runner has answered, the coordinator drops its chunks, bodies,
+   needs and runners, and keeps only `graph_meta`, with the final counts, until `keepStatusMs` is
+   up. On delete it keeps nothing.
+3. **Wipe.** The coordinator wipes the run's own results store, every shard of it, with the
+   sharded layer's `wipe()`, then deletes its own storage and alarm. A shared store is left alone.
+
+Two things make sure a wiped object stays empty:
+- An object that holds nothing is not made again by being asked. The coordinator, the runners and
+  the sharded layer create their tables only when they first store something, so a late status,
+  stop or delete, a late `graphNext`, or a read of a wiped results shard creates no storage.
+- A results shard, once wiped, refuses every call for as long as its instance lives. A write from
+  a runner stopped while writing finds it so, and fails; the runner, stopping, writes nothing more.
+  A wipe waits for a shard that is splitting or moving, and follows a shard that moved.
 
 ### Runners
 
@@ -371,7 +419,7 @@ stores the run's name, the runner's index and the results store's name, and sets
 
 One alarm invocation:
 1. `graphNext(i, finished)` leases a chunk. On `wait`, it sets its alarm for then. On `done` or
-   `failed`, it stops.
+   `failed`, it deletes its storage and its alarm.
 2. It reads the results already stored for the chunk's units.
 3. It computes, in order (parents first), each unit that is needed:
    - a unit with no stored result;
@@ -416,10 +464,24 @@ least once, and an output written under the unit's own name is as idempotent as 
 - **Progress:** while any runner can run, every chunk is eventually done, or the run fails with
   an error. Expiry passes the chunks of a lost runner on, and waking restarts a runner whose
   alarm retries ran out.
+- **Nothing left behind:** once a run is done, failed, deleted or past its deadline, every object
+  it touched eventually holds no storage and no alarm: the coordinator, each runner (one evicted
+  mid-chunk, or lost for good, too), and the run's own results store. The coordinator wipes
+  itself last, after every runner has said it stopped.
 
 `specs/work-graph-run.ts` checks these, with two runners, chunks that need others, and faults: lost
-calls, runner crashes (the alarm resumes them), and a runner lost for good. The coordinator is
-not crashed in the spec: it keeps everything in storage, and its alarm is durable.
+calls, runner crashes (the alarm resumes them), and a runner lost for good, as well as the
+deadline and delete at any point. Its check is exhaustive at depth 60 (1.8 million states). Each
+of its rules is needed: without stopping the runners, or with the coordinator wiping before every
+runner answered, a run leaves a runner behind; without a wiped shard refusing writes, a late write
+fills the store again. The coordinator is not crashed in the spec: it keeps everything in
+storage, and its alarm is durable.
+
+The tests under `cf dev` check it on real objects: after a run is done, failed, deleted partway
+(with every chunk thrown away once, as by an eviction) and past its deadline (its only runner
+lost holding a lease), they list every table, key and alarm of the coordinator, each runner, and
+each shard of the results store. Then they restart every one of those objects, call it again,
+and list it again.
 
 ### Observability
 
@@ -596,6 +658,10 @@ budget.
   rather than through a storage hook: a hook would be a second write path with the same need to be
   idempotent.
 - `identity: "key"`, for work that is new every time (see Units and hashes).
+- A run is ephemeral (see Ending a run): its status is kept for `keepStatusMs` (1 h) as a
+  tombstone with the final counts, rather than the caller waiting on a call that returns it before
+  the wipe. A tombstone needs no caller connected, and that is what a poll from another request
+  needs. It has no alarm but the one that expires it, and holds no chunks.
 - `graphStatus()` reports `busyMs`, the runners' time on the chunks done, so a run measures its own
   work: `busyMs / elapsedMs` is how many runners were busy on average.
 

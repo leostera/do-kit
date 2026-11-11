@@ -4,7 +4,7 @@ export { ComputeFailed, executeChunk, keysToRead, type ChunkBody, type Executed 
 export { decodeBody, encodeBody, MAX_BODY_BYTES } from "./body.js";
 export { decodeStored, encodeStored, MAX_STORED_BYTES, resultKey, valueKey } from "./stored.js";
 export { WorkGraphResults } from "./results.js";
-export { runnerName, WorkGraphCoordinator, type Finished, type NextAnswer, type RunState, type RunStatus, type StartOptions, type SubmittedChunk } from "./coordinator.js";
+export { ownResultsName, runnerName, WorkGraphCoordinator, type Finished, type NextAnswer, type RunState, type RunStatus, type StartOptions, type SubmittedChunk } from "./coordinator.js";
 export { WorkGraphRunner } from "./runner.js";
 export { workGraphResults, workGraphRun, WorkGraphResultsClient, WorkGraphRun } from "./client.js";
 //# sourceMappingURL=index.d.ts.map

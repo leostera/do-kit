@@ -48,8 +48,27 @@ export class WorkGraphRun {
     return (await this.coordinator.graphStart(this.name, options)) as RunStatus;
   }
 
+  /**
+   * The run's status: kept for `keepStatusMs` after it ends, then null (as for a run never
+   * submitted).
+   */
   async status(): Promise<RunStatus | null> {
     return (await this.coordinator.graphStatus()) as RunStatus | null;
+  }
+
+  /**
+   * Cancels the run if it has not ended, and wipes it: its runners, chunks, status, its own
+   * results store (not a shared one), and its coordinator. Idempotent. Waits up to `waitMs`
+   * (default 60 s) for its runners to stop, a runner finishing the chunk it is writing first; past
+   * that, it returns the status, and the run's alarm finishes the job.
+   */
+  async delete(options: { readonly waitMs?: number } = {}): Promise<RunStatus | null> {
+    const until = Date.now() + (options.waitMs ?? 60_000);
+    for (;;) {
+      const status = (await this.coordinator.graphDelete(this.name)) as RunStatus | null;
+      if (status === null || Date.now() >= until) return status;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
   }
 }
 

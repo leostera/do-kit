@@ -8,7 +8,7 @@ export { ComputeFailed, executeChunk, keysToRead } from "./execute.js";
 export { decodeBody, encodeBody, MAX_BODY_BYTES } from "./body.js";
 export { decodeStored, encodeStored, MAX_STORED_BYTES, resultKey, valueKey } from "./stored.js";
 export { WorkGraphResults } from "./results.js";
-export { runnerName, WorkGraphCoordinator } from "./coordinator.js";
+export { ownResultsName, runnerName, WorkGraphCoordinator } from "./coordinator.js";
 export { WorkGraphRunner } from "./runner.js";
 export { workGraphResults, workGraphRun, WorkGraphResultsClient, WorkGraphRun } from "./client.js";
 //# sourceMappingURL=index.js.map
