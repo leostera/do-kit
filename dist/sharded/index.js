@@ -16,7 +16,10 @@
 //
 // The protocol is modelled in specs/snapshot-split.ts and specs/lazy-presplit.ts.
 import { DurableObject } from "cloudflare:workers";
+import { ATOMIC_OUTCOME_TTL_MS } from "./atomic.js";
+import { sharded } from "./client.js";
 import { hashBit, keyHash } from "./hash.js";
+export { ATOMIC_HOLD_MS, ATOMIC_OUTCOME_TTL_MS } from "./atomic.js";
 export { hashBit, keyHash } from "./hash.js";
 export { RouteMismatch, SpansShards, ShardedClient, sharded } from "./client.js";
 /**
@@ -50,6 +53,10 @@ export function checkSplitPolicy(policy) {
         fail("holdWaitMs must be zero or more");
     return policy;
 }
+const ATOMIC_SCHEMA = `
+CREATE TABLE IF NOT EXISTS sharded_atomic_holds (tx TEXT PRIMARY KEY, primary_key TEXT NOT NULL, deadline INTEGER NOT NULL, method TEXT NOT NULL, keys TEXT NOT NULL, staged TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sharded_atomic_outcomes (tx TEXT PRIMARY KEY, outcome TEXT NOT NULL, at INTEGER NOT NULL);
+`;
 /** How many split attempts a shard remembers. */
 const SPLIT_HISTORY = 8;
 function ownsHash(bits, hash) {
@@ -153,6 +160,12 @@ const ALARM_CHECK_MS = 5_000;
  */
 export class ShardedObject extends DurableObject {
     splitPolicy = DEFAULT_SPLIT_POLICY;
+    /**
+     * The methods `client.atomically` can call (RFD0008), by name: each one's share of an
+     * all-or-nothing call over keys in any number of shards. See AtomicMethod.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    atomic = {};
     /**
      * The share (0 to 1) of new shards that log a `shard-created` JSON line on their first call,
      * with how long the root took to confirm the tree's depth (`rootMs`). Off by default.
@@ -389,6 +402,269 @@ export class ShardedObject extends DurableObject {
             throw new Error("node has no name yet");
         return this.meta.name;
     }
+    // ---- Atomic calls across shards (RFD0008) ----
+    /** The keys atomic calls hold here, loaded from storage on first use (null: not loaded yet). */
+    held = null;
+    /** Whether the atomic tables exist here. */
+    atomicReady = null;
+    ensureAtomicSchema() {
+        if (this.atomicReady)
+            return;
+        this.ensureSchema();
+        this.sql.exec(ATOMIC_SCHEMA);
+        this.atomicReady = true;
+    }
+    hasAtomicTables() {
+        this.atomicReady ??= this.schemaReady && this.sql.exec("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sharded_atomic_holds'").one().n > 0;
+        return this.atomicReady;
+    }
+    /** Every key an atomic call holds here, by key. */
+    heldKeys() {
+        if (this.held)
+            return this.held;
+        this.held = new Map();
+        if (this.hasAtomicTables())
+            for (const h of this.loadHolds())
+                this.holdInMemory(h);
+        return this.held;
+    }
+    loadHolds() {
+        if (!this.hasAtomicTables())
+            return [];
+        return this.sql
+            .exec("SELECT * FROM sharded_atomic_holds")
+            .toArray()
+            .map((r) => ({ tx: r.tx, primaryKey: r.primary_key, deadline: r.deadline, method: r.method, keys: JSON.parse(r.keys), staged: JSON.parse(r.staged) }));
+    }
+    loadHold(tx) {
+        if (!this.hasAtomicTables())
+            return null;
+        const r = this.sql.exec("SELECT * FROM sharded_atomic_holds WHERE tx = ?", tx).toArray()[0];
+        return r ? { tx: r.tx, primaryKey: r.primary_key, deadline: r.deadline, method: r.method, keys: JSON.parse(r.keys), staged: JSON.parse(r.staged) } : null;
+    }
+    holdInMemory(h) {
+        let release;
+        const released = new Promise((resolve) => (release = resolve));
+        for (const key of h.keys)
+            this.held.set(key, { tx: h.tx, deadline: h.deadline, released, release });
+    }
+    /** Lets the writes that wait on `tx`'s keys go. */
+    releaseInMemory(tx) {
+        const held = this.heldKeys();
+        for (const [key, h] of held) {
+            if (h.tx !== tx)
+                continue;
+            held.delete(key);
+            h.release();
+        }
+    }
+    /** The earliest deadline of a hold here, or null. */
+    nextHoldDeadline() {
+        let next = null;
+        for (const h of this.heldKeys().values())
+            if (next === null || h.deadline < next)
+                next = h.deadline;
+        return next;
+    }
+    /** The subclass's atomic method `method`. */
+    atomicMethod(method) {
+        const m = Object.prototype.hasOwnProperty.call(this.atomic, method) ? this.atomic[method] : undefined;
+        if (!m)
+            throw new Error(`no atomic method ${method}`);
+        return m;
+    }
+    /** The keys a share holds and reads: its own, then the method's holdKeys, once each. */
+    holdKeysOf(m, keys, payloads, args) {
+        const extra = m.holdKeys ? m.holdKeys(keys, payloads, ...args) : [];
+        return [...new Set([...keys, ...extra])];
+    }
+    /** The rows of `keys`, inside a transaction. */
+    rowsOf(keys) {
+        const current = new Map();
+        for (const key of keys) {
+            const row = this.sql.exec("SELECT value FROM sharded_rows WHERE key = ?", key).toArray()[0];
+            if (row)
+                current.set(key, JSON.parse(row.value));
+        }
+        return current;
+    }
+    /** Writes rows, inside a transaction; only `keys` (what was fenced and checked). */
+    writeRows(keys, writes) {
+        const fenced = new Set(keys);
+        for (const [key, value] of writes) {
+            if (!fenced.has(key))
+                throw new Error(`atomic apply wrote ${JSON.stringify(key)}, which it neither holds nor lists in holdKeys`);
+            if (value === null)
+                this.sql.exec("DELETE FROM sharded_rows WHERE key = ?", key);
+            else
+                this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), JSON.stringify(value));
+        }
+    }
+    /**
+     * Runs `inTransaction` once these keys are free: no split copying them, no other atomic call
+     * holding them, this shard owning them. `gather` (I/O) runs first, and again if a hold appeared
+     * while it ran, so the transaction checks rows nobody holds.
+     */
+    async whenFree(keys, exceptTx, gather, inTransaction) {
+        for (;;) {
+            await this.waitForHold(keys, exceptTx);
+            const gathered = await gather();
+            // No await from here on: the check and the transaction see the same holds and split state.
+            if (this.holding(keys, exceptTx))
+                continue;
+            this.assertOwner(keys);
+            return this.ctx.storage.transactionSync(() => inTransaction(gathered));
+        }
+    }
+    async atomicStep(step, keys, payloads, args) {
+        switch (step.step) {
+            case "solo":
+                return this.atomicSolo(step.method, keys, payloads, args);
+            case "prepare":
+                return this.atomicPrepare(step, keys, payloads, args);
+            case "commit":
+                return this.atomicCommit(step.tx, step.method, keys, payloads, args);
+            case "abort":
+            case "outcome":
+                this.assertOwner(keys);
+                return { outcome: this.recordOutcome(step.tx, "abort") };
+            case "forget":
+                this.assertOwner(keys);
+                if (this.hasAtomicTables())
+                    this.sql.exec("DELETE FROM sharded_atomic_outcomes WHERE tx = ?", step.tx);
+                return { gone: true };
+            case "resolve":
+                return this.atomicResolve(step.tx, step.outcome);
+        }
+    }
+    /** The gather of `m`, bound to this share's arguments. */
+    gatherOf(m, keys, payloads, args) {
+        return m.gather ? () => m.gather(keys, payloads, ...args) : async () => undefined;
+    }
+    checkOf(m, current, keys, payloads, gathered, args) {
+        return m.check(current, keys, payloads, gathered, ...args);
+    }
+    /** The whole call in this shard: check and apply in one transaction, as `update`. */
+    async atomicSolo(method, keys, payloads, args) {
+        const m = this.atomicMethod(method);
+        const hold = this.holdKeysOf(m, keys, payloads, args);
+        const done = await this.whenFree(hold, undefined, this.gatherOf(m, keys, payloads, args), (gathered) => {
+            const current = this.rowsOf(hold);
+            const p = this.checkOf(m, current, keys, payloads, gathered, args);
+            if ("refused" in p)
+                return { refused: p.refused };
+            const { writes, result } = m.apply(current, p.staged);
+            this.writeRows(hold, writes);
+            return { applied: result };
+        });
+        return "applied" in done && m.applied ? { applied: await m.applied(keys, done.applied) } : done;
+    }
+    /** A share that is not the primary's: checked, and if it would apply, kept and held. */
+    async atomicPrepare(step, keys, payloads, args) {
+        // A prepare delivered twice: the first holds already.
+        if (this.loadHold(step.tx))
+            return { prepared: true };
+        const m = this.atomicMethod(step.method);
+        const keysHeld = this.holdKeysOf(m, keys, payloads, args);
+        const done = await this.whenFree(keysHeld, undefined, this.gatherOf(m, keys, payloads, args), (gathered) => {
+            const p = this.checkOf(m, this.rowsOf(keysHeld), keys, payloads, gathered, args);
+            if ("refused" in p)
+                return { refused: p.refused };
+            this.ensureAtomicSchema();
+            this.heldKeys();
+            this.sql.exec("INSERT INTO sharded_atomic_holds (tx, primary_key, deadline, method, keys, staged) VALUES (?, ?, ?, ?, ?, ?)", step.tx, step.primaryKey, step.deadline, step.method, JSON.stringify(keysHeld), JSON.stringify(p.staged ?? null));
+            // Held in memory in the same turn: a write that runs once this transaction is done waits.
+            this.holdInMemory({ tx: step.tx, primaryKey: step.primaryKey, deadline: step.deadline, method: step.method, keys: keysHeld, staged: null });
+            return { prepared: true };
+        });
+        if ("prepared" in done)
+            await this.armAlarm(step.deadline);
+        return done;
+    }
+    /**
+     * The primary's share: checked, and if it would apply, the outcome "commit" recorded and the
+     * share applied, in one transaction; refused, "abort" recorded. An outcome recorded already
+     * (a recovery that got here first) is answered as it is.
+     */
+    async atomicCommit(tx, method, keys, payloads, args) {
+        const m = this.atomicMethod(method);
+        const hold = this.holdKeysOf(m, keys, payloads, args);
+        // Its own shares held here (a client that routed a key here as another shard's) don't block it.
+        const done = await this.whenFree(hold, tx, this.gatherOf(m, keys, payloads, args), (gathered) => {
+            const recorded = this.outcomeOf(tx);
+            if (recorded)
+                return { outcome: recorded };
+            const current = this.rowsOf(hold);
+            const p = this.checkOf(m, current, keys, payloads, gathered, args);
+            if ("refused" in p) {
+                this.recordOutcome(tx, "abort");
+                return { refused: p.refused };
+            }
+            this.recordOutcome(tx, "commit");
+            const { writes, result } = m.apply(current, p.staged);
+            this.writeRows(hold, writes);
+            return { applied: result };
+        });
+        return "applied" in done && m.applied ? { applied: await m.applied(keys, done.applied) } : done;
+    }
+    outcomeOf(tx) {
+        if (!this.hasAtomicTables())
+            return null;
+        return this.sql.exec("SELECT outcome FROM sharded_atomic_outcomes WHERE tx = ?", tx).toArray()[0]?.outcome ?? null;
+    }
+    /** Records `outcome` for `tx` unless one is recorded; returns the one that is. */
+    recordOutcome(tx, outcome) {
+        const recorded = this.outcomeOf(tx);
+        if (recorded)
+            return recorded;
+        this.ensureAtomicSchema();
+        const now = Date.now();
+        this.sql.exec("INSERT INTO sharded_atomic_outcomes (tx, outcome, at) VALUES (?, ?, ?)", tx, outcome, now);
+        // Outcomes nobody forgot (a caller that died after the commit) go long after any hold could ask.
+        this.sql.exec("DELETE FROM sharded_atomic_outcomes WHERE at < ?", now - ATOMIC_OUTCOME_TTL_MS);
+        return outcome;
+    }
+    /** A share prepared here: applied (commit) or dropped (abort), and its keys released, in one transaction. */
+    async atomicResolve(tx, outcome) {
+        const h = this.loadHold(tx);
+        if (!h)
+            return { gone: true };
+        const m = this.atomicMethod(h.method);
+        const result = this.ctx.storage.transactionSync(() => {
+            let applied = undefined;
+            if (outcome === "commit") {
+                const { writes, result } = m.apply(this.rowsOf(h.keys), h.staged);
+                this.writeRows(h.keys, writes);
+                applied = result;
+            }
+            this.sql.exec("DELETE FROM sharded_atomic_holds WHERE tx = ?", tx);
+            return applied;
+        });
+        this.releaseInMemory(tx);
+        if (outcome === "abort")
+            return { outcome: "abort" };
+        return { applied: m.applied ? await m.applied(h.keys, result) : result };
+    }
+    /** Holds past their deadline: asks each one's primary for the outcome, and resolves it. */
+    recovering = null;
+    recoverHolds() {
+        this.recovering ??= this.recoverDue().finally(() => (this.recovering = null));
+        return this.recovering;
+    }
+    async recoverDue() {
+        const due = this.loadHolds().filter((h) => h.deadline <= Date.now());
+        if (due.length === 0)
+            return;
+        const client = sharded(this.nodes(), this.objectName(), {
+            ...(this.routesByKey() ? {} : { routeOf: (key) => this.routeOf(key) }),
+            ...(this.callerStubOptions ? { stubOptions: this.callerStubOptions } : {}),
+        });
+        await Promise.all(due.map(async (h) => {
+            const outcome = await client.atomicOutcome(h.tx, h.primaryKey);
+            await this.atomicResolve(h.tx, outcome);
+            console.log(JSON.stringify({ event: "sharded-atomic-recovered", node: this.nodeLabel(), tx: h.tx, lateMs: Date.now() - h.deadline, outcome }));
+        }));
+    }
     assertOwner(keys) {
         const meta = this.meta;
         if (meta?.state !== "shard")
@@ -397,9 +673,12 @@ export class ShardedObject extends DurableObject {
             if (!ownsHash(meta.bits, this.routeHash(key)))
                 throw new Moved();
     }
-    /** Waits while a split copies any of these keys, up to `holdWaitMs`; then "not ready". */
-    async waitForHold(keys) {
-        if (!this.holding(keys))
+    /**
+     * Waits while a split copies any of these keys, or an atomic call holds them (other than
+     * `exceptTx`), up to `holdWaitMs`; then "not ready".
+     */
+    async waitForHold(keys, exceptTx) {
+        if (!this.holding(keys, exceptTx))
             return;
         const start = Date.now();
         const deadline = start + (this.policy.holdWaitMs ?? HOLD_WAIT_MS);
@@ -415,22 +694,26 @@ export class ShardedObject extends DurableObject {
             }
         };
         this.counters.held++;
-        for (let hold = this.holding(keys); hold; hold = this.holding(keys)) {
+        for (let hold = this.holding(keys, exceptTx); hold; hold = this.holding(keys, exceptTx)) {
             if (this.hold && !counted.has(this.hold)) {
                 counted.add(this.hold);
                 this.hold.held++;
             }
+            // An atomic hold past its deadline: its caller is gone or slow, so ask its primary now
+            // rather than at the alarm.
+            if (hold.atomic && hold.until <= Date.now())
+                void this.recoverHolds();
             const left = deadline - Date.now();
             if (left <= 0) {
                 waited(true);
-                throw new NotReady(this.hold?.deadline ?? Date.now());
+                throw new NotReady(hold.until);
             }
             let timer;
-            const released = await Promise.race([hold.then(() => true), new Promise((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
+            const released = await Promise.race([hold.released.then(() => true), new Promise((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
             clearTimeout(timer);
             if (!released) {
                 waited(true);
-                throw new NotReady(this.hold?.deadline ?? Date.now());
+                throw new NotReady(hold.until);
             }
         }
         waited(false);
@@ -445,14 +728,21 @@ export class ShardedObject extends DurableObject {
             this.counters.stale++;
         return answer;
     }
-    /** What an update of these keys waits for, if any. */
-    holding(keys) {
+    /** What an update of these keys waits for, if any: a split copying them, or an atomic call (not `exceptTx`) holding them. */
+    holding(keys, exceptTx) {
         const hold = this.hold;
-        if (!hold)
-            return null;
-        for (const key of keys)
-            if (ownsHash(hold.right, this.routeHash(key)))
-                return hold.released;
+        if (hold)
+            for (const key of keys)
+                if (ownsHash(hold.right, this.routeHash(key)))
+                    return { released: hold.released, until: hold.deadline, atomic: false };
+        const held = this.heldKeys();
+        if (held.size > 0) {
+            for (const key of keys) {
+                const h = held.get(key);
+                if (h && h.tx !== exceptTx)
+                    return { released: h.released, until: h.deadline, atomic: true };
+            }
+        }
         return null;
     }
     // ---- The routed call ----
@@ -480,6 +770,38 @@ export class ShardedObject extends DurableObject {
         const fn = this.routedMethod(method);
         try {
             const ok = await fn.call(this, keys, payloads, ...args);
+            this.counters.ok++;
+            return { ok };
+        }
+        catch (error) {
+            if (error instanceof Moved)
+                return this.answered(this.moved(bits));
+            if (error instanceof NotReady)
+                return this.answered({ notReady: bits, until: error.until });
+            throw error;
+        }
+    }
+    /** One step of an atomic call (RFD0008), routed by the client as a call is: see AtomicStep. */
+    async shardedAtomic(name, bits, step, keys, payloads, args, stubOptions = null, presplitTo = 0, hashes = null) {
+        this.assertNotWiped();
+        this.callerStubOptions = stubOptions;
+        if (hashes) {
+            for (let i = 0; i < keys.length; i++) {
+                const own = this.routeHash(keys[i]);
+                if (hashes[i] !== own)
+                    return { routeMismatch: { key: keys[i], client: hashes[i], object: own } };
+            }
+        }
+        const answer = await this.arriveOrCreate(name, bits, presplitTo);
+        if (answer)
+            return this.answered(answer);
+        this.counters.calls++;
+        for (const key of keys)
+            if (!ownsHash(bits, this.routeHash(key)))
+                throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
+        this.countCall(keys.length);
+        try {
+            const ok = await this.atomicStep(step, keys, payloads, args);
             this.counters.ok++;
             return { ok };
         }
@@ -684,7 +1006,9 @@ export class ShardedObject extends DurableObject {
      */
     async split() {
         const before = this.meta;
-        if (!before || this.hold || this.warming || before.state !== "shard" || before.bits.length >= this.policy.maxDepth)
+        // A shard holding keys for atomic calls stays whole until they end (milliseconds, or a hold's
+        // deadline): a hold and the share it keeps belong to one object.
+        if (!before || this.hold || this.warming || before.state !== "shard" || before.bits.length >= this.policy.maxDepth || this.heldKeys().size > 0)
             return false;
         const right = `${before.bits}1`;
         // Start the new object before holding writes: a first call to an object can take seconds.
@@ -704,7 +1028,7 @@ export class ShardedObject extends DurableObject {
         const warm = Date.now() - warmStarted;
         // Meanwhile the meta may have been saved (cleanup progress): split from the current one.
         const meta = this.meta;
-        if (!meta || meta.bits !== before.bits || meta.state !== "shard" || meta.epoch !== before.epoch || this.hold)
+        if (!meta || meta.bits !== before.bits || meta.state !== "shard" || meta.epoch !== before.epoch || this.hold || this.heldKeys().size > 0)
             return false;
         const epoch = meta.epoch + 1;
         let release;
@@ -1053,6 +1377,14 @@ export class ShardedObject extends DurableObject {
             failed = true;
             console.error(JSON.stringify({ event: "split-cleanup-failed", node: this.nodeLabel(), error: String(error) }));
         }
+        // Atomic holds past their deadline ask their primary (RFD0008).
+        try {
+            await this.recoverHolds();
+        }
+        catch (error) {
+            failed = true;
+            console.error(JSON.stringify({ event: "sharded-atomic-recover-failed", node: this.nodeLabel(), error: String(error) }));
+        }
         // The subclass's turn, on a serving shard only: a copy's is armed when it is activated.
         const serving = this.meta.state === "shard";
         const wake = this.loadWake();
@@ -1086,6 +1418,9 @@ export class ShardedObject extends DurableObject {
         const next = this.loadWake();
         if (serving && next !== null)
             times.push(next);
+        const holdDue = this.nextHoldDeadline();
+        if (holdDue !== null)
+            times.push(holdDue <= Date.now() ? Date.now() + ALARM_RETRY_MS : holdDue);
         // After onAlarm the alarm is its retry's: set it to what is due next, or clear it.
         if (ran)
             return times.length > 0 ? this.ctx.storage.setAlarm(Math.min(...times)) : this.ctx.storage.deleteAlarm();

@@ -1,3 +1,4 @@
+import { type AtomicOutcome, type Outcome } from "./atomic.js";
 import { type NodeDescription, type StubOptions } from "./index.js";
 export declare function objectId(namespace: DurableObjectNamespace<any>, objectName: string): {
     readonly id: DurableObjectId;
@@ -113,6 +114,29 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
      * throws SpansShards, before anything is applied, if they belong to more than one.
      */
     callOneShard<M extends KeyMethods<T>>(keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, ...args: Rest<T[M]>): Promise<Result<T[M]>>;
+    /** How `route` calls a shard for a method of the subclass. */
+    private method;
+    /** How `route` calls a shard for a step of an atomic call. */
+    private atomicStep;
+    /**
+     * Calls `method` on the shards owning `keys` (RFD0008), all or nothing: every shard's share
+     * applies, or none does. Keys in one shard: one call, as `callOneShard`. Keys in several: the
+     * shard of the smallest key (the primary) records the outcome once every other shard has
+     * prepared its share, holding its keys; then each applies or drops it. `method` names one of the
+     * class's `atomic` methods. Refused anywhere: nothing is applied, and the refusals come back.
+     * Writes to the keys wait while the call holds them; reads see the rows from before.
+     */
+    atomically<R = unknown, A = unknown>(keys: readonly string[], method: string, payloads: readonly unknown[] | null, ...args: unknown[]): Promise<AtomicOutcome<R, A>>;
+    /** An atomic call over several shards; "again" if a split moved the primary's keys apart before the commit (nothing applied). */
+    private atomicAcross;
+    /** The outcome of atomic call `tx`, from its primary (recording an abort if it has none). */
+    atomicOutcome(tx: string, primaryKey: string): Promise<Outcome>;
+    /** A step at the primary of `tx`. */
+    private atomicTo;
+    /** Records an abort at the primary, if it can: else the holds end at their deadline, aborted. */
+    private decideAbort;
+    /** Tells every shard that prepared the outcome; each that applied answers its result. A lost one recovers at its deadline. */
+    private resolveAll;
     private route;
     /** Calls `method(...args)` on every shard. */
     scan<M extends ScanMethods<T>>(method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<Result<T[M]>[]>;
