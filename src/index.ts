@@ -4,7 +4,7 @@
 //   @leostera/do-kit/indexed  IndexedTable: a ShardedTable with global indexes (lookups, uniqueness).
 //   @leostera/do-kit/workgraph  Work graphs: incremental, parallel execution of a graph of pure units.
 //   @leostera/do-kit/leased   ReadLeases, RelayReads, RelayPlan: one object's hot keys, read through relays.
-//   @leostera/do-kit/client   DOClient: calls to any object with deadlines, retries and interceptors.
+//   @leostera/do-kit/client   Client: calls to any object with deadlines, retries and interceptors.
 //   @leostera/do-kit/behaviours  GenServer, GenStatem, GenEvent: objects as servers, state machines, event fan-outs.
 export * from "./sharded/index.js";
 export * from "./table/index.js";

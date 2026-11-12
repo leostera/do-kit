@@ -1,15 +1,15 @@
-// What DOClient and behaviours cost (RFD0009), on the same one-object key/value work as the
+// What Client and behaviours cost (RFD0009), on the same one-object key/value work as the
 // `single` target: the same table, the same SQL, the same 1 KiB values.
 //
 //   single              a plain Durable Object through a raw stub: the baseline
-//   single-client       the same object through DOClient, no options
+//   single-client       the same object through Client, no options
 //   single-client-opts  the same, with a deadline, retries and an interceptor
 //   genserver           a GenServer doing the same SQL in its callbacks, through its client
 //   genserver-keyed     the same, with retries on: every call carries an idempotency key, kept
 //   genstatem           a one-state GenStatem doing the same SQL
 //
 // `/probe-behaviours` times what runs inside the object, without RPC: N events in one call.
-import { DOClient, type CallOptions } from "../../../src/client/index.ts";
+import { Client, type CallOptions } from "../../../src/client/index.ts";
 import { GenServer, GenStatem, keep, type CallResult, type StateHandlers } from "../../../src/behaviours/index.ts";
 import type { SingleObject } from "./index.ts";
 
@@ -128,11 +128,11 @@ const OPTIONS: CallOptions = {
 function clientOf(env: BehavioursEnv, target: BehaviourTarget, name: string): Pick<SingleObject, "put" | "get"> {
   switch (target) {
     case "single-client": {
-      const client = new DOClient(env.SINGLE, name);
+      const client = new Client(env.SINGLE, name);
       return { put: (keys, values) => client.invoke("put", keys, values), get: (keys) => client.invoke("get", keys, null) };
     }
     case "single-client-opts": {
-      const client = new DOClient(env.SINGLE, name, OPTIONS);
+      const client = new Client(env.SINGLE, name, OPTIONS);
       return { put: (keys, values) => client.invoke("put", keys, values), get: (keys) => client.invoke("get", keys, null) };
     }
     case "genserver":

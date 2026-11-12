@@ -17,7 +17,7 @@
 // the subclass's, so its public methods run in the caller, and only `call` and `cast` cross the wire,
 // as one RPC to `receive` carrying an envelope.
 import { DurableObject } from "cloudflare:workers";
-import { CallError, DOClient, type CallOptions, type PreparedCall, type StatusCode } from "../client/index.js";
+import { CallError, Client, type CallOptions, type PreparedCall, type StatusCode } from "../client/index.js";
 import type { Effect, Envelope, EventKind, From, Metadata, Outcome } from "./envelope.js";
 
 /** @internal One event, as the base class hands it to a behaviour's step. */
@@ -173,7 +173,7 @@ export abstract class Behaviour<Env = unknown, Call = unknown, Reply = unknown, 
    * `call` and `cast` sent to the object. Options apply to every call; narrow them with `.with()`.
    */
   static client<T extends Behaviour<any, any, any, any>>(this: { readonly prototype: T }, namespace: DurableObjectNamespace<T>, name: string, options?: CallOptions): BehaviourClient<T> {
-    return behaviourClient(this.prototype, new DOClient(namespace as DurableObjectNamespace<any>, name, options));
+    return behaviourClient(this.prototype, new Client(namespace as DurableObjectNamespace<any>, name, options));
   }
 
   /** The one RPC method clients use. */
@@ -467,7 +467,7 @@ export type BehaviourClient<T> = {
   with(options: CallOptions): BehaviourClient<T>;
 };
 
-function behaviourClient<T>(prototype: T, remote: DOClient<any>): BehaviourClient<T> {
+function behaviourClient<T>(prototype: T, remote: Client<any>): BehaviourClient<T> {
   const client = Object.create(prototype as object) as Record<string, unknown>;
   client.call = (message: unknown) => sendEnvelope(remote, "call", message);
   client.cast = (message: unknown) => sendEnvelope(remote, "cast", message).then(() => undefined);
@@ -475,7 +475,7 @@ function behaviourClient<T>(prototype: T, remote: DOClient<any>): BehaviourClien
   return client as BehaviourClient<T>;
 }
 
-async function sendEnvelope(remote: DOClient<any>, kind: "call" | "cast", message: unknown): Promise<unknown> {
+async function sendEnvelope(remote: Client<any>, kind: "call" | "cast", message: unknown): Promise<unknown> {
   const outcome = (await remote.invokePrepared("receive", (call) => [envelopeOf(kind, message, call)])) as Outcome;
   return unwrap(outcome);
 }

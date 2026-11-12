@@ -1,4 +1,4 @@
-// What DOClient and behaviour clients cost the caller, without the network (RFD0009): each makes
+// What Client and behaviour clients cost the caller, without the network (RFD0009): each makes
 // the same call on a stub that answers at once, timed in a tight loop. The difference from calling
 // the stub directly is the client's own work per call: options, the envelope, promises.
 //
@@ -18,7 +18,7 @@ Bun.plugin({
   },
 });
 
-const { DOClient } = await import("../src/client/index.ts");
+const { Client } = await import("../src/client/index.ts");
 const { GenServer } = await import("../src/behaviours/index.ts");
 
 type Put = (keys: readonly string[], values: readonly string[]) => Promise<unknown>;
@@ -28,7 +28,8 @@ const stub = {
   put: async (keys: readonly string[]) => keys.length,
   receive: async (envelope: { message: { keys: string[] } }) => ({ ok: true, value: envelope.message.keys.length }),
 };
-const namespace = { getByName: () => stub } as unknown as DurableObjectNamespace<any>;
+const fakeNamespace = { getByName: (_name: string) => stub };
+const namespace = fakeNamespace as unknown as DurableObjectNamespace<any>;
 
 class Kv extends GenServer<unknown, null, { op: "put"; keys: readonly string[]; values: readonly string[] }, number> {
   put(keys: readonly string[], values: readonly string[]): Promise<number> {
@@ -45,9 +46,9 @@ class Kv extends GenServer<unknown, null, { op: "put"; keys: readonly string[]; 
 const interceptor = (attempt: unknown, next: (a: any) => Promise<unknown>) => next(attempt);
 /** Each case makes its client per call, as a Worker makes one per request. */
 const CASES: Record<string, () => Put> = {
-  "raw stub": () => (keys, values) => namespace.getByName("x").put(keys, values),
-  "DOClient": () => (keys, values) => new DOClient(namespace, "x").invoke("put", keys, values),
-  "DOClient, timeout + retries + interceptor": () => (keys, values) => new DOClient(namespace, "x", { timeoutMs: 30_000, retry: { maxAttempts: 3 }, interceptors: [interceptor] }).invoke("put", keys, values),
+  "raw stub": () => (keys, values) => fakeNamespace.getByName("x").put(keys),
+  "Client": () => (keys, values) => new Client(namespace, "x").invoke("put", keys, values),
+  "Client, timeout + retries + interceptor": () => (keys, values) => new Client(namespace, "x", { timeoutMs: 30_000, retry: { maxAttempts: 3 }, interceptors: [interceptor] }).invoke("put", keys, values),
   "GenServer client": () => (keys, values) => Kv.client(namespace, "x").put(keys, values),
   "GenServer client, timeout": () => (keys, values) => Kv.client(namespace, "x", { timeoutMs: 30_000 }).put(keys, values),
   "GenServer client, retries (idempotency key)": () => (keys, values) => Kv.client(namespace, "x", { retry: { maxAttempts: 3 } }).put(keys, values),

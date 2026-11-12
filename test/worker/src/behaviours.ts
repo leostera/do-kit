@@ -1,8 +1,8 @@
-// Behaviours and DOClient in the test Worker (RFD0009): a channel pool (GenServer), a code lock
-// (GenStatem) that reports to an audit log (GenEvent), and a plain object for DOClient. The route
+// Behaviours and Client in the test Worker (RFD0009): a channel pool (GenServer), a code lock
+// (GenStatem) that reports to an audit log (GenEvent), and a plain object for Client. The route
 // runs in the Worker, so the classes' client methods run here, as in any caller.
 import { DurableObject } from "cloudflare:workers";
-import { CallError, DOClient, type Attempt, type CallOptions } from "../../../src/client/index.ts";
+import { CallError, Client, type Attempt, type CallOptions } from "../../../src/client/index.ts";
 import { GenEvent, GenServer, GenStatem, keep, next, postpone, replyTo, send, stateTimeout, type CallResult, type EventHandler, type From, type Metadata, type StateHandlers } from "../../../src/behaviours/index.ts";
 
 export interface BehavioursEnv {
@@ -197,7 +197,7 @@ export class Audit extends GenEvent<BehavioursEnv, AuditEvent> {
   }
 }
 
-// ---- A plain object, for DOClient ----
+// ---- A plain object, for Client ----
 
 export class Plain extends DurableObject<BehavioursEnv> {
   #calls = 0;
@@ -323,17 +323,17 @@ export async function behavioursRoute(env: BehavioursEnv, request: BehavioursReq
       return settle(() => audit.whichHandlers());
 
     case "plain": {
-      const plain = new DOClient(env.PLAINS, name, options);
+      const plain = new Client(env.PLAINS, name, options);
       const [method, ...rest] = args as [string, ...unknown[]];
       return settle(() => (plain.invoke as (m: string, ...a: unknown[]) => Promise<unknown>)(method, ...rest));
     }
     case "plainProxy": {
-      const plain = DOClient.of(env.PLAINS, name, options);
+      const plain = Client.of(env.PLAINS, name, options);
       return settle(async () => [await plain.echo("hi"), await plain.with({ timeoutMs: 1_000 }).echo(2)]);
     }
     case "plainAbort": {
       const controller = new AbortController();
-      const waiting = settle(() => new DOClient(env.PLAINS, name, { signal: controller.signal }).invoke("sleep", 1_000));
+      const waiting = settle(() => new Client(env.PLAINS, name, { signal: controller.signal }).invoke("sleep", 1_000));
       await scheduler.wait(20);
       controller.abort("test");
       return waiting;

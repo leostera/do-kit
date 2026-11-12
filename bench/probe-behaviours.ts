@@ -1,4 +1,4 @@
-// What behaviours and DOClient cost (RFD0009), from the bench Worker's two probes, saved to
+// What behaviours and Client cost (RFD0009), from the bench Worker's two probes, saved to
 // bench/results/$BENCH_RESULTS_NAME.json:
 //   events: N events inside one object, through the behaviour and done plainly (no RPC)
 //   rpc:    one-key puts end to end, one at a time, through each client against a raw stub

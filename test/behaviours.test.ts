@@ -1,4 +1,4 @@
-// Behaviours and DOClient on objects (RFD0009), under cf dev or deployed: the classes' client
+// Behaviours and Client on objects (RFD0009), under cf dev or deployed: the classes' client
 // methods run in the test Worker, and only messages reach the objects.
 import { describe, expect, test } from "bun:test";
 import { post, useWorker } from "./harness.ts";
@@ -199,7 +199,7 @@ describe("GenEvent", () => {
   });
 });
 
-describe("DOClient", () => {
+describe("Client", () => {
   test("calls any object's methods, method by method too", async () => {
     const plain = unique("plain");
     expect(await value(plain, "plain", ["echo", { a: 1 }])).toEqual({ a: 1 });

@@ -1,4 +1,4 @@
-// DOClient (RFD0009): the caller's side of a call to any Durable Object. A bare stub call waits as
+// Client (RFD0009): the caller's side of a call to any Durable Object. A bare stub call waits as
 // long as the object takes, fails with whatever the runtime threw, and leaves retrying, logging and
 // tracing to every call site. This puts them on the client: a deadline, retries with backoff on
 // transient failures only, cancellation, metadata, interceptors that wrap every attempt, and errors
@@ -104,7 +104,7 @@ export type RpcMethods<T> = {
 type Answer<F> = F extends (...args: any[]) => infer R ? Awaited<R> : never;
 type Args<F> = F extends (...args: infer A) => any ? A : never;
 
-/** A DOClient's methods as calls on the object, plus `.with()`. */
+/** A Client's methods as calls on the object, plus `.with()`. */
 export type Remote<T> = {
   readonly [K in keyof RpcMethods<T>]: (...args: Args<RpcMethods<T>[K]>) => Promise<Answer<RpcMethods<T>[K]>>;
 } & { with(options: CallOptions): Remote<T> };
@@ -133,15 +133,15 @@ class SharedStub<T extends Rpc.DurableObjectBranded | undefined> {
  * The caller's side of calls to one named Durable Object.
  *
  * ```ts
- * const counter = new DOClient(env.COUNTERS, "visits", { timeoutMs: 500 });
+ * const counter = new Client(env.COUNTERS, "visits", { timeoutMs: 500 });
  * await counter.invoke("increment", 1);
  * await counter.with({ timeoutMs: 50, retry: { maxAttempts: 3 } }).invoke("read");
  * // or, method by method:
- * const remote = DOClient.of(env.COUNTERS, "visits");
+ * const remote = Client.of(env.COUNTERS, "visits");
  * await remote.with({ timeoutMs: 50 }).increment(1);
  * ```
  */
-export class DOClient<T extends Rpc.DurableObjectBranded | undefined> {
+export class Client<T extends Rpc.DurableObjectBranded | undefined> {
   #stub: SharedStub<T>;
 
   constructor(
@@ -153,8 +153,8 @@ export class DOClient<T extends Rpc.DurableObjectBranded | undefined> {
   }
 
   /** The same object, with these options over this client's. Interceptors add up; the rest replace. */
-  with(options: CallOptions): DOClient<T> {
-    const narrowed = new DOClient(this.namespace, this.name, mergeOptions(this.options, options));
+  with(options: CallOptions): Client<T> {
+    const narrowed = new Client(this.namespace, this.name, mergeOptions(this.options, options));
     narrowed.#stub = this.#stub;
     return narrowed;
   }
@@ -178,9 +178,9 @@ export class DOClient<T extends Rpc.DurableObjectBranded | undefined> {
     return this.#withRetries(method, args, call);
   }
 
-  /** A client whose properties are the object's methods: `DOClient.of(ns, name).increment(1)`. */
+  /** A client whose properties are the object's methods: `Client.of(ns, name).increment(1)`. */
   static of<T extends Rpc.DurableObjectBranded | undefined>(namespace: DurableObjectNamespace<T>, name: string, options?: CallOptions): Remote<T> {
-    return remoteOf(new DOClient(namespace, name, options));
+    return remoteOf(new Client(namespace, name, options));
   }
 
   async #bareAttempt(method: string, args: readonly unknown[]): Promise<unknown> {
@@ -279,7 +279,7 @@ function callStub(stub: unknown, method: string, args: readonly unknown[]): Prom
 const deadlineExceeded = (deadline: number) => new CallError("DEADLINE_EXCEEDED", `no answer by the deadline (${new Date(deadline).toISOString()})`);
 const cancelled = (signal: AbortSignal) => new CallError("CANCELLED", "the caller cancelled the call", { cause: signal.reason });
 
-function remoteOf<T extends Rpc.DurableObjectBranded | undefined>(client: DOClient<T>): Remote<T> {
+function remoteOf<T extends Rpc.DurableObjectBranded | undefined>(client: Client<T>): Remote<T> {
   return new Proxy({} as Remote<T>, {
     get(_, property) {
       if (property === "with") return (options: CallOptions) => remoteOf(client.with(options));
