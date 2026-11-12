@@ -59,7 +59,8 @@ const splitRowBytes = Number(process.env.BENCH_SPLIT_ROW_BYTES ?? 1024);
 // What was measured: the commit (and whether the tree had changes), and the deployed Worker version.
 const provenance = {
   commit: (await $`git rev-parse HEAD`.quiet().text()).trim(),
-  dirty: (await $`git status --porcelain -- src bench`.quiet().text()).trim().length > 0,
+  // The results a run writes are not the tree it measured.
+  dirty: (await $`git status --porcelain -- src bench ${":!bench/results"}`.quiet().text()).trim().length > 0,
   doKitVersion: (JSON.parse(await Bun.file(join(import.meta.dir, "..", "package.json")).text()) as { version: string }).version,
   workerVersion: process.env.BENCH_WORKER_VERSION ?? null,
 };
