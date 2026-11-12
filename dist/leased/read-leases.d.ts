@@ -79,6 +79,8 @@ export declare class ReadLeases<Row> {
      * less than MIN_LEASE_MS: the hold is never made longer.
      */
     grant(keys: readonly string[], holder?: number): number;
+    /** Whether `key` changed within WRITTEN_MS: it gets no relay leases, so relaying it is no use (RelayPlan). */
+    written(key: string, now?: number): boolean;
     /**
      * Forgets the keys whose leases are all over, at most once a lease's length: a key leased once
      * and never again would otherwise stay here for as long as the source runs.

@@ -105,7 +105,7 @@ export class ReadLeases {
         const now = Date.now();
         let ms = READ_LEASE_MS;
         for (const key of keys) {
-            if (holder !== UNNAMED && now - (this.changedAt.get(key) ?? Number.NEGATIVE_INFINITY) < WRITTEN_MS)
+            if (holder !== UNNAMED && this.written(key, now))
                 return 0;
             const held = this.held.get(key);
             if (held && held.until > now) {
@@ -133,6 +133,10 @@ export class ReadLeases {
         }
         this.sweep(now);
         return ms;
+    }
+    /** Whether `key` changed within WRITTEN_MS: it gets no relay leases, so relaying it is no use (RelayPlan). */
+    written(key, now = Date.now()) {
+        return now - (this.changedAt.get(key) ?? Number.NEGATIVE_INFINITY) < WRITTEN_MS;
     }
     /**
      * Forgets the keys whose leases are all over, at most once a lease's length: a key leased once

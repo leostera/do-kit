@@ -6,6 +6,12 @@
 // budget. K rises at once, falls only after SHRINK_MS, and the key stops being relayed when its
 // relays together see fewer than a quarter of HOT_READS.
 //
+// A key being written (ReadLeases.written) is not relayed, and one that is written stops being
+// relayed at once: the source gives relays no lease on it, so they would only read it through,
+// one more hop for every read, and no relay takes the source's load. Its readers read the source,
+// whose leases to isolates (which a write waits out) cover it as well as relays could; the relays'
+// answers say 0 relays, so the isolates that read through one come back.
+//
 // Relays nest: the first RELAY_FANOUT read the source, and every other one reads its parent
 // relay, so the source answers at most RELAY_FANOUT relays however many a key has. A relay's
 // reads of its parent are an isolate's, and its report adds its children's.
@@ -26,25 +32,20 @@ const WINDOW_MS = 1000;
 const MIN_ELAPSED_MS = 10;
 export class RelayPlan {
     hotReads;
+    written;
     relayReads;
     relayed = new Map();
     reads = new Map();
     lastReads = new Map();
     windowStart = Date.now();
-    /** `relayReads`: asks a second one relay is sized for (RELAY_READS; tests lower it to make trees of relays). */
-    constructor(hotReads, relayReads = RELAY_READS) {
-        this.hotReads = hotReads;
-        this.relayReads = relayReads;
-    }
     /**
-     * `key`'s relay count, relaying it first with `k` relays if it is not (a key hot with writes is
-     * read as often). The relays' reports size it from then on.
+     * `written`: whether a key is being written (the source's ReadLeases.written), so not relayed.
+     * `relayReads`: asks a second one relay is sized for (RELAY_READS; tests lower it to make trees of relays).
      */
-    relayAtLeast(key, k) {
-        let r = this.relayed.get(key);
-        if (!r)
-            this.relayed.set(key, (r = { k: clamp(k), reports: new Map(), lowSince: null }));
-        return r.k;
+    constructor(hotReads, written, relayReads = RELAY_READS) {
+        this.hotReads = hotReads;
+        this.written = written;
+        this.relayReads = relayReads;
     }
     /** Whether any key is relayed. */
     anyRelayed() {
@@ -55,6 +56,10 @@ export class RelayPlan {
         const now = Date.now();
         this.roll(now);
         return keys.map((key) => {
+            if (this.written(key)) {
+                this.relayed.delete(key);
+                return 0;
+            }
             const known = this.relayed.get(key);
             if (known)
                 return known.k;
@@ -75,6 +80,10 @@ export class RelayPlan {
     reported(keys, relay, asks) {
         const now = Date.now();
         return keys.map((key) => {
+            if (this.written(key)) {
+                this.relayed.delete(key);
+                return 0;
+            }
             // A source that restarted knows of no relays: the reports rebuild the count.
             let r = this.relayed.get(key);
             if (!r)

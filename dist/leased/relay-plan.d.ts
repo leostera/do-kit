@@ -8,18 +8,17 @@ export declare const RELAY_FANOUT = 8;
 export declare const MAX_RELAYS: number;
 export declare class RelayPlan {
     private readonly hotReads;
+    private readonly written;
     private readonly relayReads;
     private readonly relayed;
     private reads;
     private lastReads;
     private windowStart;
-    /** `relayReads`: asks a second one relay is sized for (RELAY_READS; tests lower it to make trees of relays). */
-    constructor(hotReads: number, relayReads?: number);
     /**
-     * `key`'s relay count, relaying it first with `k` relays if it is not (a key hot with writes is
-     * read as often). The relays' reports size it from then on.
+     * `written`: whether a key is being written (the source's ReadLeases.written), so not relayed.
+     * `relayReads`: asks a second one relay is sized for (RELAY_READS; tests lower it to make trees of relays).
      */
-    relayAtLeast(key: string, k: number): number;
+    constructor(hotReads: number, written: (key: string) => boolean, relayReads?: number);
     /** Whether any key is relayed. */
     anyRelayed(): boolean;
     /** Counts direct reads of `keys`; each one's relay count (0 if it is not relayed). */
