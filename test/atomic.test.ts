@@ -121,6 +121,21 @@ test("an outcome nobody forgot goes once its TTL passes, with no other call to i
   expect((await post<Tables>("/atomicTables", { cls: "presplit", name, bits })).outcomes).toEqual([]);
 }, 30_000);
 
+test("an outcome whose alarm was lost still goes, once anything reaches its shard", async () => {
+  // PresplitCounters keep outcomes 2 s; its tree starts at depth 2.
+  const name = `atomic-outcome-lost-alarm-${unique()}`;
+  await call("presplit", name, "add", ["a"], [10]);
+  const bits = hashBit(keyHash("a"), 0) + hashBit(keyHash("a"), 1);
+  const tx = `tx-${unique()}`;
+  expect((await post<{ ok?: unknown }>("/atomicStep", { cls: "presplit", name, bits, step: { step: "commit", tx, method: "transfer" }, keys: ["a"], payloads: [-5] })).ok).toEqual({ applied: [5] });
+  await call("presplit", name, "loseAlarm", ["a"]);
+  // Past ALARM_CHECK_MS since that call; then a read reaches the shard.
+  await Bun.sleep(5_500);
+  expect(await call("presplit", name, "get", ["a"])).toEqual([5]);
+  for (let i = 0; i < 40 && (await post<Tables>("/atomicTables", { cls: "presplit", name, bits })).outcomes.length > 0; i++) await Bun.sleep(100);
+  expect((await post<Tables>("/atomicTables", { cls: "presplit", name, bits })).outcomes).toEqual([]);
+}, 30_000);
+
 test("a caller gone after the prepares: the hold ends at its deadline, aborted, and the waiting write applies", async () => {
   const name = `atomic-gone-prepared-${unique()}`;
   const { left, right } = keysByHalf(1);
