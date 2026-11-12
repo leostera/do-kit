@@ -414,6 +414,18 @@ export class SplitBenchJob extends DurableObject<Env> {
   }
 }
 
+/** A call that has not answered in this long is counted as failed: one that never answers would hold up the whole point. */
+const CALL_TIMEOUT_MS = 30_000;
+async function bounded(call: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`no answer in ${CALL_TIMEOUT_MS / 1000} s`)), CALL_TIMEOUT_MS)));
+  try {
+    await Promise.race([call(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** `n` distinct keys for one multi-key call: of `keyCount` keys, or of HOT_POOL for "hot". */
 function distinctKeys(config: MeasureConfig, n: number): string[] {
   const pool = config.distribution === "hot" ? HOT_POOL : config.keyCount;
@@ -607,26 +619,28 @@ export class BenchDriver extends DurableObject<Env> {
         const key = keyFor(config, sequence++);
         const before = performance.now();
         try {
-          if (config.operation === "create") {
-            // Keys no run has written: this measurement's start, the driver, a count.
-            const result = await t.put(benchRow(`new-${config.startAt}-${config.driverIndex}-${created++}`, config.payloadBytes), { ifVersion: 0 });
-            if (!result.ok) throw new Error(`create refused: ${JSON.stringify(result)}`);
-            bytes += config.payloadBytes;
-          } else if (config.operation === "write") {
-            await t.put(benchRow(key, config.payloadBytes));
-            bytes += config.payloadBytes;
-          } else if (config.operation === "read") {
-            // An indexed target reads by email, through its unique index; a table by key.
-            const found = indexed ? await indexed.lookup("byEmail", [`${key}@example.com`]) : await t.get(key);
-            if (indexed && !found) throw new Error(`lookup missed ${key}`);
-            bytes += found ? config.payloadBytes : 0;
-          } else {
-            const page: Awaited<ReturnType<typeof t.list>> = indexed
-              ? await indexed.list({ index: "byTeam", partition: [team], direction: "desc", limit: 50, cursor })
-              : await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor });
-            cursor = page.cursor;
-            bytes += page.rows.length * config.payloadBytes;
-          }
+          await bounded(async () => {
+            if (config.operation === "create") {
+              // Keys no run has written: this measurement's start, the driver, a count.
+              const result = await t.put(benchRow(`new-${config.startAt}-${config.driverIndex}-${created++}`, config.payloadBytes), { ifVersion: 0 });
+              if (!result.ok) throw new Error(`create refused: ${JSON.stringify(result)}`);
+              bytes += config.payloadBytes;
+            } else if (config.operation === "write") {
+              await t.put(benchRow(key, config.payloadBytes));
+              bytes += config.payloadBytes;
+            } else if (config.operation === "read") {
+              // An indexed target reads by email, through its unique index; a table by key.
+              const found = indexed ? await indexed.lookup("byEmail", [`${key}@example.com`]) : await t.get(key);
+              if (indexed && !found) throw new Error(`lookup missed ${key}`);
+              bytes += found ? config.payloadBytes : 0;
+            } else {
+              const page: Awaited<ReturnType<typeof t.list>> = indexed
+                ? await indexed.list({ index: "byTeam", partition: [team], direction: "desc", limit: 50, cursor })
+                : await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor });
+              cursor = page.cursor;
+              bytes += page.rows.length * config.payloadBytes;
+            }
+          });
           successes++;
         } catch (error) {
           errors++;
@@ -647,27 +661,29 @@ export class BenchDriver extends DurableObject<Env> {
         const write = config.distribution === "control-plane" ? Math.random() < CONTROL_PLANE.writeShare : config.operation === "mixed" ? Math.random() < MIXED_WRITES : config.operation === "write";
         const before = performance.now();
         try {
-          if (keysPerCall(config.operation) > 1) {
-            const keys = distinctKeys(config, keysPerCall(config.operation));
-            const values = keys.map(() => "x".repeat(config.payloadBytes));
-            const client = sharded(shardedNamespace(this.env, config.target), config.objectName);
-            if (config.operation.startsWith("atomic-")) {
-              const outcome = await client.atomically(keys, "put", values);
-              if (!outcome.committed) throw new Error("atomic put refused");
-            } else await client.call(keys, "put", values);
-            bytes += config.payloadBytes * keys.length;
-          } else if (isReader(config.target)) {
-            if (write) {
-              await writeHot(this.env, config.target, config.objectName, "hot-key", "x".repeat(config.payloadBytes));
+          await bounded(async () => {
+            if (keysPerCall(config.operation) > 1) {
+              const keys = distinctKeys(config, keysPerCall(config.operation));
+              const values = keys.map(() => "x".repeat(config.payloadBytes));
+              const client = sharded(shardedNamespace(this.env, config.target), config.objectName);
+              if (config.operation.startsWith("atomic-")) {
+                const outcome = await client.atomically(keys, "put", values);
+                if (!outcome.committed) throw new Error("atomic put refused");
+              } else await client.call(keys, "put", values);
+              bytes += config.payloadBytes * keys.length;
+            } else if (isReader(config.target)) {
+              if (write) {
+                await writeHot(this.env, config.target, config.objectName, "hot-key", "x".repeat(config.payloadBytes));
+                bytes += config.payloadBytes;
+              } else bytes += (await readHot(this.env, config.target, config.objectName, "hot-key"))?.length ?? 0;
+            } else if (write) {
+              await this.write(config.target, config.objectName, [key], ["x".repeat(config.payloadBytes)]);
               bytes += config.payloadBytes;
-            } else bytes += (await readHot(this.env, config.target, config.objectName, "hot-key"))?.length ?? 0;
-          } else if (write) {
-            await this.write(config.target, config.objectName, [key], ["x".repeat(config.payloadBytes)]);
-            bytes += config.payloadBytes;
-          } else {
-            const value = await this.read(config.target, config.objectName, key);
-            bytes += value?.length ?? 0;
-          }
+            } else {
+              const value = await this.read(config.target, config.objectName, key);
+              bytes += value?.length ?? 0;
+            }
+          });
           successes++;
         } catch (error) {
           errors++;
