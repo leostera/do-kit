@@ -15,6 +15,8 @@ The numbers and graphs in the [README](../README.md) and [docs/performance.md](.
 | `table-1`, `table-4`, `table-16`, `table-64` | A `ShardedTable` (10,000 rows of 1 KiB, two indexes) starting as that many shards and never splitting: `write` (put), `read` (get) and `list` (a page of 50 newest first, walking a cursor). Drivers scale with the calls a page makes. |
 | `two-copy` | A design that freezes, snapshots into two children and stays as a router (`worker/src/two-copy/`, for comparison only). |
 | `indexed-1`, `indexed-4`, `indexed-16` | An `IndexedTable` on the same rows, with a unique global index on email and one on (team, createdAt), its rows and index entries each on that many shards. Adds `create` (new rows only if absent), and its reads and listings go through the global indexes. |
+| `single-client`, `single-client-opts` | The `single` object through `Client` (RFD0009): with no options, and with a deadline, retries and an interceptor. |
+| `genserver`, `genserver-keyed`, `genstatem` | The same SQL in a `GenServer`'s or a one-state `GenStatem`'s callbacks, through its client; `genserver-keyed` with retries on, so every call carries an idempotency key the object keeps. Take `read` and `write`. |
 | `reader-single`, `reader-leased` | One hot key, read by the drivers as an app's isolates would: from one plain Durable Object, or with leased reads (`worker/src/leased.ts`: a source, its relays, and a sub-lease kept in the driver's memory). Take `read` and `mixed`. A point on `reader-leased` also reports what reached the source. |
 
 Operations besides `read` and `write`: `list` and `create` (table targets); `atomic-2` and `atomic-4`, one `atomically` put of that many distinct keys, against `multi-2` and `multi-4`, the same put as one plain call (`presplit` or `split`; with `hot`, keys come from a pool of 8); and `mixed`, reads with 1% writes (`reader-*`).
@@ -107,3 +109,13 @@ cf workers get do-kit-bench   # 404: gone
 ```
 
 If you made an Access application only for the benchmark, delete it too.
+
+## Behaviours and Client
+
+What the RFD0009 layers cost, apart from the load targets above:
+
+- `bun bench/client-overhead.ts`: each client's own work per call, on a stub that answers at once (Bun, no network).
+- `bun bench/probe-behaviours.ts`, against the bench Worker (`BENCH_URL`, `BENCH_TOKEN`): `events` runs N events inside one object, as behaviour events and as plain transactions, timed by the caller; `rpc` times sequential one-key puts through each client against a raw stub.
+- `bun bench/behaviours-tables.ts` prints RFD0009's tables from the results files.
+
+Locally, `cf dev` in `bench/worker` serves the same Worker; local numbers measure the laptop, and only the in-object probe is steady enough to read there.
