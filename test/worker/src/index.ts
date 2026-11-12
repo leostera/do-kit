@@ -101,6 +101,17 @@ function failStatementOnce(storage: DurableObjectStorage, text: string): void {
   }) as typeof sql.exec;
 }
 
+/** While set, deliveries to this index object fail. */
+function setFailApply(storage: DurableObjectStorage, fail: boolean): void {
+  storage.sql.exec("CREATE TABLE IF NOT EXISTS test_apply (fail INTEGER NOT NULL)");
+  storage.sql.exec("DELETE FROM test_apply");
+  storage.sql.exec("INSERT INTO test_apply (fail) VALUES (?)", fail ? 1 : 0);
+}
+function assertApplyAllowed(storage: DurableObjectStorage): void {
+  storage.sql.exec("CREATE TABLE IF NOT EXISTS test_apply (fail INTEGER NOT NULL)");
+  if (storage.sql.exec("SELECT fail FROM test_apply WHERE fail = 1").toArray().length) throw new Error("test: apply failed");
+}
+
 export class Users extends IndexedTable<Env, User> {
   protected table = users;
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
@@ -161,13 +172,10 @@ export class UserIndexes extends GlobalIndex<Env> {
   }
   /** While set, deliveries to this object fail (the flag is copied with the rest). */
   async failApply(fail: boolean): Promise<void> {
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_apply (fail INTEGER NOT NULL)");
-    this.ctx.storage.sql.exec("DELETE FROM test_apply");
-    this.ctx.storage.sql.exec("INSERT INTO test_apply (fail) VALUES (?)", fail ? 1 : 0);
+    setFailApply(this.ctx.storage, fail);
   }
   override async indexApply(...args: Parameters<GlobalIndex<Env>["indexApply"]>): ReturnType<GlobalIndex<Env>["indexApply"]> {
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_apply (fail INTEGER NOT NULL)");
-    if (this.ctx.storage.sql.exec("SELECT fail FROM test_apply WHERE fail = 1").toArray().length) throw new Error("test: apply failed");
+    assertApplyAllowed(this.ctx.storage);
     return super.indexApply(...args);
   }
 }
@@ -203,6 +211,14 @@ export class EvolvingUsers extends IndexedTable<Env, User> {
 export class EvolvingUserIndexes extends GlobalIndex<Env> {
   // Small, so dropping an index takes several alarms.
   protected override dropBatch = 50;
+  /** While set, deliveries to this object fail (the flag is copied with the rest). */
+  async failApply(fail: boolean): Promise<void> {
+    setFailApply(this.ctx.storage, fail);
+  }
+  override async indexApply(...args: Parameters<GlobalIndex<Env>["indexApply"]>): ReturnType<GlobalIndex<Env>["indexApply"]> {
+    assertApplyAllowed(this.ctx.storage);
+    return super.indexApply(...args);
+  }
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.EVOLVING_USER_INDEXES as never;
   }
@@ -730,7 +746,7 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
     case "loseAlarm": // [bits]: of a row shard
       return env.USERS.get(env.USERS.idFromName(shardObjectName(body.name, body.args[0] as string))).loseAlarm();
     case "failApply": // [fail, bits]
-      return env.USER_INDEXES.get(env.USER_INDEXES.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).failApply(body.args[0] as boolean);
+      return (indexNs as typeof env.USER_INDEXES).get(indexNs.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).failApply(body.args[0] as boolean);
   }
   try {
     return { ok: await (t as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[body.op]!.call(t, ...body.args) };

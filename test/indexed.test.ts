@@ -326,6 +326,23 @@ test("a unique index added to a table that has rows is built over them, and repo
   expect((await ok(evolve<Result<Status>>("indexStatus"))).duplicates).toEqual([]);
 }, 120_000);
 
+test("an index being built is not reported built while its last entries are still to be delivered", async () => {
+  const t = fresh("evolving-users");
+  const evolve = <T>(operation: string, ...args: unknown[]) => post<T>("/indexed", { cls: "evolving", name: t, op: operation, args });
+  // Two rows with the same email, under the first schema; the index shard then refuses deliveries.
+  await evolve("putMany", [{ row: user("a", "same@example.com") }, { row: user("b", "same@example.com") }]);
+  await evolve("lookup", "byTeam", ["core"]); // the index shard exists
+  await evolve("failApply", true, "");
+  await evolve("upgrade", "");
+  type Status = { building: string[]; duplicates: { index: string; key: string; owner: string }[] };
+  await sleep(3_000); // the build's pages are read, and their delivery fails
+  expect((await ok(evolve<Result<Status>>("indexStatus"))).building).toEqual(["byEmail"]);
+  // Once delivered, it is built, and the row that could not take the email is reported.
+  await evolve("failApply", false, "");
+  const status = await eventually(() => ok(evolve<Result<Status>>("indexStatus")), (s) => s.building.length === 0, 20_000);
+  expect(status.duplicates.map((d) => [d.key, d.owner].sort())).toEqual([["a", "b"]]);
+}, 40_000);
+
 test("an index the schema drops has its entries dropped, and one redefined under the same name is built again apart", async () => {
   const t = fresh("evolving-users");
   const evolve = <T>(operation: string, args: unknown[], version?: number) => post<T>("/indexed", { cls: "evolving", name: t, op: operation, args, version });
