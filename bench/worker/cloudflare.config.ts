@@ -15,8 +15,9 @@ export default defineConfig(() => ({
     previewUrls: false,
     compatibilityDate: "2026-10-29",
     compatibilityFlags: ["nodejs_compat", "durable_object_snapshots"],
-    // A split benchmark runs writers for minutes in one request.
-    limits: { cpuMs: 300_000 },
+    // A split benchmark runs writers for minutes in one request, and a driver runs all of a
+    // point's calls in one request: a listing of a 64-shard table is up to 192 calls.
+    limits: { cpuMs: 300_000, subrequests: 1_000_000 },
     entrypoint,
     env: {
       BENCH_DRIVERS: bindings.durableObject({ worker: NAME, exportName: "BenchDriver" }),
