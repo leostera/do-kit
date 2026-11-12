@@ -359,6 +359,8 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      * while it ran, so the transaction checks rows nobody holds.
      */
     private whenFree;
+    /** Throws Contended if `requester` (an atomic call) meets the hold of an older call on these keys. */
+    private giveWayToOlder;
     private atomicStep;
     /** The gather of `m`, bound to this share's arguments. */
     private gatherOf;
@@ -367,12 +369,16 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private atomicSolo;
     /** A share that is not the primary's: checked, and if it would apply, kept and held. */
     private atomicPrepare;
+    /** In the transaction that holds them: checks the share, and if it would apply, keeps it and holds its keys. */
+    private prepareShare;
     /**
      * The primary's share: checked, and if it would apply, the outcome "commit" recorded and the
      * share applied, in one transaction; refused, "abort" recorded. An outcome recorded already
      * (a recovery that got here first) is answered as it is.
      */
     private atomicCommit;
+    /** In one transaction: the outcome recorded and the primary's share applied, or refused and aborted. */
+    private commitShare;
     private outcomeOf;
     /** Records `outcome` for `tx` unless one is recorded; returns the one that is. */
     private recordOutcome;

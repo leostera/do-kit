@@ -1,7 +1,7 @@
 // The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { ATOMIC_HOLD_MS } from "./atomic.js";
+import { ATOMIC_HOLD_MS, atomicTxId } from "./atomic.js";
 import { hashBit, keyHash } from "./hash.js";
 import { hostBits, shardObjectName, nodeName } from "./index.js";
 /**
@@ -95,13 +95,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 class Backoff {
     what;
     limitMs;
+    reason;
     wait = 5;
     waited = 0;
     /** A split in progress said it is done or gives up by then: wait at least that long. */
     until = 0;
-    constructor(what, limitMs) {
+    constructor(what, limitMs, reason = "a new shard did not start serving") {
         this.what = what;
         this.limitMs = limitMs;
+        this.reason = reason;
     }
     /** A shard holding the call for a split that gives up at `until` (its clock). */
     extend(until) {
@@ -110,7 +112,7 @@ class Backoff {
     }
     async next() {
         if (this.waited > this.limitMs && Date.now() > this.until + ACTIVATION_SLACK_MS)
-            throw new Error(`${this.what}: a new shard did not start serving`);
+            throw new Error(`${this.what}: ${this.reason}`);
         // Jittered: callers held by one split are released together, and must not retry in step.
         const wait = this.wait / 2 + Math.random() * this.wait;
         await sleep(wait);
@@ -257,8 +259,12 @@ export class ShardedClient {
         if (payloads && payloads.length !== keys.length)
             throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
         await this.loadCache();
-        for (let attempt = 0;; attempt++) {
-            if (attempt > MAX_HOPS)
+        // The call's age, kept across retries: an older call never gives way to a younger one.
+        const startedAt = Date.now();
+        // A call that gave way waits out the older one, up to notReadyWaitMs over all its retries.
+        const contention = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs, "an atomic call kept giving way to older calls");
+        for (let splits = 0;;) {
+            if (splits > MAX_HOPS)
                 throw new Error(`sharded ${this.name}: atomic call did not settle`);
             if (new Set(keys.map((k) => this.shardFor(this.routeHash(k)))).size === 1) {
                 try {
@@ -268,20 +274,29 @@ export class ShardedClient {
                 }
                 catch (error) {
                     // A split this client had not heard of: the keys span shards now.
-                    if (error instanceof SpansShards)
+                    if (error instanceof SpansShards) {
+                        splits++;
                         continue;
+                    }
                     throw error;
                 }
             }
-            const outcome = await this.atomicAcross(keys, method, payloads, args);
-            if (outcome !== "again")
+            const outcome = await this.atomicAcross(keys, method, payloads, args, startedAt);
+            if (outcome === "again")
+                splits++;
+            else if (outcome === "contended")
+                await contention.next();
+            else
                 return outcome;
         }
     }
-    /** An atomic call over several shards; "again" if a split moved the primary's keys apart before the commit (nothing applied). */
-    async atomicAcross(keys, method, payloads, args) {
+    /**
+     * An atomic call over several shards. Nothing applied, to be retried: "again" if a split moved the
+     * primary's keys apart before the commit, "contended" if a shard gave way to an older call.
+     */
+    async atomicAcross(keys, method, payloads, args, startedAt) {
         const started = Date.now();
-        const tx = crypto.randomUUID();
+        const tx = atomicTxId(startedAt);
         const primaryKey = [...keys].sort()[0];
         const primaryBits = this.shardFor(this.routeHash(primaryKey));
         const mine = keys.map((k) => this.shardFor(this.routeHash(k)) === primaryBits);
@@ -298,14 +313,20 @@ export class ShardedClient {
             throw error;
         }
         const prepared = prepares.filter((r) => "prepared" in r.result);
+        const contended = prepares.some((r) => "contended" in r.result);
         const refusals = prepares.flatMap((r) => ("refused" in r.result ? [{ keys: r.keys, result: r.result.refused }] : []));
         const preparedAt = Date.now();
         const log = (outcome, extra = {}) => console.log(JSON.stringify({ event: "sharded-atomic", object: this.name, shards: prepares.length + 1, keys: keys.length, outcome, prepareMs: preparedAt - started, ms: Date.now() - started, ...extra }));
-        if (refusals.length > 0) {
+        if (refusals.length > 0 || contended) {
             await this.decideAbort(tx, primaryKey);
             await this.resolveAll(prepared, tx, "abort");
-            log("refused");
-            return { committed: false, refusals };
+            // Refused wins: the call would be refused again.
+            if (refusals.length > 0) {
+                log("refused");
+                return { committed: false, refusals };
+            }
+            log("contended");
+            return "contended";
         }
         let answer;
         let primaryKeys;
@@ -330,6 +351,12 @@ export class ShardedClient {
             if (outcome === "abort")
                 throw error;
             return { committed: true, results: resolved.results };
+        }
+        if ("contended" in answer) {
+            // The primary gave way to an older call, and recorded an abort.
+            await this.resolveAll(prepared, tx, "abort");
+            log("contended at the primary");
+            return "contended";
         }
         if ("refused" in answer || ("outcome" in answer && answer.outcome === "abort")) {
             await this.resolveAll(prepared, tx, "abort");

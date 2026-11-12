@@ -127,7 +127,10 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
      * Writes to the keys wait while the call holds them; reads see the rows from before.
      */
     atomically<R = unknown, A = unknown>(keys: readonly string[], method: string, payloads: readonly unknown[] | null, ...args: unknown[]): Promise<AtomicOutcome<R, A>>;
-    /** An atomic call over several shards; "again" if a split moved the primary's keys apart before the commit (nothing applied). */
+    /**
+     * An atomic call over several shards. Nothing applied, to be retried: "again" if a split moved the
+     * primary's keys apart before the commit, "contended" if a shard gave way to an older call.
+     */
     private atomicAcross;
     /** The outcome of atomic call `tx`, from its primary (recording an abort if it has none). */
     atomicOutcome(tx: string, primaryKey: string): Promise<Outcome>;
