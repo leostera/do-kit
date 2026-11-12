@@ -113,6 +113,11 @@ async function measure(config: {
         const point = JSON.parse(text) as Point | null;
         // Anything but a measured point (the Worker answered null, say) is a failed attempt.
         if (point !== null && typeof point === "object" && typeof point.operationsPerSecond === "number") return point;
+        // Every driver failed (no time measured): say why, not the start of the answer.
+        const p = (point ?? {}) as { stalls?: unknown; errorSamples?: unknown; failedDrivers?: unknown };
+        console.error(JSON.stringify({ failed: config, noMeasurement: { stalls: p.stalls, errorSamples: p.errorSamples, failedDrivers: p.failedDrivers } }));
+        if (attempt >= 2) throw new Error("Benchmark answered no measurement");
+        continue;
       } catch {
         // not JSON: fall through
       }
