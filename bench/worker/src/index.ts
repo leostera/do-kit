@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
-import { LeasedRelay, LeasedSource, Reader, type ReaderTarget } from "./leased.ts";
+import { LeasedRelay, LeasedSource, readHot, writeHot, type ReaderTarget } from "./leased.ts";
 
-export { LeasedRelay, LeasedSource, Reader };
+export { LeasedRelay, LeasedSource };
 import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedTableClient } from "../../../src/indexed/index.ts";
 import { entryOf, globalIndexes as globalIndexesOf } from "../../../src/indexed/entries.ts";
@@ -13,7 +13,7 @@ const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
 type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget | ReaderTarget;
 const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16", "reader-single", "reader-leased"];
-/** Reads through a stateless entrypoint, as readers reach an app: to one object, or with leased reads. */
+/** One hot key, read by readers in their isolates: of one object, or with leased reads. */
 const isReader = (t: Target): t is ReaderTarget => t === "reader-single" || t === "reader-leased";
 /** A ShardedTable that starts as this many shards and never splits by load: "table-1" is one object. */
 type TableTarget = "table-1" | "table-4" | "table-16" | "table-64";
@@ -79,7 +79,6 @@ function zipfObject(objects: number): string {
 
 interface Env {
   readonly BENCH_DRIVERS: DurableObjectNamespace<BenchDriver>;
-  readonly READER: Service<Reader>;
   readonly LEASED_SOURCE: DurableObjectNamespace<LeasedSource>;
   readonly LEASED_RELAY: DurableObjectNamespace<LeasedRelay>;
   readonly SINGLE: DurableObjectNamespace<SingleObject>;
@@ -528,7 +527,7 @@ export class BenchDriver extends DurableObject<Env> {
       return;
     }
     if (isReader(config.target)) {
-      if (config.driverIndex === 0) await this.env.READER.write(config.target, config.objectName, "hot-key", value);
+      if (config.driverIndex === 0) await writeHot(this.env, config.target, config.objectName, "hot-key", value);
       return;
     }
     if (config.operation !== "read" || config.distribution !== "uniform" && config.distribution !== "hot") return;
@@ -659,9 +658,9 @@ export class BenchDriver extends DurableObject<Env> {
             bytes += config.payloadBytes * keys.length;
           } else if (isReader(config.target)) {
             if (write) {
-              await this.env.READER.write(config.target, config.objectName, "hot-key", "x".repeat(config.payloadBytes));
+              await writeHot(this.env, config.target, config.objectName, "hot-key", "x".repeat(config.payloadBytes));
               bytes += config.payloadBytes;
-            } else bytes += (await this.env.READER.read(config.target, config.objectName, "hot-key"))?.length ?? 0;
+            } else bytes += (await readHot(this.env, config.target, config.objectName, "hot-key"))?.length ?? 0;
           } else if (write) {
             await this.write(config.target, config.objectName, [key], ["x".repeat(config.payloadBytes)]);
             bytes += config.payloadBytes;
@@ -679,6 +678,9 @@ export class BenchDriver extends DurableObject<Env> {
           const bucket = Math.min(120_000, Math.floor(elapsed));
           latencyMs[bucket]++;
         }
+        // A read from the isolate's sub-lease does no I/O, and the clock moves only with I/O:
+        // without this the loop never sees stopAt. Outside the timed call.
+        if (isReader(config.target)) await new Promise((resolve) => setTimeout(resolve, 1));
       }
     };
 
@@ -1057,6 +1059,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
       fleets.push({ stub, configs: configs.slice(i, i + DRIVERS_PER_FLEET) });
     }
     await Promise.all(fleets.map((fleet) => fleet.stub.prepare(fleet.configs)));
+    // Leased reads: what reached the source during the point, besides what readers saw.
+    const source = input.target === "reader-leased" ? env.LEASED_SOURCE.get(env.LEASED_SOURCE.idFromName(input.objectName)) : null;
+    const sourceBefore = source ? await source.stats() : null;
     // Later with more fleets: every driver must have its start time before it comes.
     const startAt = Date.now() + 750 + 250 * fleets.length;
     const settled = await Promise.allSettled(fleets.map((fleet) => fleet.stub.measure(fleet.configs.map((config) => ({ ...config, startAt })))));
@@ -1067,6 +1072,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const histogram = new Array<number>(120_001).fill(0);
     for (const [bucket, count] of latencyMs) histogram[bucket!] = count!;
 
+    const sourceAfter = source ? await source.stats().catch(() => null) : null;
+    const perSecond = (n: number) => Math.round((n * 1000) / Math.max(1, elapsedMs));
+    const leased = sourceBefore && sourceAfter ? { sourceDirectReadsPerSecond: perSecond(sourceAfter.direct - sourceBefore.direct), sourceRelayReadsPerSecond: perSecond(sourceAfter.relay - sourceBefore.relay), writesPerSecond: perSecond(sourceAfter.writes - sourceBefore.writes), relays: sourceAfter.relays } : null;
     let topology: Awaited<ReturnType<typeof describeTree>> | null = null;
     if (input.target === "split") topology = await describeTree(env, input.objectName);
     if (input.target === "legacy") topology = await describeLegacyTree(env, input.objectName);
@@ -1098,6 +1106,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       mebibytesPerSecond: bytes / (1024 * 1024) / (elapsedMs / 1000),
       latencyMs: { p50: percentile(histogram, 0.5), p95: percentile(histogram, 0.95), p99: percentile(histogram, 0.99), max: Math.round(maxLatencyMs * 100) / 100 },
       topology,
+      leased,
       // The first sample, under the name earlier results use.
       errorSample: errorSamples[0] ?? null,
     });

@@ -1,7 +1,7 @@
 // Leased reads of one hot key, wired as an app would: a source object holding the key, relays it
-// leases the key to, and a stateless entrypoint (the isolates readers reach) that answers from its
-// sub-lease while it lasts. The plain baseline is the same entrypoint reading one Durable Object.
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+// leases the key to, and the readers' isolates, which answer from their sub-lease while it lasts.
+// The plain baseline is the same readers reading one Durable Object.
+import { DurableObject } from "cloudflare:workers";
 import { HOT_READS, READ_LEASE_MARGIN_MS, ReadLeases, RelayPlan, RelayReads, relayIndex, relayParent, type RelayAnswer, type SourceAnswer } from "../../../src/leased/index.ts";
 
 export interface LeasedEnv {
@@ -16,7 +16,7 @@ interface PlainObject extends Rpc.DurableObjectBranded {
   get(keys: readonly string[], payloads: null): Promise<(string | null)[]>;
 }
 
-/** "reader-single": through the entrypoint to one plain object; "reader-leased": through it, with leases and relays. */
+/** "reader-single": readers read one plain object; "reader-leased": with leases and relays. */
 export type ReaderTarget = "reader-single" | "reader-leased";
 
 type Value = string | null;
@@ -28,6 +28,8 @@ export class LeasedSource extends DurableObject<LeasedEnv> {
   private readonly leases: ReadLeases<Value>;
   private readonly plan = new RelayPlan(HOT_READS);
   private name = "";
+  /** Reads and writes this source served, since it started (in memory): what a benchmark point reports. */
+  private readonly served = { direct: 0, relay: 0, writes: 0, relays: 0 };
 
   constructor(ctx: DurableObjectState, env: LeasedEnv) {
     super(ctx, env);
@@ -58,6 +60,8 @@ export class LeasedSource extends DurableObject<LeasedEnv> {
     this.name = name;
     await this.readable(key);
     const [relays] = this.plan.direct([key]);
+    this.served.direct++;
+    this.served.relays = relays!;
     return { value: this.leases.visible(key, this.committed(key)) ?? null, leaseMs: this.leases.grant([key]), relays: relays! };
   }
 
@@ -66,12 +70,20 @@ export class LeasedSource extends DurableObject<LeasedEnv> {
     this.name = name;
     await this.readable(key);
     const [relays] = this.plan.reported([key], relay, asks);
+    this.served.relay++;
+    this.served.relays = relays!;
     return { value: this.leases.visible(key, this.committed(key)) ?? null, leaseMs: fresh ? 0 : this.leases.grant([key], relay), relays: relays! };
+  }
+
+  /** What this source served since it started, and the hot key's relay count last answered. */
+  async stats(): Promise<{ direct: number; relay: number; writes: number; relays: number }> {
+    return { ...this.served };
   }
 
   /** Commits at once; acknowledged once every lease on the key is over or given back. */
   async write(name: string, key: string, value: string): Promise<void> {
     this.name = name;
+    this.served.writes++;
     const before = this.committed(key);
     this.ctx.storage.transactionSync(() => {
       this.sql.exec("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, value);
@@ -127,37 +139,33 @@ export class LeasedRelay extends DurableObject<LeasedEnv> {
   }
 }
 
-/** This isolate's sub-leases, by object and key, and the reads in flight that renew them. */
+/**
+ * This isolate's sub-leases, by object and key. A miss reads on its own: a read shared with
+ * another request would hang if that request went away first (relays share their reads anyway).
+ */
 const cache = new Map<string, { value: Value; until: number; relays: number }>();
-const inFlight = new Map<string, Promise<Value>>();
 /** Which of a key's relays this isolate reads through. */
 const DRAW = Math.random();
 
-/** What readers reach: a stateless entrypoint, as an app's Worker is. */
-export class Reader extends WorkerEntrypoint<LeasedEnv> {
-  async read(target: ReaderTarget, name: string, key: string): Promise<Value> {
-    if (target === "reader-single") return (await this.env.SINGLE.get(this.env.SINGLE.idFromName(name)).get([key], null))[0] ?? null;
-    const id = `${name}/${key}`;
-    const held = cache.get(id);
-    if (held && held.until > Date.now()) return held.value;
-    let pending = inFlight.get(id);
-    if (!pending) {
-      const asked = Date.now();
-      const relays = held?.relays ?? 0;
-      const index = relayIndex(DRAW, relays);
-      pending = (relays > 0 ? relayStub(this.env, name, index).read(name, key, index) : sourceStub(this.env, name).read(name, key))
-        .then((a) => {
-          cache.set(id, { value: a.value, until: asked + a.leaseMs - READ_LEASE_MARGIN_MS, relays: a.relays });
-          return a.value;
-        })
-        .finally(() => inFlight.delete(id));
-      inFlight.set(id, pending);
-    }
-    return pending;
-  }
+/**
+ * A reader's read, in the isolate it runs in (a driver's, here; an app's Worker, in production):
+ * from the sub-lease while it lasts, else through a relay once the key has them, else the source.
+ */
+export async function readHot(env: LeasedEnv, target: ReaderTarget, name: string, key: string): Promise<Value> {
+  if (target === "reader-single") return (await env.SINGLE.get(env.SINGLE.idFromName(name)).get([key], null))[0] ?? null;
+  const id = `${name}/${key}`;
+  const held = cache.get(id);
+  if (held && held.until > Date.now()) return held.value;
+  const asked = Date.now();
+  const relays = held?.relays ?? 0;
+  const index = relayIndex(DRAW, relays);
+  const a = await (relays > 0 ? relayStub(env, name, index).read(name, key, index) : sourceStub(env, name).read(name, key));
+  const until = asked + a.leaseMs - READ_LEASE_MARGIN_MS;
+  if (until > (cache.get(id)?.until ?? 0) || a.relays !== held?.relays) cache.set(id, { value: a.value, until, relays: a.relays });
+  return a.value;
+}
 
-  async write(target: ReaderTarget, name: string, key: string, value: string): Promise<void> {
-    if (target === "reader-single") await this.env.SINGLE.get(this.env.SINGLE.idFromName(name)).put([key], [value]);
-    else await sourceStub(this.env, name).write(name, key, value);
-  }
+export async function writeHot(env: LeasedEnv, target: ReaderTarget, name: string, key: string, value: string): Promise<void> {
+  if (target === "reader-single") await env.SINGLE.get(env.SINGLE.idFromName(name)).put([key], [value]);
+  else await sourceStub(env, name).write(name, key, value);
 }
