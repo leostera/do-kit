@@ -83,8 +83,9 @@ test("a call whose primary's answer is lost: committed if the primary still has 
   // The other shard's resolve fails, so the primary keeps the outcome: asked, it says commit.
   await call("counters", name, "failNextStatement", [b], ["DELETE FROM sharded_atomic_holds"]);
   expect(await lost([-30, 30])).toEqual({ committed: true, results: [] });
-  // That share applies once its hold ends, by recovery.
-  for (let i = 0; i < 80 && (await values(name, [b]))[0] !== 35; i++) await Bun.sleep(100);
+  // That share applies once its hold ends (5 s), by recovery: on a slow machine, after its
+  // alarm's retries too.
+  for (let i = 0; i < 200 && (await values(name, [b]))[0] !== 35; i++) await Bun.sleep(100);
   expect(await values(name, [a, b])).toEqual([70, 35]);
   // Every share resolved, the outcome is forgotten: the caller can't tell, and hears the error.
   expect(await lost([-10, 10])).toEqual({ threw: expect.stringContaining("the answer was lost") });
