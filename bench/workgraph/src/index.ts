@@ -93,6 +93,8 @@ interface StartRequest {
   bytes?: number;
   identity?: "inputs" | "key";
   leaseMs?: number;
+  /** How long a runner may go without calling before the coordinator wakes it. */
+  wakeAfterMs?: number;
   faults?: Faults;
 }
 
@@ -126,7 +128,7 @@ export default {
           if (r.faults) await Promise.all(Array.from({ length: r.runners }, (_, i) => env.RUNNERS.get(env.RUNNERS.idFromName(runnerName(r.run, i))).benchFaults(r.run, r.faults!)));
           const run = workGraphRun(env.COORDINATORS, r.run);
           await run.submit(plan);
-          const status = await run.start({ runners: r.runners, ...(r.leaseMs ? { leaseMs: r.leaseMs } : {}) });
+          const status = await run.start({ runners: r.runners, ...(r.leaseMs ? { leaseMs: r.leaseMs } : {}), ...(r.wakeAfterMs ? { wakeAfterMs: r.wakeAfterMs } : {}) });
           return Response.json({ chunks: plan.chunks.length, units: g.units.length, work: plan.work, span: plan.span, chunkSpan: plan.chunkSpan, bodyBytes: Math.max(...plan.chunks.map((c) => encodeBody(c).byteLength)), replayed: plan.replayed, planMs, status });
         }
         case "/status":

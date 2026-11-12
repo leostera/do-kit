@@ -36,6 +36,8 @@ function refreshAccess(force: boolean): void {
   }
 }
 const SUITES = (process.env.BENCH_SUITES ?? "scaling,faults,ceiling").split(",");
+/** The coordinator's wakeAfterMs for every run (its default when unset). */
+const WAKE_AFTER_MS = process.env.BENCH_WAKE_AFTER_MS ? Number(process.env.BENCH_WAKE_AFTER_MS) : null;
 const RUNNERS = (process.env.BENCH_RUNNERS ?? "1,2,4,8,16,32,64").split(",").map(Number);
 const FILE = process.env.BENCH_RESULTS_FILE ?? join(import.meta.dir, "..", "results", "workgraph.json");
 
@@ -80,6 +82,7 @@ interface Point {
   woken: number;
   failures: number;
   faults?: { evict?: number; lose?: number; leaseMs?: number };
+  wakeAfterMs?: number;
   state: string;
   run: string;
   /** The runners' time on chunks (ms): this run's measured work. */
@@ -151,7 +154,7 @@ async function calibrate(): Promise<number> {
 
 async function measure(suite: string, p: { shape: string; units: number; unitMs: number; chunkMs: number; runners: number; maxUnitsPerChunk?: number; leaseMs?: number; faults?: { evict?: number; lose?: number }; bytes?: number; identity?: "inputs" | "key" }): Promise<Point> {
   const run = `${suite}-${p.shape}-${p.runners}-${Date.now().toString(36)}`;
-  const started = await post<{ chunks: number; units: number; work: number; span: number; chunkSpan: number; bodyBytes: number; replayed: number; planMs: number }>("/start", { run, itersPerMs: results.itersPerMs, ...p });
+  const started = await post<{ chunks: number; units: number; work: number; span: number; chunkSpan: number; bodyBytes: number; replayed: number; planMs: number }>("/start", { run, itersPerMs: results.itersPerMs, ...p, ...(WAKE_AFTER_MS ? { wakeAfterMs: WAKE_AFTER_MS } : {}) });
   // Slow machines stretch the longest runs (400 slices of 10 s on 4 runners): BENCH_RUN_TIMEOUT_MIN.
   const timeout = Date.now() + Number(process.env.BENCH_RUN_TIMEOUT_MIN ?? 30) * 60_000;
   let status: Status;
@@ -161,7 +164,7 @@ async function measure(suite: string, p: { shape: string; units: number; unitMs:
     if (status.state === "done" || status.state === "failed") break;
     if (Date.now() > timeout) throw new Error(`${run} did not finish: ${JSON.stringify(status)}`);
   }
-  const point: Point = { suite, shape: p.shape, runners: p.runners, units: started.units, chunks: started.chunks, unitMs: p.unitMs, chunkMs: p.chunkMs, work: started.work, span: started.span, replayed: started.replayed, planMs: started.planMs, elapsedMs: status.elapsedMs ?? 0, computed: status.units.computed, expired: status.expired, woken: status.woken, failures: status.failures, state: status.state, run, itersPerMs: results.itersPerMs, chunkSpan: started.chunkSpan, bodyBytes: started.bodyBytes, busyMs: status.busyMs ?? 0, ...(p.bytes ? { bytes: p.bytes } : {}), ...(p.identity ? { identity: p.identity } : {}), startedAt: new Date(parseInt(run.split("-").at(-1)!, 36)).toISOString(), ...(p.faults || p.leaseMs ? { faults: { ...p.faults, ...(p.leaseMs ? { leaseMs: p.leaseMs } : {}) } } : {}) };
+  const point: Point = { suite, shape: p.shape, runners: p.runners, units: started.units, chunks: started.chunks, unitMs: p.unitMs, chunkMs: p.chunkMs, work: started.work, span: started.span, replayed: started.replayed, planMs: started.planMs, elapsedMs: status.elapsedMs ?? 0, computed: status.units.computed, expired: status.expired, woken: status.woken, failures: status.failures, state: status.state, run, itersPerMs: results.itersPerMs, chunkSpan: started.chunkSpan, bodyBytes: started.bodyBytes, busyMs: status.busyMs ?? 0, ...(WAKE_AFTER_MS ? { wakeAfterMs: WAKE_AFTER_MS } : {}), ...(p.bytes ? { bytes: p.bytes } : {}), ...(p.identity ? { identity: p.identity } : {}), startedAt: new Date(parseInt(run.split("-").at(-1)!, 36)).toISOString(), ...(p.faults || p.leaseMs ? { faults: { ...p.faults, ...(p.leaseMs ? { leaseMs: p.leaseMs } : {}) } } : {}) };
   results.points.push(point);
   await save();
   console.log(`${suite} ${p.shape} N=${p.runners}: ${(point.elapsedMs / 1000).toFixed(1)} s, ${point.chunks} chunks, ${point.computed}/${point.units} computed, expired ${point.expired}, failures ${point.failures}, ${point.state}`);
