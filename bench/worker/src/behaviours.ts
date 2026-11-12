@@ -216,9 +216,11 @@ export interface ProbeRpc {
 /**
  * Besides the load targets, two that attribute a difference: the GenServer's object called through
  * a raw stub, with a plain write (`kvserver-plain`: the object, without the behaviour) and with an
- * envelope (`kvserver-receive`: the behaviour, without its client).
+ * envelope (`kvserver-receive`: the behaviour, without its client), the same with an idempotency
+ * key (`kvserver-receive-keyed`), and a client that sends a key without retrying
+ * (`genserver-key-only`).
  */
-type RpcTarget = "single" | BehaviourTarget | "kvserver-plain" | "kvserver-receive";
+type RpcTarget = "single" | BehaviourTarget | "kvserver-plain" | "kvserver-receive" | "kvserver-receive-keyed" | "genserver-key-only";
 
 /**
  * Times one-key puts end to end, one at a time, from the caller: what a call through each target
@@ -232,6 +234,9 @@ export async function probeRpc(env: BehavioursEnv, probe: ProbeRpc): Promise<{ c
     const keys = [`key-${i % 1000}`];
     if (target === "single") return env.SINGLE.getByName(probe.objectName).put(keys, [value]);
     if (target === "kvserver-plain") return env.KV_SERVER.getByName(probe.objectName).probePlain(1, "put");
+    if (target === "kvserver-receive-keyed") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] }, key: crypto.randomUUID() });
+    // An idempotency key on every call, without retries: the object's side of a keyed call alone.
+    if (target === "genserver-key-only") return KvServer.client(env.KV_SERVER, probe.objectName, { idempotencyKey: crypto.randomUUID() }).put(keys, [value]);
     if (target === "kvserver-receive") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] } });
     return behaviourWrite(env, target, probe.objectName, keys, [value]);
   };
