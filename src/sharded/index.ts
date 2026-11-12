@@ -220,6 +220,13 @@ type Waiting = { readonly released: Promise<void>; readonly until: number; reado
 /** Writes to a key an atomic call holds wait for `released`. */
 type HeldKey = { readonly tx: string; readonly deadline: number; readonly released: Promise<void>; readonly release: () => void };
 
+/** Holds `h`'s keys in `held`: writes to them wait for `released`. */
+function addHold(held: Map<string, HeldKey>, h: AtomicHold): void {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  for (const key of h.keys) held.set(key, { tx: h.tx, deadline: h.deadline, released, release });
+}
+
 const ATOMIC_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sharded_atomic_holds (tx TEXT PRIMARY KEY, primary_key TEXT NOT NULL, deadline INTEGER NOT NULL, method TEXT NOT NULL, keys TEXT NOT NULL, staged TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sharded_atomic_outcomes (tx TEXT PRIMARY KEY, outcome TEXT NOT NULL, at INTEGER NOT NULL);
@@ -658,9 +665,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** Every key an atomic call holds here, by key. */
   private heldKeys(): Map<string, HeldKey> {
     if (this.held) return this.held;
-    this.held = new Map();
-    if (this.hasAtomicTables()) for (const h of this.loadHolds()) this.holdInMemory(h);
-    return this.held;
+    // Kept only once loaded: a load that throws (a storage error) must not leave an empty map
+    // behind, which would let writes through on keys a stored hold covers.
+    const held = new Map<string, HeldKey>();
+    if (this.hasAtomicTables()) for (const h of this.loadHolds()) addHold(held, h);
+    this.held = held;
+    return held;
   }
 
   private loadHolds(): AtomicHold[] {
@@ -678,9 +688,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   private holdInMemory(h: AtomicHold): void {
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    for (const key of h.keys) this.held!.set(key, { tx: h.tx, deadline: h.deadline, released, release });
+    addHold(this.heldKeys(), h);
   }
 
   /** Lets the writes that wait on `tx`'s keys go. */

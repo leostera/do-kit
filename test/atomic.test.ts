@@ -108,6 +108,22 @@ test("a hold whose alarm was lost still ends, once anything reaches its shard", 
   expect((await tables(name, "")).outcomes).toEqual([{ tx, outcome: "abort" }]);
 }, 30_000);
 
+test("a shard whose holds failed to load once still holds their keys: writes wait the hold out", async () => {
+  const name = `atomic-holds-load-${unique()}`;
+  await call("counters", name, "add", ["a", "b"], [10, 10]);
+  await prepareAndStop(name, "", "b", 5, "a", 2_000);
+  await call("counters", name, "restartFailingHoldsLoad", ["b"]).catch(() => undefined);
+  // The first write after the restart reads the holds, and the read throws: the write fails.
+  await expect(call("counters", name, "add", ["b"], [1])).rejects.toThrow();
+  // The next one waits the hold out: until it ends (aborted, at its deadline), b is as it was.
+  const write = call("counters", name, "add", ["b"], [1]);
+  await Bun.sleep(500);
+  expect(await values(name, ["b"])).toEqual([10]);
+  await write;
+  expect(await values(name, ["b"])).toEqual([11]);
+  expect((await tables(name, "")).holds).toEqual([]);
+}, 30_000);
+
 test("an outcome nobody forgot goes once its TTL passes, with no other call to its shard", async () => {
   // PresplitCounters keep outcomes 2 s; its tree starts at depth 2.
   const name = `atomic-outcome-ttl-${unique()}`;

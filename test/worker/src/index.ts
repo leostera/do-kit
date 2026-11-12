@@ -370,8 +370,22 @@ class CounterBase extends ShardedObject<Env, number> {
     return keys.map(() => this.stubOptions());
   }
 
+  /** Restarts this shard (the call fails); once restarted, its first read of the atomic holds throws, as a storage error would. */
+  async restartFailingHoldsLoad(_keys: readonly string[], _payloads: null): Promise<never> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_fail_holds_load (x INTEGER)");
+    this.ctx.storage.sql.exec("INSERT INTO test_fail_holds_load (x) VALUES (1)");
+    await this.ctx.storage.sync(); // durable before the restart, which drops what is not
+    this.ctx.abort("test: restart");
+    throw new Error("unreachable");
+  }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    const failHoldsLoad = ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'test_fail_holds_load'").one().n > 0;
+    if (failHoldsLoad) {
+      ctx.storage.sql.exec("DROP TABLE test_fail_holds_load");
+      failStatementOnce(ctx.storage, "FROM sharded_atomic_holds");
+    }
     // A subclass table: which keys were added to here (a stand-in for an outbox).
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY)");
     // A subclass table that both shards clean after a split (a stand-in for a listing).

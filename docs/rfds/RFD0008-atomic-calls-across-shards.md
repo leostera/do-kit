@@ -323,6 +323,11 @@ A git server on sharded refs keeps refusing most atomic pushes, which stock git 
   `holdWaitMs`, while keeping its own. Benchmarked on the edge, calls over 8 hot keys collapsed (see
   *Contention*); `test/atomic.test.ts` has a commit and a prepare that meet an older call's hold and
   give their keys back at once, and 24 contended calls over three shards that all commit.
+- **The holds in memory are kept only once loaded.** A shard keeps its holds in memory, by key,
+  loaded from storage on first use. The first version kept the map before it loaded it: a load
+  that threw (a storage error) left it empty, so that instance let writes through on keys a stored
+  hold covered, and the hold's share, applied by recovery later, wrote over them. Found with
+  storage faults injected: a transfer committed with one of its shares lost.
 - **Recovery has two triggers:** the alarm at the earliest deadline (the guarantee), and a write
   that waits on a hold past its deadline (sooner).
 - Tested under `cf dev`, `test/atomic.test.ts` (11 tests): commit across two shards; a refusal by
