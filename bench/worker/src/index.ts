@@ -937,6 +937,22 @@ async function handle(request: Request, env: Env): Promise<Response> {
   {
     if (request.headers.get("authorization") !== `Bearer ${env.BENCH_TOKEN}`) return new Response("Unauthorized", { status: 401 });
     const path = new URL(request.url).pathname;
+    // One table call, timed: where a listing over many shards spends its time (or hangs).
+    if (request.method === "POST" && path === "/probe-table") {
+      const body = (await request.json()) as { target: TableTarget; objectName: string; op: "list" | "count" | "read"; times?: number };
+      const t = rowsClient(env, body.target, body.objectName);
+      const runs: { ms: number; rows?: number; error?: string }[] = [];
+      for (let i = 0; i < Math.min(body.times ?? 3, 10); i++) {
+        const started = Date.now();
+        try {
+          const rows = await bounded(async () => (body.op === "count" ? await t.count() : body.op === "read" ? (await t.getMany([`key-${i}`])).length : (await t.list({ index: "byCreated", direction: "desc", limit: 50 })).rows.length), 60_000, body.op);
+          runs.push({ ms: Date.now() - started, rows });
+        } catch (error) {
+          runs.push({ ms: Date.now() - started, error: String(error).slice(0, 300) });
+        }
+      }
+      return Response.json({ runs });
+    }
     if (request.method === "POST" && path === "/split-bench") {
       let input: SplitBenchInput;
       try {
