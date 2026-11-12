@@ -53,6 +53,13 @@ export function checkSplitPolicy(policy) {
         fail("holdWaitMs must be zero or more");
     return policy;
 }
+/** Holds `h`'s keys in `held`: writes to them wait for `released`. */
+function addHold(held, h) {
+    let release;
+    const released = new Promise((resolve) => (release = resolve));
+    for (const key of h.keys)
+        held.set(key, { tx: h.tx, deadline: h.deadline, released, release });
+}
 const ATOMIC_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sharded_atomic_holds (tx TEXT PRIMARY KEY, primary_key TEXT NOT NULL, deadline INTEGER NOT NULL, method TEXT NOT NULL, keys TEXT NOT NULL, staged TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sharded_atomic_outcomes (tx TEXT PRIMARY KEY, outcome TEXT NOT NULL, at INTEGER NOT NULL);
@@ -430,11 +437,14 @@ export class ShardedObject extends DurableObject {
     heldKeys() {
         if (this.held)
             return this.held;
-        this.held = new Map();
+        // Kept only once loaded: a load that throws (a storage error) must not leave an empty map
+        // behind, which would let writes through on keys a stored hold covers.
+        const held = new Map();
         if (this.hasAtomicTables())
             for (const h of this.loadHolds())
-                this.holdInMemory(h);
-        return this.held;
+                addHold(held, h);
+        this.held = held;
+        return held;
     }
     loadHolds() {
         if (!this.hasAtomicTables())
@@ -451,10 +461,7 @@ export class ShardedObject extends DurableObject {
         return r ? { tx: r.tx, primaryKey: r.primary_key, deadline: r.deadline, method: r.method, keys: JSON.parse(r.keys), staged: JSON.parse(r.staged) } : null;
     }
     holdInMemory(h) {
-        let release;
-        const released = new Promise((resolve) => (release = resolve));
-        for (const key of h.keys)
-            this.held.set(key, { tx: h.tx, deadline: h.deadline, released, release });
+        addHold(this.heldKeys(), h);
     }
     /** Lets the writes that wait on `tx`'s keys go. */
     releaseInMemory(tx) {
