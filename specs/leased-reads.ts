@@ -14,9 +14,11 @@
 // know its leases: it holds writes, and answers no read of a key it held a write on, until every
 // lease from before could have ended (its stored horizon, plus the skew).
 //
-// specs:check runs it with one isolate, one lost message or relay restart, and one source restart:
-// exhaustive, and it shows four rules needed. Two need a second isolate:
-//   --instances Reader=2 --set faults=0 --set crashes=0 --without matchLease --only freshReads
+// specs:check runs it twice. With one isolate, one lost message or relay restart, and one source
+// restart, the properties hold exhaustively (--no-rules: two of the rules need a second isolate to
+// matter). With two isolates and one source restart (--set faults=0, 30M states), every rule is
+// shown needed; matchLease and storeHeldKeys break only there:
+//   --instances Reader=2 --set faults=0 --without matchLease --only freshReads
 //   --instances Reader=2 --set faults=0 --without storeHeldKeys --only neverGoBack
 // Not modelled: the
 // relay count and relay nesting (relay-plan.ts), unnamed holders, and WRITTEN_MS (a key written

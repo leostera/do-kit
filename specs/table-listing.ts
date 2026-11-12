@@ -32,7 +32,8 @@ const Moved = defineMessage("Moved", {}, { name: "moved", tone: "refused" });
 const NotReady = defineMessage("NotReady", {}, { name: "not ready", tone: "refused" });
 const Copy = defineMessage("Copy", {}, { name: "snapshot" });
 const Copied = defineMessage("Copied", {}, { name: "claimed", tone: "reply" });
-const Activate = defineMessage("Activate", {}, { name: "activate" });
+// An RPC the alarm awaits: one at a time, and its failure is what makes the alarm try again.
+const Activate = defineCall("Activate", {}, { name: "activate" });
 const Activated = defineMessage("Activated", {}, { name: "activated", tone: "reply" });
 
 const mergeToFrontier = defineRule("mergeToFrontier", { description: "A page holds only the rows up to the smallest frontier any shard reported." });
@@ -203,37 +204,38 @@ export const Original = defineActor({
       description: "The copy is claimed: stops owning the right half and activates the copy.",
       sources: ["src/sharded/index.ts#ShardedObject.split", "src/sharded/index.ts#ShardedObject.activateSibling"],
       sends: [Activate],
-      starts: ["activateRetry"],
       run(s, _msg, ctx) {
         s.committed = true;
         ctx.send(ctx.the(Sibling), Activate, {});
-        ctx.start("activateRetry");
       },
     },
     activated: {
       on: Activated,
       description: "The copy serves the right half.",
       sources: ["src/sharded/index.ts#ShardedObject.activateSibling"],
-      run(s, _msg, ctx) {
+      run(s) {
         s.activated = true;
-        ctx.cancel("activateRetry");
       },
+    },
+    activateFailed: {
+      on: failed(Activate),
+      description: "Activating the copy failed: the alarm tries again later.",
+      sources: ["src/sharded/index.ts#ShardedObject.alarm"],
+      starts: ["activateRetry"],
+      run: (_s, _failure, ctx) => ctx.start("activateRetry"),
     },
     activateRetry: {
       description: "Activates the copy again until it confirms (the alarm's job).",
       sources: ["src/sharded/index.ts#ShardedObject.alarm", "src/sharded/index.ts#ShardedObject.activateSibling"],
       after: "1 second",
       sends: [Activate],
-      starts: ["activateRetry"],
       run(s, _, ctx) {
-        if (s.activated) return;
-        ctx.send(ctx.the(Sibling), Activate, {});
-        ctx.start("activateRetry");
+        if (!s.activated) ctx.send(ctx.the(Sibling), Activate, {});
       },
     },
     pageLost: lose(Page, { spend: faults }),
     copiedLost: lose(Copied, { spend: faults }),
-    activatedLost: lose(Activated, { spend: faults }),
+    activatedLost: lose(Activated, { fails: Activate, spend: faults }),
   },
 });
 
