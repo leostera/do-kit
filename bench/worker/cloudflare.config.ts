@@ -20,6 +20,9 @@ export default defineConfig(() => ({
     entrypoint,
     env: {
       BENCH_DRIVERS: bindings.durableObject({ worker: NAME, exportName: "BenchDriver" }),
+      READER: bindings.worker({ worker: NAME, exportName: "Reader" }),
+      LEASED_SOURCE: bindings.durableObject({ worker: NAME, exportName: "LeasedSource" }),
+      LEASED_RELAY: bindings.durableObject({ worker: NAME, exportName: "LeasedRelay" }),
       SPLIT_JOBS: bindings.durableObject({ worker: NAME, exportName: "SplitBenchJob" }),
       PRESPLIT: bindings.durableObject({ worker: NAME, exportName: "PresplitObject" }),
       PRESPLIT_4096: bindings.durableObject({ worker: NAME, exportName: "WidePresplitObject" }),
@@ -43,6 +46,9 @@ export default defineConfig(() => ({
     },
     exports: {
       BenchDriver: exports.durableObject({ storage: "sqlite" }),
+      Reader: exports.worker(),
+      LeasedSource: exports.durableObject({ storage: "sqlite" }),
+      LeasedRelay: exports.durableObject({ storage: "sqlite" }),
       SplitBenchJob: exports.durableObject({ storage: "sqlite" }),
       PresplitObject: exports.durableObject({ storage: "sqlite" }),
       WidePresplitObject: exports.durableObject({ storage: "sqlite" }),
