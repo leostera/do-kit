@@ -416,11 +416,11 @@ export class SplitBenchJob extends DurableObject<Env> {
 
 /** A call that has not answered in this long is counted as failed: one that never answers would hold up the whole point. */
 const CALL_TIMEOUT_MS = 30_000;
-async function bounded(call: () => Promise<void>): Promise<void> {
+async function bounded<T>(call: () => Promise<T>, ms = CALL_TIMEOUT_MS, what = "call"): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`no answer in ${CALL_TIMEOUT_MS / 1000} s`)), CALL_TIMEOUT_MS)));
+  const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`${what}: no answer in ${ms / 1000} s`)), ms)));
   try {
-    await Promise.race([call(), timeout]);
+    return await Promise.race([call(), timeout]);
   } finally {
     clearTimeout(timer);
   }
@@ -539,7 +539,9 @@ export class BenchDriver extends DurableObject<Env> {
       return;
     }
     if (isReader(config.target)) {
-      if (config.driverIndex === 0) await writeHot(this.env, config.target, config.objectName, "hot-key", value);
+      // Written once: a write before every level would make the source refuse relays leases for
+      // WRITTEN_MS, and the level would measure reads through instead.
+      if (config.driverIndex === 0 && (await readHot(this.env, config.target, config.objectName, "hot-key")) === null) await writeHot(this.env, config.target, config.objectName, "hot-key", value);
       return;
     }
     if (config.operation !== "read" || config.distribution !== "uniform" && config.distribution !== "hot") return;
@@ -1074,13 +1076,15 @@ async function handle(request: Request, env: Env): Promise<Response> {
       const stub = env.BENCH_FLEETS.get(env.BENCH_FLEETS.idFromName(`${input.objectName}-fleet-${i / DRIVERS_PER_FLEET}`));
       fleets.push({ stub, configs: configs.slice(i, i + DRIVERS_PER_FLEET) });
     }
-    await Promise.all(fleets.map((fleet) => fleet.stub.prepare(fleet.configs)));
+    // Each stage is bounded, and a stage that stalls is reported: a point always answers.
+    const stalls: string[] = [];
+    await Promise.all(fleets.map((fleet, i) => bounded(() => fleet.stub.prepare(fleet.configs), 120_000, `prepare of fleet ${i}`).catch((error: unknown) => void stalls.push(String(error)))));
     // Leased reads: what reached the source during the point, besides what readers saw.
     const source = input.target === "reader-leased" ? env.LEASED_SOURCE.get(env.LEASED_SOURCE.idFromName(input.objectName)) : null;
     const sourceBefore = source ? await source.stats() : null;
     // Later with more fleets: every driver must have its start time before it comes.
     const startAt = Date.now() + 750 + 250 * fleets.length;
-    const settled = await Promise.allSettled(fleets.map((fleet) => fleet.stub.measure(fleet.configs.map((config) => ({ ...config, startAt })))));
+    const settled = await Promise.allSettled(fleets.map((fleet, i) => bounded(() => fleet.stub.measure(fleet.configs.map((config) => ({ ...config, startAt }))), input.durationMs + 60_000, `measure of fleet ${i}`)));
     const fleetResults = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
     const lostDrivers = settled.reduce((n, r, i) => n + (r.status === "rejected" ? fleets[i]!.configs.length : 0), 0);
     const fleetReasons = settled.flatMap((r) => (r.status === "rejected" ? [`fleet: ${String(r.reason).slice(0, 200)}`] : [])).slice(0, 3);
@@ -1092,9 +1096,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const perSecond = (n: number) => Math.round((n * 1000) / Math.max(1, elapsedMs));
     const leased = sourceBefore && sourceAfter ? { sourceDirectReadsPerSecond: perSecond(sourceAfter.direct - sourceBefore.direct), sourceRelayReadsPerSecond: perSecond(sourceAfter.relay - sourceBefore.relay), writesPerSecond: perSecond(sourceAfter.writes - sourceBefore.writes), relays: sourceAfter.relays } : null;
     let topology: Awaited<ReturnType<typeof describeTree>> | null = null;
-    if (input.target === "split") topology = await describeTree(env, input.objectName);
-    if (input.target === "legacy") topology = await describeLegacyTree(env, input.objectName);
-    if (input.target === "presplit") topology = await describeTree(env, input.objectName, "", env.PRESPLIT as never);
+    const described = (walk: () => Promise<Awaited<ReturnType<typeof describeTree>>>) => bounded(walk, 20_000, "describing the shards").catch((error: unknown) => (stalls.push(String(error)), null));
+    if (input.target === "split") topology = await described(() => describeTree(env, input.objectName));
+    if (input.target === "legacy") topology = await described(() => describeLegacyTree(env, input.objectName));
+    if (input.target === "presplit") topology = await described(() => describeTree(env, input.objectName, "", env.PRESPLIT as never));
     if (isRows(input.target)) {
       const leaves = Number(input.target.slice(input.target.indexOf("-") + 1));
       // Counting asks every shard: one still overloaded from the run answers nothing.
@@ -1123,6 +1128,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       latencyMs: { p50: percentile(histogram, 0.5), p95: percentile(histogram, 0.95), p99: percentile(histogram, 0.99), max: Math.round(maxLatencyMs * 100) / 100 },
       topology,
       leased,
+      stalls,
       // The first sample, under the name earlier results use.
       errorSample: errorSamples[0] ?? null,
     });
