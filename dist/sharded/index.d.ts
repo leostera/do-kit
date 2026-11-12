@@ -521,10 +521,11 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
      */
     private armAlarm;
     /**
-     * While a split's work is pending here (a sibling to activate, rows to clear) or an atomic call
-     * holds keys, makes sure an alarm will come for it, at most every ALARM_CHECK_MS: an alarm can be
-     * lost, and nothing else would activate the sibling or end a hold (reads do not wait on holds).
-     * Called on routed calls, which keep reaching the shard.
+     * While a split's work is pending here (a sibling to activate, rows to clear), an atomic call
+     * holds keys, or outcomes wait for their TTL, makes sure an alarm will come for it, at most every
+     * ALARM_CHECK_MS: an alarm can be lost, and nothing else would activate the sibling, end a hold
+     * (reads do not wait on holds) or purge the outcomes. Called on routed calls, which keep reaching
+     * the shard.
      */
     private checkAlarm;
     private alarmCheckedAt;

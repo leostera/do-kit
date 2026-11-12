@@ -1347,16 +1347,18 @@ export class ShardedObject extends DurableObject {
             await this.ctx.storage.setAlarm(time);
     }
     /**
-     * While a split's work is pending here (a sibling to activate, rows to clear) or an atomic call
-     * holds keys, makes sure an alarm will come for it, at most every ALARM_CHECK_MS: an alarm can be
-     * lost, and nothing else would activate the sibling or end a hold (reads do not wait on holds).
-     * Called on routed calls, which keep reaching the shard.
+     * While a split's work is pending here (a sibling to activate, rows to clear), an atomic call
+     * holds keys, or outcomes wait for their TTL, makes sure an alarm will come for it, at most every
+     * ALARM_CHECK_MS: an alarm can be lost, and nothing else would activate the sibling, end a hold
+     * (reads do not wait on holds) or purge the outcomes. Called on routed calls, which keep reaching
+     * the shard.
      */
     checkAlarm() {
         const meta = this.meta;
         if (!meta || Date.now() - this.alarmCheckedAt < ALARM_CHECK_MS)
             return;
-        const due = meta.activate || meta.cleanup.length > 0 || meta.foreign ? Date.now() : this.nextHoldDeadline();
+        const atomic = [this.nextHoldDeadline(), this.outcomeExpiry()].filter((t) => t !== null);
+        const due = meta.activate || meta.cleanup.length > 0 || meta.foreign ? Date.now() : atomic.length > 0 ? Math.min(...atomic) : null;
         if (due === null)
             return;
         this.alarmCheckedAt = Date.now();
