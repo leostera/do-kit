@@ -15,7 +15,7 @@ const headers: Record<string, string> = { authorization: `Bearer ${token}`, "con
 const suites = new Set((process.env.BENCH_SUITES ?? "events,rpc").split(","));
 const config = {
   events: { n: Number(process.env.BENCH_EVENTS ?? 20_000), rounds: Number(process.env.BENCH_ROUNDS ?? 9) },
-  rpc: { calls: Number(process.env.BENCH_CALLS ?? 300), rounds: Number(process.env.BENCH_ROUNDS ?? 9) },
+  rpc: { calls: Number(process.env.BENCH_CALLS ?? 300), rounds: Number(process.env.BENCH_ROUNDS ?? 9), ...(process.env.BENCH_RPC_TARGETS ? { targets: process.env.BENCH_RPC_TARGETS.split(",") } : {}) },
 };
 const run = `probe-${crypto.randomUUID().slice(0, 8)}`;
 
