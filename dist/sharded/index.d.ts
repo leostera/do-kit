@@ -390,6 +390,8 @@ export declare abstract class ShardedObject<Env = unknown, V = unknown> extends 
     private purgeOutcomes;
     /** A share prepared here: applied (commit) or dropped (abort), and its keys released, in one transaction. */
     private atomicResolve;
+    /** A client of this sharded object, from a shard: for recovery, and for the calls a primary coordinates. */
+    private atomicClient;
     /** Holds past their deadline: asks each one's primary for the outcome, and resolves it. */
     private recovering;
     private recoverHolds;

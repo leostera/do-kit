@@ -550,6 +550,10 @@ export class ShardedObject extends DurableObject {
         switch (step.step) {
             case "solo":
                 return this.atomicSolo(step.method, keys, payloads, args);
+            case "coordinate":
+                // Routed by the primary key: this shard records the outcome, and drives the other shards.
+                this.assertOwner(keys);
+                return { coordinated: await this.atomicClient().coordinateAtomic(step.tx, step.keys, step.method, step.payloads, args) };
             case "prepare":
                 return this.atomicPrepare(step, keys, payloads, args);
             case "commit": {
@@ -723,6 +727,13 @@ export class ShardedObject extends DurableObject {
             return { outcome: "abort" };
         return { applied: m.applied ? await m.applied(h.keys, result) : result };
     }
+    /** A client of this sharded object, from a shard: for recovery, and for the calls a primary coordinates. */
+    atomicClient() {
+        return sharded(this.nodes(), this.objectName(), {
+            ...(this.routesByKey() ? {} : { routeOf: (key) => this.routeOf(key) }),
+            ...(this.callerStubOptions ? { stubOptions: this.callerStubOptions } : {}),
+        });
+    }
     /** Holds past their deadline: asks each one's primary for the outcome, and resolves it. */
     recovering = null;
     recoverHolds() {
@@ -733,10 +744,7 @@ export class ShardedObject extends DurableObject {
         const due = this.loadHolds().filter((h) => h.deadline <= Date.now());
         if (due.length === 0)
             return;
-        const client = sharded(this.nodes(), this.objectName(), {
-            ...(this.routesByKey() ? {} : { routeOf: (key) => this.routeOf(key) }),
-            ...(this.callerStubOptions ? { stubOptions: this.callerStubOptions } : {}),
-        });
+        const client = this.atomicClient();
         await Promise.all(due.map(async (h) => {
             const outcome = await client.atomicOutcome(h.tx, h.primaryKey);
             await this.atomicResolve(h.tx, outcome);

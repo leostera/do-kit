@@ -128,10 +128,20 @@ export declare class ShardedClient<T extends Rpc.DurableObjectBranded> {
      */
     atomically<R = unknown, A = unknown>(keys: readonly string[], method: string, payloads: readonly unknown[] | null, ...args: unknown[]): Promise<AtomicOutcome<R, A>>;
     /**
-     * An atomic call over several shards. Nothing applied, to be retried: "again" if a split moved the
-     * primary's keys apart before the commit, "contended" if a shard gave way to an older call.
+     * An atomic call over several shards, coordinated by the primary (`coordinate`), so a share is
+     * held for a round trip between shards, not between this caller and each of them. If the
+     * primary's answer is lost, its outcome decides: the primary records an abort if it has none,
+     * so a coordination still running then commits nothing. Committed, the results are unknown.
      */
-    private atomicAcross;
+    private atomicAtPrimary;
+    /**
+     * The coordination of an atomic call over several shards, as the primary runs it (the
+     * `coordinate` step): not for callers, who use `atomically`. Nothing applied, to be retried:
+     * "again" if a split moved the primary's keys apart before the commit, "contended" if a shard
+     * gave way to an older call.
+     * @internal
+     */
+    coordinateAtomic<R, A>(tx: string, keys: readonly string[], method: string, payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<AtomicOutcome<R, A> | "again" | "contended">;
     /** The outcome of atomic call `tx`, from its primary (recording an abort if it has none). */
     atomicOutcome(tx: string, primaryKey: string): Promise<Outcome>;
     /** A step at the primary of `tx`. */

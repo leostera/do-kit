@@ -281,7 +281,7 @@ export class ShardedClient {
                     throw error;
                 }
             }
-            const outcome = await this.atomicAcross(keys, method, payloads, args, startedAt);
+            const outcome = await this.atomicAtPrimary(keys, method, payloads, args, startedAt);
             if (outcome === "again")
                 splits++;
             else if (outcome === "contended")
@@ -291,12 +291,36 @@ export class ShardedClient {
         }
     }
     /**
-     * An atomic call over several shards. Nothing applied, to be retried: "again" if a split moved the
-     * primary's keys apart before the commit, "contended" if a shard gave way to an older call.
+     * An atomic call over several shards, coordinated by the primary (`coordinate`), so a share is
+     * held for a round trip between shards, not between this caller and each of them. If the
+     * primary's answer is lost, its outcome decides: the primary records an abort if it has none,
+     * so a coordination still running then commits nothing. Committed, the results are unknown.
      */
-    async atomicAcross(keys, method, payloads, args, startedAt) {
-        const started = Date.now();
+    async atomicAtPrimary(keys, method, payloads, args, startedAt) {
         const tx = atomicTxId(startedAt);
+        const primaryKey = [...keys].sort()[0];
+        let answer;
+        try {
+            answer = await this.atomicTo(primaryKey, { step: "coordinate", tx, method, keys, payloads }, args);
+        }
+        catch (error) {
+            const outcome = await this.atomicOutcome(tx, primaryKey).catch(() => null);
+            if (outcome === "commit")
+                return { committed: true, results: [] };
+            throw error;
+        }
+        return answer.coordinated;
+    }
+    /**
+     * The coordination of an atomic call over several shards, as the primary runs it (the
+     * `coordinate` step): not for callers, who use `atomically`. Nothing applied, to be retried:
+     * "again" if a split moved the primary's keys apart before the commit, "contended" if a shard
+     * gave way to an older call.
+     * @internal
+     */
+    async coordinateAtomic(tx, keys, method, payloads, args) {
+        await this.loadCache();
+        const started = Date.now();
         const primaryKey = [...keys].sort()[0];
         const primaryBits = this.shardFor(this.routeHash(primaryKey));
         const mine = keys.map((k) => this.shardFor(this.routeHash(k)) === primaryBits);
@@ -377,8 +401,8 @@ export class ShardedClient {
         return answer.outcome;
     }
     /** A step at the primary of `tx`. */
-    async atomicTo(primaryKey, step) {
-        const [only] = await this.route(true, [primaryKey], step.step, null, this.atomicStep(step, []));
+    async atomicTo(primaryKey, step, args = []) {
+        const [only] = await this.route(true, [primaryKey], step.step, null, this.atomicStep(step, args));
         return only.result;
     }
     /** Records an abort at the primary, if it can: else the holds end at their deadline, aborted. */

@@ -44,6 +44,18 @@ export type AtomicStep =
     readonly step: "solo";
     readonly method: string;
 }
+/**
+ * At the primary: the whole call over several shards, which the primary coordinates (prepares
+ * the other shards, commits its own share, resolves theirs). `keys` and `payloads` are the
+ * call's, all of them; the step is routed by the primary key alone.
+ */
+ | {
+    readonly step: "coordinate";
+    readonly tx: string;
+    readonly method: string;
+    readonly keys: readonly string[];
+    readonly payloads: readonly unknown[] | null;
+}
 /** A share that is not the primary's: check, and hold the keys until the outcome. */
  | {
     readonly step: "prepare";
@@ -93,6 +105,10 @@ export type AtomicAnswer = {
 /** A resolve for a share that is not held here (already resolved, or never prepared). */
  | {
     readonly gone: true;
+}
+/** What the primary's coordination of the call came to: "again" and "contended" mean nothing applied, and the client calls again. */
+ | {
+    readonly coordinated: AtomicOutcome<unknown, unknown> | "again" | "contended";
 }
 /**
  * A prepare or commit that met an older call's hold on its keys: nothing is held or applied for
