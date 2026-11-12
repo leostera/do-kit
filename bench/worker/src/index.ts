@@ -1078,7 +1078,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
     // Each stage is bounded, and a stage that stalls is reported: a point always answers.
     const stalls: string[] = [];
-    await Promise.all(fleets.map((fleet, i) => bounded(() => fleet.stub.prepare(fleet.configs), 120_000, `prepare of fleet ${i}`).catch((error: unknown) => void stalls.push(String(error)))));
+    await Promise.all(fleets.map((fleet, i) => bounded(() => fleet.stub.prepare(fleet.configs), 180_000, `prepare of fleet ${i}`).catch((error: unknown) => void stalls.push(String(error)))));
     // Leased reads: what reached the source during the point, besides what readers saw.
     const source = input.target === "reader-leased" ? env.LEASED_SOURCE.get(env.LEASED_SOURCE.idFromName(input.objectName)) : null;
     const sourceBefore = source ? await source.stats() : null;
@@ -1103,7 +1103,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (isRows(input.target)) {
       const leaves = Number(input.target.slice(input.target.indexOf("-") + 1));
       // Counting asks every shard: one still overloaded from the run answers nothing.
-      const rows = await rowsClient(env, input.target, input.objectName).count().catch(() => -1);
+      const rows = await bounded(() => rowsClient(env, input.target as TableTarget | IndexedTarget, input.objectName).count(), 20_000, "counting the rows").catch((error: unknown) => (stalls.push(String(error)), -1));
       topology = { leaves, rows, depth: Math.log2(leaves) };
     }
     // Walking 4,096 shards is 8,191 calls. A presplit tree is complete, so the depth of the shards on

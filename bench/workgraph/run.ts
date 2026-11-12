@@ -13,7 +13,28 @@ import { join } from "node:path";
 
 const URL_ = process.env.BENCH_URL ?? "https://do-kit-workgraph.lostera.me.cloudflare.dev";
 const TOKEN = process.env.BENCH_TOKEN ?? "";
-const ACCESS = process.env.BENCH_ACCESS_TOKEN ?? "";
+let ACCESS = process.env.BENCH_ACCESS_TOKEN ?? "";
+// An Access token lasts less than a long run: fetched again from cloudflared every 10 minutes, and
+// when Access answers with its sign-in page (logging in again if it expired; nothing of it is kept).
+let accessAt = Date.now();
+function refreshAccess(force: boolean): void {
+  if (!force && Date.now() - accessAt < 10 * 60_000) return;
+  const token = (app: string) => execSync(`cloudflared access token -app=${app}`, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  let t = "";
+  try {
+    t = token(URL_);
+  } catch {}
+  if (!t.startsWith("ey")) {
+    try {
+      execSync(`cloudflared access login --no-verbose ${URL_}`, { stdio: "ignore" });
+      t = token(URL_);
+    } catch {}
+  }
+  if (t.startsWith("ey")) {
+    ACCESS = t;
+    accessAt = Date.now();
+  }
+}
 const SUITES = (process.env.BENCH_SUITES ?? "scaling,faults,ceiling").split(",");
 const RUNNERS = (process.env.BENCH_RUNNERS ?? "1,2,4,8,16,32,64").split(",").map(Number);
 const FILE = process.env.BENCH_RESULTS_FILE ?? join(import.meta.dir, "..", "results", "workgraph.json");
@@ -76,8 +97,13 @@ interface Point {
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   for (let attempt = 0; ; attempt++) {
+    refreshAccess(false);
     const response = await fetch(URL_ + path, { method: "POST", body: JSON.stringify(body), headers: { authorization: `Bearer ${TOKEN}`, "cf-access-token": ACCESS } });
     const text = await response.text();
+    if (/Cloudflare Access/.test(text.slice(0, 2000))) {
+      refreshAccess(true);
+      if (attempt < 2) continue;
+    }
     if (response.ok) return JSON.parse(text) as T;
     if (attempt >= 2) throw new Error(`${path}: ${response.status} ${text.slice(0, 500)}`);
     await Bun.sleep(1_000);

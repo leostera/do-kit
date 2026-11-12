@@ -24,7 +24,25 @@ interface Point {
 
 const baseUrl = process.env.BENCH_URL?.replace(/\/$/, "");
 const token = process.env.BENCH_TOKEN;
-const accessToken = process.env.BENCH_ACCESS_TOKEN;
+// An Access token lasts less than a long run: with BENCH_ACCESS_APP set, it is fetched again from
+// cloudflared every 10 minutes, and when Access answers with its sign-in page.
+let accessToken = process.env.BENCH_ACCESS_TOKEN;
+const accessApp = process.env.BENCH_ACCESS_APP;
+let accessTokenAt = Date.now();
+async function refreshAccessToken(force: boolean): Promise<void> {
+  if (!accessApp || (!force && Date.now() - accessTokenAt < 10 * 60_000)) return;
+  let token = (await $`cloudflared access token -app=${accessApp}`.quiet().nothrow().text()).trim();
+  // Expired: log in again (it prints the token; nothing of it is kept).
+  if (!token.startsWith("ey")) {
+    await $`cloudflared access login --no-verbose ${accessApp}`.quiet().nothrow();
+    token = (await $`cloudflared access token -app=${accessApp}`.quiet().nothrow().text()).trim();
+  }
+  if (token.startsWith("ey")) {
+    accessToken = token;
+    accessTokenAt = Date.now();
+    headers["cf-access-token"] = token;
+  }
+}
 if (!baseUrl || !token) throw new Error("Set BENCH_URL and BENCH_TOKEN in the environment.");
 
 const timestamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
@@ -47,7 +65,7 @@ const provenance = {
 };
 const points: Point[] = [];
 const splits: unknown[] = [];
-const headers = { authorization: `Bearer ${token}`, ...(accessToken ? { "cf-access-token": accessToken } : {}), "content-type": "application/json" };
+const headers: Record<string, string> = { authorization: `Bearer ${token}`, ...(accessToken ? { "cf-access-token": accessToken } : {}), "content-type": "application/json" };
 
 /** One split of a freshly seeded object, run as a background job on the Worker and polled. */
 async function splitBench(config: { target: "split" | "legacy" | "two-copy"; objectName: string; rows: number; payloadBytes: number; writers: number }): Promise<Record<string, unknown>> {
@@ -55,6 +73,7 @@ async function splitBench(config: { target: "split" | "legacy" | "two-copy"; obj
   if (!started.ok) throw new Error(`Split benchmark failed to start (${started.status}): ${await started.text()}`);
   for (;;) {
     await Bun.sleep(5000);
+    await refreshAccessToken(false);
     const response = await fetch(`${baseUrl}/split-job?objectName=${config.objectName}`, { headers });
     if (!response.ok) throw new Error(`Split benchmark poll failed (${response.status}): ${await response.text()}`);
     const state = (await response.json()) as { result?: Record<string, unknown>; error?: string; running: boolean };
@@ -73,8 +92,11 @@ async function measure(config: {
 }): Promise<Point> {
   // A failed point is retried once; what failed is logged, as the platform answered it.
   for (let attempt = 1; ; attempt++) {
+    await refreshAccessToken(false);
     // A measurement takes durationMs plus setup; an answer that never comes is a failed attempt, not a hang.
-    const signal = AbortSignal.timeout(durationMs + 120_000);
+    // The Worker bounds each stage of a point (180 s to prepare, the run plus 60 s, 20 s to describe
+    // and 20 s to count) and reports the ones that stalled: this is past all of them.
+    const signal = AbortSignal.timeout(durationMs + 330_000);
     let response: Response;
     let text: string;
     try {
@@ -93,6 +115,7 @@ async function measure(config: {
       }
     }
     const title = /<title>([^<]*)<\/title>/.exec(text)?.[1] ?? text.slice(0, 200);
+    if (/Cloudflare Access/.test(title)) await refreshAccessToken(true);
     console.error(JSON.stringify({ failed: config, status: response.status, cfRay: response.headers.get("cf-ray"), answer: title.trim() }));
     if (attempt >= 2) throw new Error(`Benchmark request failed (${response.status}): ${title}`);
   }
