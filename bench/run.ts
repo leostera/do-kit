@@ -142,7 +142,7 @@ if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ??
         }
         points.push(point);
         save();
-        console.log(JSON.stringify({ target, operation, distribution, concurrency: point.concurrency, opsPerSecond: Math.round(point.operationsPerSecond), mebibytesPerSecond: Number(point.mebibytesPerSecond.toFixed(3)), latencyMs: point.latencyMs, errors: point.errors, leaves: point.topology?.leaves ?? 1 }));
+        console.log(JSON.stringify({ target, operation, distribution, concurrency: point.concurrency, opsPerSecond: Math.round(point.operationsPerSecond), mebibytesPerSecond: Number(point.mebibytesPerSecond.toFixed(3)), latencyMs: point.latencyMs, errors: point.errors, leaves: point.topology?.leaves ?? 1, ...((point as { stalls?: string[] }).stalls?.length ? { stalls: (point as { stalls?: string[] }).stalls } : {}), ...((point as { leased?: unknown }).leased ? { leased: (point as { leased?: unknown }).leased } : {}) }));
       }
     }
   }
