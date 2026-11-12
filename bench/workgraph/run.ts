@@ -152,7 +152,8 @@ async function calibrate(): Promise<number> {
 async function measure(suite: string, p: { shape: string; units: number; unitMs: number; chunkMs: number; runners: number; maxUnitsPerChunk?: number; leaseMs?: number; faults?: { evict?: number; lose?: number }; bytes?: number; identity?: "inputs" | "key" }): Promise<Point> {
   const run = `${suite}-${p.shape}-${p.runners}-${Date.now().toString(36)}`;
   const started = await post<{ chunks: number; units: number; work: number; span: number; chunkSpan: number; bodyBytes: number; replayed: number; planMs: number }>("/start", { run, itersPerMs: results.itersPerMs, ...p });
-  const timeout = Date.now() + 30 * 60_000;
+  // Slow machines stretch the longest runs (400 slices of 10 s on 4 runners): BENCH_RUN_TIMEOUT_MIN.
+  const timeout = Date.now() + Number(process.env.BENCH_RUN_TIMEOUT_MIN ?? 30) * 60_000;
   let status: Status;
   for (;;) {
     await Bun.sleep(1_000);
