@@ -226,9 +226,9 @@ export abstract class Behaviour<Env = unknown, Call = unknown, Reply = unknown, 
     if (this.#started) return;
     const sql = this.sql;
     sql.exec("CREATE TABLE IF NOT EXISTS behaviour_state (k INTEGER PRIMARY KEY CHECK (k = 0), version INTEGER NOT NULL, state TEXT NOT NULL)");
-    sql.exec("CREATE TABLE IF NOT EXISTS behaviour_timers (name TEXT PRIMARY KEY, due INTEGER NOT NULL, message TEXT NOT NULL)");
+    sql.exec("CREATE TABLE IF NOT EXISTS behaviour_timers (name TEXT PRIMARY KEY, due INTEGER NOT NULL, message TEXT NOT NULL) WITHOUT ROWID");
     sql.exec("CREATE TABLE IF NOT EXISTS behaviour_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, binding TEXT NOT NULL, name TEXT NOT NULL, message TEXT NOT NULL)");
-    sql.exec("CREATE TABLE IF NOT EXISTS behaviour_replies (key TEXT PRIMARY KEY, outcome TEXT NOT NULL, at INTEGER NOT NULL)");
+    sql.exec("CREATE TABLE IF NOT EXISTS behaviour_replies (key TEXT PRIMARY KEY, outcome TEXT NOT NULL, at INTEGER NOT NULL) WITHOUT ROWID");
     sql.exec("CREATE TABLE IF NOT EXISTS behaviour_postponed (seq INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL)");
     this.#state = this.#loadState();
     this.#postponed = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM behaviour_postponed").one().n;
