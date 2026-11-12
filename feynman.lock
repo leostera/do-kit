@@ -8,7 +8,7 @@
     "src/indexed/client.ts#IndexedTableClient.settle": "6805af9ff5ba",
     "src/indexed/global-index.ts#GlobalIndex.apply": "bb5fc4efa1c3",
     "src/indexed/global-index.ts#GlobalIndex.onAlarm": "7ad4d78346f6",
-    "src/indexed/global-index.ts#GlobalIndex.reserve": "fe96ed2cd498",
+    "src/indexed/global-index.ts#GlobalIndex.reserve": "32868cba84c5",
     "src/indexed/global-index.ts#GlobalIndex.resolve": "5674c0f9b62e",
     "src/indexed/global-index.ts#GlobalIndex.settle": "f7e9c916db8e",
     "src/indexed/global-index.ts:77-77": "d12367c83059",
