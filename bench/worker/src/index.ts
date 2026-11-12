@@ -502,8 +502,35 @@ export class BenchFleet extends DurableObject<Env> {
   }
 }
 
+interface ProbeTable {
+  readonly target: TableTarget;
+  readonly objectName: string;
+  readonly op: "list" | "count" | "read";
+  readonly times?: number;
+  readonly fromObject?: boolean;
+}
+
+async function probeTable(env: Env, body: ProbeTable): Promise<{ runs: { ms: number; rows?: number; error?: string }[] }> {
+  const t = rowsClient(env, body.target, body.objectName);
+  const runs: { ms: number; rows?: number; error?: string }[] = [];
+  for (let i = 0; i < Math.min(body.times ?? 3, 10); i++) {
+    const started = Date.now();
+    try {
+      const rows = await bounded(async () => (body.op === "count" ? await t.count() : body.op === "read" ? (await t.getMany([`key-${i}`])).length : (await t.list({ index: "byCreated", direction: "desc", limit: 50 })).rows.length), 60_000, body.op);
+      runs.push({ ms: Date.now() - started, rows });
+    } catch (error) {
+      runs.push({ ms: Date.now() - started, error: String(error).slice(0, 300) });
+    }
+  }
+  return { runs };
+}
+
 /** Distributed load generator. locationHint is set only when each fresh driver is first created. */
 export class BenchDriver extends DurableObject<Env> {
+  async probeTable(body: ProbeTable): Promise<{ runs: { ms: number; rows?: number; error?: string }[] }> {
+    return probeTable(this.env, body);
+  }
+
   async prepare(config: Omit<MeasureConfig, "startAt">): Promise<void> {
     const value = "x".repeat(config.payloadBytes);
     if (config.distribution === "control-plane") {
@@ -937,21 +964,12 @@ async function handle(request: Request, env: Env): Promise<Response> {
   {
     if (request.headers.get("authorization") !== `Bearer ${env.BENCH_TOKEN}`) return new Response("Unauthorized", { status: 401 });
     const path = new URL(request.url).pathname;
-    // One table call, timed: where a listing over many shards spends its time (or hangs).
+    // One table call, timed: where a listing over many shards spends its time (or hangs). From a
+    // driver object with `fromObject`, as the load runs.
     if (request.method === "POST" && path === "/probe-table") {
-      const body = (await request.json()) as { target: TableTarget; objectName: string; op: "list" | "count" | "read"; times?: number };
-      const t = rowsClient(env, body.target, body.objectName);
-      const runs: { ms: number; rows?: number; error?: string }[] = [];
-      for (let i = 0; i < Math.min(body.times ?? 3, 10); i++) {
-        const started = Date.now();
-        try {
-          const rows = await bounded(async () => (body.op === "count" ? await t.count() : body.op === "read" ? (await t.getMany([`key-${i}`])).length : (await t.list({ index: "byCreated", direction: "desc", limit: 50 })).rows.length), 60_000, body.op);
-          runs.push({ ms: Date.now() - started, rows });
-        } catch (error) {
-          runs.push({ ms: Date.now() - started, error: String(error).slice(0, 300) });
-        }
-      }
-      return Response.json({ runs });
+      const body = (await request.json()) as ProbeTable;
+      if (body.fromObject) return Response.json(await env.BENCH_DRIVERS.get(env.BENCH_DRIVERS.idFromName(`probe-${body.objectName}`)).probeTable(body));
+      return Response.json(await probeTable(env, body));
     }
     if (request.method === "POST" && path === "/split-bench") {
       let input: SplitBenchInput;
