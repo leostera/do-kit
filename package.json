@@ -5,38 +5,18 @@
   "license": "MIT",
   "type": "module",
   "files": [
-    "dist",
     "src"
   ],
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./sharded": {
-      "types": "./dist/sharded/index.d.ts",
-      "import": "./dist/sharded/index.js"
-    },
-    "./table": {
-      "types": "./dist/table/index.d.ts",
-      "import": "./dist/table/index.js"
-    },
-    "./indexed": {
-      "types": "./dist/indexed/index.d.ts",
-      "import": "./dist/indexed/index.js"
-    },
-    "./workgraph": {
-      "types": "./dist/workgraph/index.d.ts",
-      "import": "./dist/workgraph/index.js"
-    },
-    "./leased": {
-      "types": "./dist/leased/index.d.ts",
-      "import": "./dist/leased/index.js"
-    }
+    ".": "./src/index.ts",
+    "./sharded": "./src/sharded/index.ts",
+    "./table": "./src/table/index.ts",
+    "./indexed": "./src/indexed/index.ts",
+    "./workgraph": "./src/workgraph/index.ts",
+    "./leased": "./src/leased/index.ts"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "check": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json && tsc -p tsconfig.consumer.json",
     "test": "bun test",
     "specs:check": "feynman check call-one-shard scan-visibility snapshot-split table-listing && feynman check lazy-presplit --instances Client=2 && feynman check leased-reads --instances Reader=1 --no-rules --max-states 20000000 --time-limit 600 && feynman check leased-reads --instances Reader=2 --set faults=0 --only freshReads,neverGoBack --max-states 30000000 --time-limit 1200 && feynman check indexed-write --set repeats=1 --set crashes=1 --no-rules --max-states 40000000 --time-limit 1200 && feynman check work-graph-run --max-states 4000000 --time-limit 600 && feynman check work-graph-run --set faults=0 --set crashes=1 --no-rules --max-states 40000000 --time-limit 1200 && feynman check atomic-across-shards --instances Other=2 --no-rules --max-states 3000000 && feynman check atomic-across-shards --set repeats=2 --max-states 20000000 --time-limit 1200 && feynman check atomic-across-shards --set faults=2 --no-rules",
     "bench:run": "bun bench/run.ts",
@@ -65,8 +45,8 @@
     "vite": "^8.3.5",
     "zod": "^4.6.7"
   },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/leostera/do-kit.git"

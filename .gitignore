@@ -4,3 +4,4 @@ node_modules/
 .wrangler/
 coverage/
 .DS_Store
+dist/

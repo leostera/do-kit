@@ -411,8 +411,10 @@ It was built for git refs read thousands of times a second while they are pushed
 ## Install
 
 ```sh
-npm install @leostera/do-kit
+bun add github:leostera/do-kit#<commit>   # or npm install / pnpm add, the same way
 ```
+
+The package is its TypeScript sources: your Worker's bundler (Wrangler, Vite, esbuild, Bun) compiles them with your code, and there is no build step or lifecycle script. They type-check under strict settings, including `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`, with the Workers and Node types (`@cloudflare/workers-types` and `@types/node`, or the types `wrangler types` generates).
 
 You need SQLite-backed Durable Objects, `nodejs_compat`, and, for snapshot splits, the `durable_object_snapshots` compatibility flag. Without that flag, or in local development (where workerd has no snapshots), splits copy rows over RPC instead. That copy is slower, but it works the same way.
 
@@ -505,8 +507,7 @@ The default threshold is about half of what one object handles on the edge, whic
 
 ```sh
 bun install
-bun run check        # types
-bun run build        # dist/: JavaScript and type declarations, what the package exports
+bun run check        # types: the repo, then src/ under the strictest settings a consumer may have
 bun test             # integration tests under cf dev: concurrent writes and CAS across splits, load splits, presplit, large rows, subclass tables
 bun run specs:check  # model-check the split protocol
 ```
