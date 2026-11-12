@@ -2,10 +2,44 @@
 // (BENCH_HOSTNAME) behind an Access application, and with a bearer token (BENCH_TOKEN);
 // workers.dev and preview URLs are off.
 import { bindings, defineConfig, exports } from "cf/config";
+import * as gone from "../teardown/gone.ts" with { type: "cf-worker" };
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
 const NAME = process.env.BENCH_WORKER_NAME ?? "do-kit-bench";
 const HOSTNAME = process.env.BENCH_HOSTNAME;
+// Deployed with BENCH_TEARDOWN=1 before the Worker is deleted: every class deleted, with its storage.
+const TEARDOWN = process.env.BENCH_TEARDOWN === "1";
+
+const EXPORTS = {
+  BenchDriver: exports.durableObject({ storage: "sqlite" }),
+  LeasedSource: exports.durableObject({ storage: "sqlite" }),
+  LeasedRelay: exports.durableObject({ storage: "sqlite" }),
+  SplitBenchJob: exports.durableObject({ storage: "sqlite" }),
+  PresplitObject: exports.durableObject({ storage: "sqlite" }),
+  WidePresplitObject: exports.durableObject({ storage: "sqlite" }),
+  BenchFleet: exports.durableObject({ storage: "sqlite" }),
+  Table1: exports.durableObject({ storage: "sqlite" }),
+  Table4: exports.durableObject({ storage: "sqlite" }),
+  Table16: exports.durableObject({ storage: "sqlite" }),
+  Table64: exports.durableObject({ storage: "sqlite" }),
+  Indexed1: exports.durableObject({ storage: "sqlite" }),
+  Indexed4: exports.durableObject({ storage: "sqlite" }),
+  Indexed16: exports.durableObject({ storage: "sqlite" }),
+  Index1: exports.durableObject({ storage: "sqlite" }),
+  Index4: exports.durableObject({ storage: "sqlite" }),
+  Index16: exports.durableObject({ storage: "sqlite" }),
+  SingleObject: exports.durableObject({ storage: "sqlite" }),
+  SplitObject: exports.durableObject({ storage: "sqlite" }),
+  LegacySplitObject: exports.durableObject({ storage: "sqlite" }),
+  ManualSplitObject: exports.durableObject({ storage: "sqlite" }),
+  ManualLegacySplitObject: exports.durableObject({ storage: "sqlite" }),
+  ManualTwoCopySplitObject: exports.durableObject({ storage: "sqlite" }),
+};
+
+/** Every class of `exports`, deleted: its objects and their storage go with the next deploy. */
+function deleted(all: Record<string, unknown>) {
+  return Object.fromEntries(Object.keys(all).map((name) => [name, exports.durableObject({ state: "deleted" })]));
+}
 
 export default defineConfig(() => ({
   worker: {
@@ -18,8 +52,8 @@ export default defineConfig(() => ({
     // A split benchmark runs writers for minutes in one request, and a driver runs all of a
     // point's calls in one request: a listing of a 64-shard table is up to 192 calls.
     limits: { cpuMs: 300_000, subrequests: 1_000_000 },
-    entrypoint,
-    env: {
+    entrypoint: TEARDOWN ? gone : entrypoint,
+    env: TEARDOWN ? {} : {
       BENCH_DRIVERS: bindings.durableObject({ worker: NAME, exportName: "BenchDriver" }),
       LEASED_SOURCE: bindings.durableObject({ worker: NAME, exportName: "LeasedSource" }),
       LEASED_RELAY: bindings.durableObject({ worker: NAME, exportName: "LeasedRelay" }),
@@ -44,32 +78,6 @@ export default defineConfig(() => ({
       LEGACY_MANUAL: bindings.durableObject({ worker: NAME, exportName: "ManualLegacySplitObject" }),
       TWO_COPY_MANUAL: bindings.durableObject({ worker: NAME, exportName: "ManualTwoCopySplitObject" }),
     },
-    exports: {
-      BenchDriver: exports.durableObject({ storage: "sqlite" }),
-      LeasedSource: exports.durableObject({ storage: "sqlite" }),
-      LeasedRelay: exports.durableObject({ storage: "sqlite" }),
-      SplitBenchJob: exports.durableObject({ storage: "sqlite" }),
-      PresplitObject: exports.durableObject({ storage: "sqlite" }),
-      WidePresplitObject: exports.durableObject({ storage: "sqlite" }),
-      BenchFleet: exports.durableObject({ storage: "sqlite" }),
-      Table1: exports.durableObject({ storage: "sqlite" }),
-      Table4: exports.durableObject({ storage: "sqlite" }),
-      Table16: exports.durableObject({ storage: "sqlite" }),
-      Table64: exports.durableObject({ storage: "sqlite" }),
-      Indexed1: exports.durableObject({ storage: "sqlite" }),
-      Indexed4: exports.durableObject({ storage: "sqlite" }),
-      Indexed16: exports.durableObject({ storage: "sqlite" }),
-      Index1: exports.durableObject({ storage: "sqlite" }),
-      Index4: exports.durableObject({ storage: "sqlite" }),
-      Index16: exports.durableObject({ storage: "sqlite" }),
-      SingleObject: exports.durableObject({ storage: "sqlite" }),
-      SplitObject: exports.durableObject({ storage: "sqlite" }),
-      LegacySplitObject: exports.durableObject({ storage: "sqlite" }),
-      ManualSplitObject: exports.durableObject({ storage: "sqlite" }),
-      ManualLegacySplitObject: exports.durableObject({ storage: "sqlite" }),
-      ManualTwoCopySplitObject: exports.durableObject({ storage: "sqlite" }),
-      // Its earlier name, retired.
-      ManualRfd18SplitObject: exports.durableObject({ state: "deleted" }),
-    },
+    exports: TEARDOWN ? deleted(EXPORTS) : EXPORTS,
   },
 }));

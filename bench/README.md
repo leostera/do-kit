@@ -40,7 +40,7 @@ A point always answers. Each driver call that has not answered in 30 s counts as
 
 ## Running it
 
-You need Bun, the `cf` CLI, and an account you are happy to fill with test objects. Runs create Durable Objects and data that are not cleaned up.
+You need Bun, the `cf` CLI, and an account you are happy to fill with test objects. Runs create Durable Objects and data that stay until you [tear the Workers down](#tearing-down), which you should do as soon as the runs are done.
 
 ```sh
 cd bench/worker
@@ -76,10 +76,24 @@ Results depend on placement, load, runtime version and the day. Run more than on
 ```sh
 cd bench/workgraph && bun install
 echo "BENCH_TOKEN=$(openssl rand -hex 32)" > .dev.vars
-cf deploy --secrets-file .dev.vars   # on a custom domain behind Access: workers.dev is off
+BENCH_HOSTNAME=do-kit-workgraph.<your-zone> cf deploy --secrets-file .dev.vars   # behind Access: workers.dev is off
 cd ../.. && set -a; . bench/workgraph/.dev.vars; set +a
 BENCH_URL=https://<its domain> BENCH_ACCESS_TOKEN=$(cloudflared access token -app=https://<its domain>) bun bench/workgraph/run.ts
 bun bench/workgraph/plot.ts
 ```
 
-The custom domain in `cloudflare.config.ts` is the author's; use one of yours, behind an Access application.
+## Tearing down
+
+Tear both Workers down when the runs are done, every time: their objects hold gigabytes of test data, and a Worker left deployed is one more thing on the internet. Deploying with `BENCH_TEARDOWN=1` replaces the Worker with a stub and marks every Durable Object class deleted, which deletes their objects and storage; then the Worker itself can go.
+
+```sh
+cd bench/worker
+BENCH_TEARDOWN=1 BENCH_HOSTNAME=do-kit-bench.<your-zone> cf deploy
+cf workers delete do-kit-bench --force
+cd ../workgraph
+BENCH_TEARDOWN=1 BENCH_HOSTNAME=do-kit-workgraph.<your-zone> cf deploy
+cf workers delete do-kit-workgraph-bench --force
+cf workers get do-kit-bench   # 404: gone
+```
+
+If you made an Access application only for the benchmark, delete it too.

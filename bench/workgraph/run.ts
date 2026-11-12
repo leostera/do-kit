@@ -1,7 +1,7 @@
 // Runs the work graph benchmarks (RFD0005) against the deployed bench Worker, and saves every point
 // to bench/results/workgraph.json as it finishes.
 //
-//   BENCH_URL=https://do-kit-workgraph.lostera.me.cloudflare.dev BENCH_TOKEN=… BENCH_ACCESS_TOKEN=… \
+//   BENCH_URL=https://<its domain> BENCH_TOKEN=… BENCH_ACCESS_TOKEN=… \
 //   BENCH_SUITES=scaling,faults,ceiling bun bench/workgraph/run.ts
 //
 // scaling: many small trees, one huge tree, and one chain, each on 1 to 64 runners.
@@ -11,7 +11,8 @@ import { execSync } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const URL_ = process.env.BENCH_URL ?? "https://do-kit-workgraph.lostera.me.cloudflare.dev";
+const URL_ = process.env.BENCH_URL ?? "";
+if (!URL_) throw new Error("BENCH_URL is the bench Worker's custom domain, e.g. https://do-kit-workgraph.<your-zone>");
 const TOKEN = process.env.BENCH_TOKEN ?? "";
 let ACCESS = process.env.BENCH_ACCESS_TOKEN ?? "";
 // An Access token lasts less than a long run: fetched again from cloudflared every 10 minutes, and
@@ -113,14 +114,13 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   }
 }
 
-const results: { schemaVersion: 1; generatedAt: string; commit: string; dirty: boolean; url: string; itersPerMs: number; calibrations: unknown[]; notes: string[]; points: Point[] } = await readFile(FILE, "utf8")
+const results: { schemaVersion: 1; generatedAt: string; commit: string; dirty: boolean; itersPerMs: number; calibrations: unknown[]; notes: string[]; points: Point[] } = await readFile(FILE, "utf8")
   .then((t) => JSON.parse(t))
   .catch(() => null) ?? {
   schemaVersion: 1,
   generatedAt: "",
   commit: "",
   dirty: false,
-  url: URL_,
   itersPerMs: 0,
   calibrations: [],
   notes: [
