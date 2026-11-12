@@ -1,6 +1,6 @@
 # Performance
 
-Everything here was measured on Cloudflare's network, on a Workers paid plan, using the benchmark Worker in [`bench/`](../bench/README.md) (compatibility date 2026-10-29, with `durable_object_snapshots`), with do-kit 0.4.0. Raw results are in [`bench/results/`](../bench/results/), and the graphs are regenerated from them with `bun run bench:plot`.
+Everything here was measured on Cloudflare's network, on a Workers paid plan, using the benchmark Worker in [`bench/`](../bench/README.md) (compatibility date 2026-10-29, with `durable_object_snapshots`), on 2026-11-12, with do-kit after 0.4.0 (each results file names its runs, their commit and the deployed Worker version). Raw results are in [`bench/results/`](../bench/results/): one file per named run (`v050-*.json`), collected by `bun bench/collect.ts` into the files the graphs are drawn from by `bun run bench:plot`.
 
 ## How long a split takes
 
@@ -14,17 +14,17 @@ The split benchmark builds one object with N MiB of 1 KiB rows. Then, with 8 wri
 
 | Data | Sharded object | Freeze, two snapshots | v0.1 row copy |
 |---|---|---|---|
-| 1 MiB | 1.8 s | 1.2 s | 1.1 s |
-| 16 MiB | 1.7 s | 2.1 s | 5.1 s |
-| 128 MiB | 3.4 s | 13.4 s | 267 s |
-| 1 GiB | 16.9 s | failed (earlier version) | did not finish in 2 h (earlier version) |
+| 1 MiB | 1.7 s | 1.4 s | 0.9 s |
+| 16 MiB | 1.8 s | 2.9 s | 9.2 s |
+| 128 MiB | 4.8 s | 31.6 s | 245 s |
+| 1 GiB | 29.5 s | failed (earlier version) | did not finish in 2 h (earlier version) |
 
 "Time to split" is the time until the new owner serves with all of its data:
-- **Sharded object:** until the new object has claimed its copy. Deleting the half each side gave away continues in the background: 30.1 s at 128 MiB, during which those rows are invisible.
+- **Sharded object:** until the new object has claimed its copy. Deleting the half each side gave away continues in the background: 38.6 s at 128 MiB, during which those rows are invisible.
 - **Freeze:** the whole freeze.
 - **Row copy:** until the last row has moved.
 
-At 1 GiB, the sharded object served after 16.9 s. During the run, writes had a p50 of 67 ms, a p95 of 153 ms and a p99 of 265 ms, with no failures. The slowest write, 16.0 s, was one to the moving half that waited for the copy. Deleting the half each side gave away then took 4.7 minutes in the background. The two older designs were measured at 1 GiB only with an earlier version: the freeze-into-two design gave up on the split (its single-transaction cleanup of half a million rows per child is the likely cause), and the v0.1 row copy was still copying after two hours.
+At 1 GiB, the sharded object served after 29.5 s. During the run, writes had a p50 of 119 ms, a p95 of 295 ms and a p99 of 359 ms, with no failures. The slowest write, 28.6 s, was one to the moving half that waited for the copy. Deleting the half each side gave away then took 8.3 minutes in the background. The two older designs were measured at 1 GiB only with an earlier version: the freeze-into-two design gave up on the split (its single-transaction cleanup of half a million rows per child is the likely cause), and the v0.1 row copy was still copying after two hours.
 
 ### What callers feel during a split
 
@@ -36,40 +36,40 @@ Measured from 1 s before the split until 1 s after it settles:
 
 | Data | Sharded object p95 / max | Freeze p95 / max | Row copy p95 / max |
 |---|---|---|---|
-| 1 MiB | 18 ms / 1.2 s | 16 ms / 1.2 s | 25 ms / 0.3 s |
-| 16 MiB | 62 ms / 1.3 s | 43 ms / 2.2 s | 127 ms / 0.7 s |
-| 128 MiB | 105 ms / 3.0 s | 170 ms / 14.7 s | 2.2 s / 16.3 s |
+| 1 MiB | 39 ms / 1.3 s | 62 ms / 1.5 s | 39 ms / 0.3 s |
+| 16 MiB | 96 ms / 1.6 s | 69 ms / 3.0 s | 300 ms / 1.0 s |
+| 128 MiB | 164 ms / 4.5 s | 44 ms / 31.7 s | 2.7 s / 11.4 s |
 
 - **Snapshots trade a short wait for a short split.** With either snapshot design, the slowest write is one that waited for the copy. With the sharded object, only writes to the half that moves wait. With the freeze, every call waits, reads too.
-- **The row copy never blocks outright, but it is slow and loads the busy object.** Its children ask the parent for rows on every new key while the background copy competes with those requests. That is why its p95 is 2.2 s for the 4 minutes it takes at 128 MiB.
+- **The row copy never blocks outright, but it is slow and loads the busy object.** Its children ask the parent for rows on every new key while the background copy competes with those requests. That is why its p95 is 2.7 s for the 4 minutes it takes at 128 MiB.
 - **Deleting rows has a cost too.** A delete blocks the object while it runs, and takes longer the more rows it deletes. So each object deletes the half it gave away 250 rows at a time, 25 ms apart, and writes run between the batches. Deleting in large batches stalls every write for as long as each batch takes.
 
 No write failed in any split run.
 
 ## Throughput against one Durable Object
 
-The throughput benchmark sends one-key writes of 1 KiB values to uniform keys from driver Durable Objects in several regions, at increasing concurrency. Each driver keeps at most 16 calls in flight, so 2,048 in flight means 128 drivers. Each level runs once unmeasured, then once measured for 10 s. The object under test is either one plain Durable Object, or a sharded object presplit into 16 shards, so no split happens while it is measured.
+The throughput benchmark sends one-key writes of 1 KiB values to uniform keys from driver Durable Objects in several regions, at increasing concurrency. Each driver keeps at most 16 calls in flight, so 2,048 in flight means 128 drivers. Each level runs once unmeasured, then once measured for 10 s. The object under test is either one plain Durable Object, or a sharded object presplit into 16 shards, so no split happens while it is measured ([raw data](../bench/results/v050-load.json)).
 
 ![Throughput vs concurrency](bench/throughput.svg)
 
 | In flight | One Durable Object | Sharded object, 16 shards |
 |---|---|---|
-| 1 | 65 writes/s, p50 7 ms | 2 writes/s, p50 42 ms |
-| 16 | 354 writes/s, p50 28 ms | 206 writes/s, p50 52 ms |
-| 64 | 1,035 writes/s, p50 27 ms | 849 writes/s, p50 48 ms |
-| 256 | 1,800 writes/s, p50 52 ms, p99 874 ms | 1,815 writes/s, p50 68 ms, p99 602 ms |
-| 1,024 | 2,064 writes/s, p50 386 ms, p99 1,050 ms | 5,527 writes/s, p50 110 ms, p99 649 ms |
-| 2,048 | 2,068 writes/s, p99 1,357 ms, **23,263 calls refused** | 9,800 writes/s, p50 139 ms, p99 705 ms, none refused |
+| 1 | 35 writes/s, p50 7 ms | 18 writes/s, p50 54 ms |
+| 16 | 298 writes/s, p50 40 ms | 214 writes/s, p50 55 ms |
+| 64 | 964 writes/s, p50 46 ms | 856 writes/s, p50 53 ms |
+| 256 | 1,860 writes/s, p50 64 ms, p99 878 ms | 1,482 writes/s, p50 109 ms, p99 624 ms |
+| 1,024 | 2,136 writes/s, p50 409 ms, p99 1,131 ms | 4,643 writes/s, p50 123 ms, p99 716 ms |
+| 2,048 | 2,483 writes/s, p50 860 ms, p99 1,493 ms | 9,295 writes/s, p50 122 ms, p99 816 ms |
 
 Reads, in the same way:
 
 | In flight | One Durable Object | Sharded object, 16 shards |
 |---|---|---|
-| 1 | 162 reads/s, p50 7 ms | 110 reads/s, p50 10 ms |
-| 64 | 1,201 reads/s, p50 17 ms | 1,562 reads/s, p50 11 ms |
-| 256 | 1,483 reads/s, p50 96 ms, p99 912 ms | 2,611 reads/s, p50 21 ms, p99 763 ms |
-| 1,024 | 1,753 reads/s, p50 597 ms, p99 1,205 ms | 7,445 reads/s, p50 79 ms, p99 720 ms |
-| 2,048 | 1,611 reads/s, p99 2,216 ms, **31,785 calls failed** | 14,947 reads/s, p50 71 ms, p99 782 ms, none failed |
+| 1 | 146 reads/s, p50 7 ms | 52 reads/s, p50 12 ms |
+| 64 | 1,315 reads/s, p50 13 ms | 1,026 reads/s, p50 34 ms |
+| 256 | 1,867 reads/s, p50 39 ms, p99 995 ms | 1,648 reads/s, p50 62 ms, p99 802 ms |
+| 1,024 | 1,705 reads/s, p50 363 ms, p99 1,390 ms | 4,909 reads/s, p50 102 ms, p99 718 ms |
+| 2,048 | 1,778 reads/s, p50 895 ms, p99 1,943 ms | 7,024 reads/s, p50 112 ms, p99 728 ms |
 
 ![Write latency p99 vs concurrency](bench/latency-p99.svg)
 
@@ -77,17 +77,17 @@ Reads, in the same way:
 
 ![Data throughput vs concurrency](bench/bandwidth.svg)
 
-- **One object saturates at about 2,100 writes/s.** Past that, it queues, so its median latency at 1,024 in flight is 386 ms. Then it refuses calls: 23,263 in 10 s at 2,048 in flight. (Its 116 ms median at that level is misleading, because many of those calls failed fast.)
-- **16 shards keep their median latency near 100 ms** while writes grow from 1,815/s to 9,800/s, and they had not saturated at the highest load we offered.
-- **At low load, one object can be faster.** With one call in flight, a shard answered in 42 ms against 7 ms, and the first calls also wait for the presplit. A new shard is placed near the object that created it, not near the caller, so some keys live farther away. Splitting pays off when one object is the bottleneck, not before.
-- **The load generator matters.** A driver Durable Object completes about 90 calls/s, however many it keeps in flight. An earlier run with 64 calls per driver capped every target near 1,500 writes/s, and made splitting look useless. The graphs above use the fixed harness.
+- **One object saturates at about 2,100 to 2,500 writes/s and 1,700 to 1,900 reads/s.** Past that, it queues, so its median latency at 2,048 in flight is 860 ms for writes and 895 ms for reads. In this run it refused none; on 0.4.0 it refused 23,263 writes and 31,785 reads in 10 s at 2,048 in flight, and peaked at 2,068 writes/s. What one object takes varies with the day and the machine it lands on.
+- **16 shards keep their median latency near 100 to 120 ms** while writes grow from 1,482/s to 9,295/s, and they had not saturated at the highest load we offered.
+- **At low load, one object is faster.** With one call in flight, a shard answered writes in 54 ms against 7 ms. A new shard is placed near the object that created it, not near the caller, so some keys live farther away. Splitting pays off when one object is the bottleneck, not before.
+- **The load generator matters.** A driver Durable Object completes about 90 calls/s, however many it keeps in flight. An earlier run with 64 calls per driver capped every target near 1,500 writes/s, and made splitting look useless.
 - **Read runs seed their keys from one driver, with retries.** When a hundred drivers seeded at once, they overloaded the single object before it was measured.
 
 More graphs from the same run: [latency p50](bench/latency-p50.svg), [p95](bench/latency-p95.svg), [max](bench/latency-max.svg), and [storage ceiling](bench/capacity.svg) (shards × the 10 GB limit of one object).
 
 ## A control plane: a handful of hot objects
 
-Ten objects, `config-0` to `config-9`, with Zipf popularity (s = 1.1): the most popular gets about a third of the calls. 95% of calls read and 5% write 1 KiB.
+Ten objects, `config-0` to `config-9`, with Zipf popularity (s = 1.1): the most popular gets about a third of the calls. 95% of calls read and 5% write 1 KiB ([raw data](../bench/results/v050-control-plane.json)).
 
 ![Control plane: throughput vs concurrency](bench/control-plane-throughput.svg)
 
@@ -97,16 +97,74 @@ Ten objects, `config-0` to `config-9`, with Zipf popularity (s = 1.1): the most 
 
 | In flight | One Durable Object | Sharded object, splitting by load | Sharded object, 16 shards |
 |---|---|---|---|
-| 1 | 97/s, p50 11 ms | 78/s, p50 13 ms | 56/s, p50 19 ms |
-| 16 | 232/s, p50 54 ms | 296/s, p50 27 ms | 291/s, p50 26 ms |
-| 64 | 810/s, p50 46 ms | 998/s, 5 shards, p50 27 ms | 1,122/s, p50 25 ms |
-| 256 | 1,142/s, p50 135 ms, p99 939 ms | 1,668/s, 8 shards, p50 71 ms, p99 807 ms | 1,904/s, p50 53 ms, p99 632 ms |
-| 1,024 | 1,527/s, p50 675 ms, p99 1.4 s | 2,388/s, 15 shards, p50 327 ms, p99 2.4 s | 3,547/s, p50 217 ms, p99 881 ms |
-| 2,048 | 1,713/s, **27,650 calls failed** | 4,656/s, 29 shards, 9,655 failed | 4,522/s, **10,516 calls failed** |
+| 1 | 132/s, p50 8 ms | 53/s, p50 18 ms | 121/s, p50 8 ms |
+| 16 | 538/s, p50 10 ms | 297/s, p50 29 ms | 544/s, p50 11 ms |
+| 64 | 1,539/s, p50 15 ms | 791/s, 4 shards, p50 50 ms | 2,135/s, p50 10 ms |
+| 256 | 1,927/s, p50 63 ms, p99 895 ms | 1,192/s, 8 shards, p50 127 ms | 3,410/s, p50 22 ms, p99 774 ms |
+| 1,024 | 2,112/s, p50 431 ms, p99 1,072 ms | 1,442/s, 19 shards, p50 235 ms | 5,308/s, p50 98 ms, p99 800 ms |
+| 2,048 | 1,890/s, **41,713 calls failed** | 2,718/s, 32 shards, 498 failed | 4,780/s, p50 240 ms, none failed |
 
-- **Even ten keys gain from splitting.** They land on different shards, so the object's work is shared.
-- **The most popular key sets the ceiling.** A key always lives on one shard, and here one key takes a third of the calls. That shard runs out of capacity near 4,700 calls/s in total: at 2,048 in flight it refuses calls even with 16 shards.
-- **Splitting by load overshoots.** It went to 29 shards for 10 keys. Splits that leave a hot key where it was do not help, but they still pause writes to the half that moves. The split policy should stop splitting a shard whose load comes from one key. That is not done yet.
+- **Even ten keys gain from presplitting.** They land on different shards (13 of the 16 hold one), so the object's work is shared.
+- **The most popular key sets the ceiling.** A key always lives on one shard, and here one key takes a third of the calls. That shard runs out of capacity near 5,000 calls/s in total.
+- **Splitting by load does worse than presplitting here,** and worse than one object below 2,048 in flight. It went to 32 shards for 10 keys: each split pauses writes to the half that moves, and splits that leave a hot key where it was don't help. The split policy should stop splitting a shard whose load comes from one key. That is not done yet.
+
+## Atomic calls across shards
+
+`atomically` puts 1 KiB to 2 or 4 distinct keys of a sharded object presplit into 16 shards, all or nothing ([RFD0008](rfds/RFD0008-atomic-calls-across-shards.md)), against the same put as one plain `call`, which writes each shard's share in its own transaction with no promise across shards. Keys are drawn from 10,000 (uniform) or from 8 (hot) ([raw data](../bench/results/v050-atomic.json)).
+
+![Atomic calls across shards](bench/atomic-throughput.svg)
+
+![Atomic calls: median latency](bench/atomic-p50.svg)
+
+| Uniform keys | Plain, 2 keys | `atomically`, 2 keys | Plain, 4 keys | `atomically`, 4 keys |
+|---|---|---|---|---|
+| 1 in flight | 14/s, p50 63 ms | 2/s, p50 288 ms | 7/s, p50 118 ms | 3/s, p50 222 ms |
+| 16 | 142/s, p50 89 ms | 39/s, p50 373 ms | 94/s, p50 146 ms | 44/s, p50 329 ms |
+| 64 | 680/s, p50 56 ms | 163/s, p50 362 ms | 241/s, p50 163 ms | 163/s, p50 364 ms |
+| 256 | 1,070/s, p50 150 ms | 521/s, p50 446 ms | 261/s, p50 621 ms | 419/s, p50 513 ms |
+| 1,024 | 2,826/s, p50 202 ms | 1,030/s, p50 743 ms | 930/s, p50 608 ms | 431/s, p50 1.7 s |
+
+![Atomic calls on a few hot keys](bench/atomic-hot-throughput.svg)
+
+| 8 hot keys | Plain, 2 keys | `atomically`, 2 keys | Plain, 4 keys | `atomically`, 4 keys |
+|---|---|---|---|---|
+| 1 in flight | 49/s, p50 20 ms | 6/s, p50 177 ms | 20/s, p50 56 ms | 6/s, p50 159 ms |
+| 16 | 239/s, p50 42 ms | 34/s, p50 374 ms | 183/s, p50 54 ms | 5/s, p50 3.1 s |
+| 64 | 765/s, p50 47 ms | 38/s, p50 845 ms | 455/s, p50 60 ms | 2/s, p50 23.4 s, 18 failed |
+| 256 | 979/s, p50 143 ms | 31/s, p50 5.1 s | 479/s, p50 249 ms | 0/s, 256 failed |
+| 1,024 | 1,151/s, p50 755 ms | 1/s, 997 failed | 1,049/s, p50 487 ms | 0/s, 1,024 failed |
+
+- **An atomic call costs 220–290 ms at one call in flight,** against 60–120 ms for the plain call. The caller sends the whole call to the primary shard (the smallest key's), which prepares on the others, decides, and commits, with each shard's holds written to storage on the way.
+- **Throughput scales with shards,** at about a third of the plain call's for 2 keys and half for 4, with no failed call on uniform keys at any load.
+- **Contention stops it.** A call that meets an older call's hold gives way: it aborts, and is made again with the same age, so calls never wait on each other in a ring. On 8 hot keys, 31–38 calls/s complete with 2 keys from 16 to 256 in flight, with a median rising from 0.4 s to 5.1 s; with 4 keys, 5 calls/s at 16 in flight and almost none above. At 1,024 in flight nearly every call had no answer in 30 s. Hot keys that change together belong in one shard, where `routeOf` makes them one transaction.
+
+## Leased reads of one hot key
+
+One key of 1 KiB, read by drivers in five regions, each driver an isolate that keeps its sub-lease in memory as an app's Worker would ([`bench/worker/src/leased.ts`](../bench/worker/src/leased.ts): a source with `ReadLeases` and `RelayPlan`, relays with `RelayReads`). The comparison is the same drivers reading one Durable Object. `mixed` makes 1% of the calls writes of the key. Each point also reports what reached the source ([raw data](../bench/results/v050-leased.json)).
+
+![One hot key: reads per second](bench/leased-read-throughput.svg)
+
+| Reads only | One Durable Object | Leased reads | The source served | Relays |
+|---|---|---|---|---|
+| 1 in flight | 29/s, p50 29 ms | 953/s, p50 1 ms | 1 read/s | 0 |
+| 16 | 131/s, p50 78 ms | 13,141/s, p50 1 ms | 19 reads/s | 0 |
+| 64 | 307/s, p50 111 ms | 35,041/s, p50 1 ms | 11 reads/s | 2 |
+| 256 | 670/s, p50 234 ms | 95,480/s, p50 1 ms | 21 reads/s | 7 |
+| 1,024 | 810/s, p50 1.1 s | 254,431/s, p50 1 ms | 29 reads/s | 6 |
+
+![One hot key, written too](bench/leased-mixed-throughput.svg)
+
+| 1% writes | One Durable Object | Leased reads | The source served | Relays |
+|---|---|---|---|---|
+| 1 in flight | 42/s, p50 21 ms | 109/s, p50 1 ms, p99 86 ms | 1 read/s, 1 writes/s | 0 |
+| 16 | 243/s, p50 30 ms | 1,272/s, p50 1 ms, p99 199 ms | 13 reads/s, 12 writes/s | 0 |
+| 64 | 539/s, p50 78 ms | 5,260/s, p50 1 ms, p99 481 ms | 54 reads/s, 52 writes/s | 0 |
+| 256 | 697/s, p50 253 ms | 13,783/s, p50 1 ms, p99 825 ms | 216 reads/s, 139 writes/s | 0 |
+| 1,024 | 881/s, p50 1.2 s | 56,600/s, p50 1 ms, p99 688 ms | 813 reads/s, 554 writes/s | 0 |
+
+- **Reads of a key that isn't written are answered from memory.** The source answers each isolate and relay about once a second, whatever the read rate. 254,431 reads/s is what the drivers generated, not a limit of the layer.
+- **A written key is read from the source, and cached there too.** A key written in the last `WRITTEN_MS` (10 s) isn't relayed, so isolates read the source directly and keep its value under their own leases: 56,600 calls/s at 1,024 in flight, with the source serving 813 reads/s. Relays without a lease to give would only add a hop.
+- **A write waits for the leases out on its key,** up to a second: the p99 of the `mixed` runs is the writes.
 
 ## Cost
 
@@ -148,17 +206,17 @@ See [`bench/README.md`](../bench/README.md).
 
 | Writes | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
-| 64 in flight | 636/s, p50 54 ms | 634/s, p50 78 ms | 665/s, p50 55 ms | 440/s, p50 105 ms |
-| 256 | 1,022/s, p50 130 ms | 1,457/s, p50 103 ms | 2,092/s, p50 41 ms | 1,252/s, p50 134 ms |
-| 1,024 | 1,226/s, p50 688 ms | 2,109/s, p50 302 ms | 5,125/s, p50 95 ms | 5,174/s, p50 124 ms |
+| 64 in flight | 686/s, p50 68 ms | 628/s, p50 77 ms | 721/s, p50 68 ms | 804/s, p50 55 ms |
+| 256 | 1,338/s, p50 196 ms | 2,058/s, p50 91 ms | 2,333/s, p50 59 ms | 2,691/s, p50 50 ms |
+| 1,024 | 1,604/s, p50 515 ms, 9,089 failed | 1,633/s, p50 265 ms | 6,230/s, p50 80 ms | 8,117/s, p50 61 ms |
 
 | Reads | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
-| 64 in flight | 1,351/s, p50 17 ms | 1,234/s, p50 30 ms | 984/s, p50 37 ms | 1,761/s, p50 9 ms |
-| 256 | 1,660/s, p50 68 ms | 1,988/s, p50 68 ms | 1,421/s, p50 103 ms | not measured* |
-| 1,024 | 1,745/s, p50 561 ms | 4,333/s, p50 109 ms | 5,555/s, p50 127 ms | not measured* |
+| 64 in flight | 1,305/s, p50 35 ms | 2,226/s, p50 7 ms | 871/s, p50 51 ms | 891/s, p50 48 ms |
+| 256 | 1,793/s, p50 118 ms | 3,413/s, p50 44 ms | 2,992/s, p50 50 ms | 2,504/s, p50 43 ms |
+| 1,024 | 2,136/s, p50 446 ms, 1,327 failed | 3,330/s, p50 134 ms | 8,846/s, p50 59 ms | 10,241/s, p50 39 ms |
 
-\* The 64-shard read runs at 256 and 1,024 in flight never answered: a Durable Object used up its CPU time until the runtime reset it. Other runs on 0.4.0 hit the same thing at times (in the 4,096-shard benchmark too), and the cause is not known yet.
+The 64-shard reads are from a later run than the rest ([raw data](../bench/results/table.json) names each run).
 
 ![Table listings](bench/table-list-throughput.svg)
 
@@ -166,19 +224,20 @@ See [`bench/README.md`](../bench/README.md).
 
 | List pages | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
-| 1 in flight | 163/s, p50 7 ms | 37/s, p50 26 ms | 18/s, p50 53 ms | 10/s, p50 73 ms |
-| 64 | 556/s, p50 61 ms | 326/s, p50 126 ms | 240/s, p50 193 ms | 64/s, p50 456 ms |
-| 256 | 544/s, p50 366 ms | 400/s, p50 613 ms | 440/s, p50 501 ms | 206/s, p50 563 ms |
-| 1,024 | 578/s, p50 1,681 ms | 564/s, p50 1,693 ms | 169/s, p50 65 ms, 37,300 calls failed | 369/s, p50 2,287 ms, 40 calls failed |
+| 1 in flight | 200/s, p50 6 ms | 92/s, p50 11 ms | 66/s, p50 15 ms | 21/s, p50 40 ms |
+| 64 | 874/s, p50 36 ms | 469/s, p50 105 ms | 297/s, p50 208 ms | 156/s, p50 302 ms |
+| 256 | 906/s, p50 295 ms | 582/s, p50 407 ms | 100/s, p50 5 ms, 55,922 failed | 169/s, p50 1,201 ms |
+| 1,024 | 857/s, p50 924 ms, 4,100 failed | 571/s, p50 1,723 ms, 46 failed | 125/s, p50 4 ms, 56,550 failed | 50/s, p50 18 ms, 51,512 failed |
 
 - **Writes and reads scale with shards** once one object is the bottleneck, from about 256 in flight. Below that, one object is as fast or faster: a sharded call is a routed call.
-- **Listings do not.** A page asks every shard for its share of the page (twice limit / shards, plus two), so each shard serves every page. Throughput stays near one object's, about 560–580 pages/s, and a page waits for its slowest shard, so latency grows with the number of shards. At high load, more shards shed load sooner, because every one of them sees every page.
+- **Listings do not.** A page asks every shard for its share of the page (twice limit / shards, plus two), so each shard serves every page. Throughput stays below one object's (874–906 pages/s here, from 64 in flight), and a page waits for its slowest shard, so latency grows with the number of shards. At high load, more shards refuse more pages ("overloaded"), because every one of them sees every page: 16 shards refused most of them from 256 in flight, 64 shards at 1,024.
+- **A page costs up to 3 × shards subrequests** in the caller's invocation: one per shard per round, and up to three rounds when the first comes up short (most take one). A Worker invocation may make only so many subrequests, so a request that lists a 64-shard table more than a few dozen times runs out. The benchmark's drivers run a whole point in one invocation and lift the limit.
 - Two fixes went in while measuring: pages first scanned rows instead of seeking (10,000 rows listed at a third of the speed of 2,000), and every shard returned a full page (16 shards moved 800 rows to list 50).
 - An index stored by sort order (range-partitioned) would let a page touch one or two index shards. That is the next layer.
 
 ## Indexed tables
 
-`IndexedTable` against `ShardedTable`, on the same 10,000 rows of 1 KiB, on 1, 4 and 16 shards. The indexed table adds a unique global index on `email` and one on `(team, createdAt)`, each on as many index shards as there are row shards ("16 + 16"). Updates are one-row puts of existing rows, each moving both index entries; creates are new rows, only if absent, so the indexed table reserves the email first; reads are a lookup by email through the index, against a get by key; a listing is one page of 50 rows newest first, of one team from one index shard, against the whole table from every shard. 10 s per point, measured on the edge on 2026-11-11 ([raw data](../bench/results/indexed.json)).
+`IndexedTable` against `ShardedTable`, on the same 10,000 rows of 1 KiB, on 1 and 16 shards. The indexed table adds a unique global index on `email` and one on `(team, createdAt)`, each on as many index shards as there are row shards ("16 + 16"). Updates are one-row puts of existing rows, each moving both index entries; creates are new rows, only if absent, so the indexed table reserves the email first; reads are a lookup by email through the index, against a get by key; a listing is one page of 50 rows newest first, of one team from one index shard, against the whole table from every shard. 10 s per point, measured on the edge on 2026-11-12 ([raw data](../bench/results/indexed.json)).
 
 ![Indexed table updates](bench/indexed-write-throughput.svg)
 
@@ -186,35 +245,40 @@ See [`bench/README.md`](../bench/README.md).
 
 | Updates | 1 shard | 1 + 1 indexed | 16 shards | 16 + 16 indexed |
 |---|---|---|---|---|
-| 1 in flight | 11/s, p50 92 ms | 14/s, p50 68 ms | 13/s, p50 72 ms | 10/s, p50 98 ms |
-| 64 | 584/s, p50 89 ms | 268/s, p50 235 ms | 540/s, p50 91 ms | 370/s, p50 144 ms |
-| 256 | 1,037/s, p50 270 ms | 393/s, p50 536 ms, 208 failed | 1,694/s, p50 91 ms | 843/s, p50 194 ms, 54 failed |
-| 1,024 | 1,158/s, 4,073 failed | 650/s, 22,043 failed | 4,708/s, p50 135 ms | 2,677/s, p50 275 ms |
+| 1 in flight | 31/s, p50 32 ms | 10/s, p50 98 ms | 29/s, p50 33 ms | 10/s, p50 98 ms |
+| 64 | 504/s, p50 96 ms | 248/s, p50 251 ms | 602/s, p50 85 ms | 361/s, p50 147 ms |
+| 256 | 612/s, p50 370 ms, 811 failed | 496/s, p50 507 ms | 2,213/s, p50 82 ms | 1,052/s, p50 179 ms |
+| 1,024 | 737/s, p50 163 ms, 11,031 failed | 794/s, p50 936 ms, 5,130 failed | 6,716/s, p50 107 ms | 2,497/s, p50 289 ms |
 
 | Creates | 1 shard | 1 + 1 indexed | 16 shards | 16 + 16 indexed |
 |---|---|---|---|---|
-| 1 in flight | 23/s, p50 44 ms | 6/s, p50 154 ms | 18/s, p50 58 ms | 3/s, p50 231 ms |
-| 64 | 506/s, p50 99 ms | 159/s, p50 391 ms | 492/s, p50 106 ms | 186/s, p50 332 ms |
-| 256 | 878/s, p50 281 ms | 216/s, p50 1,269 ms | 1,664/s, p50 97 ms | 624/s, p50 380 ms |
-| 1,024 | 951/s, 6,929 failed | 184/s, p50 4,711 ms | 3,999/s, p50 162 ms | 1,259/s, p50 564 ms |
+| 1 in flight | 21/s, p50 46 ms | 5/s, p50 181 ms | 25/s, p50 38 ms | 1/s, p50 640 ms |
+| 64 | 368/s, p50 177 ms | 158/s, p50 362 ms | 656/s, p50 85 ms | 152/s, p50 416 ms |
+| 256 | 412/s, p50 609 ms, 231 failed | 242/s, p50 974 ms | 2,213/s, p50 85 ms | 567/s, p50 441 ms |
+| 1,024 | 485/s, p50 1,457 ms, 4,670 failed | 348/s, p50 2,816 ms | 4,648/s, p50 148 ms | 1,389/s, p50 578 ms |
 
 ![Indexed table reads](bench/indexed-read-throughput.svg)
 
 ![Indexed table listings](bench/indexed-list-throughput.svg)
 
+| Lookups by email / reads by key | 1 shard | 1 + 1 indexed | 16 shards | 16 + 16 indexed |
+|---|---|---|---|---|
+| 1 in flight | 63/s, p50 16 ms | 23/s, p50 44 ms | 94/s, p50 13 ms | 93/s, p50 8 ms |
+| 64 | 583/s, p50 91 ms | 925/s, p50 51 ms | 1,017/s, p50 44 ms | 1,397/s, p50 17 ms |
+| 256 | 953/s, p50 287 ms | 1,212/s, p50 205 ms | 3,026/s, p50 49 ms | 3,626/s, p50 38 ms |
+| 1,024 | 990/s, p50 247 ms, 11,274 failed | 1,134/s, p50 447 ms, 11,082 failed | 8,540/s, p50 73 ms | 11,755/s, p50 54 ms |
+
 | List pages | 1 shard | 1 + 1 indexed | 16 shards | 16 + 16 indexed |
 |---|---|---|---|---|
-| 1 in flight | 112/s, p50 9 ms | 22/s, p50 47 ms | 28/s, p50 31 ms | 97/s, p50 11 ms |
-| 64 | 404/s, p50 129 ms | 627/s, p50 77 ms | 365/s, p50 164 ms | 1,021/s, p50 47 ms |
-| 256 | 438/s, p50 576 ms | 653/s, p50 371 ms | 583/s, p50 446 ms | 2,314/s, p50 63 ms |
-| 1,024 | 393/s, 168 failed | 473/s, p50 1,853 ms | not measured* | 7,930/s, p50 96 ms |
+| 1 in flight | 121/s, p50 9 ms | 237/s, p50 5 ms | 52/s, p50 18 ms | 99/s, p50 10 ms |
+| 64 | 418/s, p50 140 ms | 691/s, p50 68 ms | 312/s, p50 198 ms | 1,487/s, p50 14 ms |
+| 256 | 386/s, p50 675 ms | 796/s, p50 317 ms | 549/s, p50 451 ms | 4,054/s, p50 39 ms |
+| 1,024 | 340/s, p50 1,622 ms, 2,931 failed | 714/s, p50 1,461 ms | 128/s, p50 6 ms, 12,800 failed | 9,778/s, p50 67 ms |
 
-\* The driver Worker loses its connection fanning 1,024 pages out to 16 shards at once; that is the load generator, not the table.
-
-- **Writes cost about two to three times as much.** An update or create makes three calls in a row (reserve on the index, write the row, deliver the entries) and returns only once the index has them, so at one in flight a create takes 150–230 ms against 45–60 ms, and an indexed table needs about twice the shards for the same write rate. It still scales with shards: 16 + 16 shards take 2,677 updates/s and 1,259 creates/s with no failed calls.
-- **Listings within a partition scale with shards; whole-table listings do not.** A team's page reads one index shard, so 16 + 16 shards serve 7,930 pages/s at 1,024 in flight with p50 96 ms, while a whole-table page asks every shard and stays near one object's 400–580 pages/s.
-- **Lookups by email cost one call, as reads by key do,** and scale the same: 8,144/s on 16 index shards at 1,024 in flight.
-- **One object is the ceiling, as before.** With 1 + 1 shards, calls fail once one index shard is overloaded, from 256 in flight. A few creates at 16 in flight (7 of 515) answered `IndexPending`: the row was written but its entries were not delivered in time, and the alarm delivers them later.
+- **Writes cost about two to three times as much.** An update or create makes three calls in a row (reserve on the index, write the row, deliver the entries) and returns only once the index has them, so at one in flight an update takes 98 ms against 32 ms, and an indexed table needs about twice the shards for the same write rate. It still scales with shards: 16 + 16 shards take 2,497 updates/s and 1,389 creates/s at 1,024 in flight with no failed calls.
+- **Listings within a partition scale with shards; whole-table listings do not.** A team's page reads one index shard, so 16 + 16 shards serve 9,778 pages/s at 1,024 in flight with p50 67 ms, while a whole-table page asks every shard: 16 shards served 549 pages/s at 256 in flight and refused most pages at 1,024.
+- **Lookups by email cost one call, as reads by key do,** and scale the same: 11,755/s on 16 index shards at 1,024 in flight, against 8,540 reads by key on 16 row shards.
+- **One object is the ceiling, as before.** With one row shard, calls fail once it is overloaded, from 256 in flight. With 1 + 1 shards, 5,130 of the updates at 1,024 in flight failed.
 
 ## Presplitting
 

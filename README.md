@@ -1,18 +1,70 @@
 # do-kit
 
-**Building blocks for Cloudflare Durable Objects.** The smallest set of layers that lets you pick what fits your app: each adds one capability on top of the one below, and stops there. Use the lowest layer that does the job:
+**Durable Objects that keep up when one object can't.** A Durable Object is one thread with 10 GB of storage. It serves about 2,000 calls a second, then queues them and starts refusing them. do-kit is a set of layers you put under your objects when you reach that point. They let you split an object by key, keep a table across the pieces, index it globally, lend out a hot key, make a few keys change together, or spread a big job over many runners. Each layer is measured on Cloudflare's network against one plain object.
+
+![Throughput vs concurrency](docs/bench/throughput.svg)
+
+## Which layer do you need?
+
+Start from what is going wrong:
+
+```
+One Durable Object can't keep up. With what?
+│
+├─ Calls to many keys (accounts, documents, rows)      → ShardedObject: splits itself by key as it gets busy
+│   ├─ the state is rows you get, list and count       → ShardedTable
+│   │   └─ looked up by another column, unique across
+│   │      the table, or listed by partition           → IndexedTable
+│   └─ some keys must change together
+│       ├─ they can live in one shard                  → routeOf: one transaction, as before
+│       └─ they can't                                  → atomically: all or nothing across shards
+│
+├─ Data: more than 10 GB                               → ShardedObject: 10 GB per shard
+│
+├─ Reads of one key (a flag, a config, a ref)         → Leased reads: readers cache it, the source
+│                                                         still sees about one read per isolate a second
+│
+└─ CPU: one job needs more than one invocation         → Work graphs
+```
+
+If none of these is your problem, a plain Durable Object is simpler and as fast. With one call in flight it answers in 7 ms, and a sharded call in 12 to 55 ms.
+
+## Compared with one Durable Object
+
+Measured on Cloudflare's network on 2026-11-12. Each point is 10 s of calls from drivers in five regions. One Durable Object runs the same code on one object: the same table schema, or the same key and value. [Method and every graph](docs/performance.md).
+
+| What you do | One Durable Object | With do-kit | Layer |
+|---|---|---|---|
+| Write 1 KiB values to many keys, 2,048 in flight | 2,483 writes/s, p99 1,493 ms | **9,295 writes/s, p99 816 ms** (16 shards) | `ShardedObject` |
+| Read many keys, 2,048 in flight | 1,778 reads/s, p99 1,943 ms | **7,024 reads/s, p99 728 ms** | `ShardedObject` |
+| Ten hot config objects, 95% reads, 2,048 in flight | 1,890 calls/s, **41,713 failed** in 10 s | **4,780 calls/s, none failed** (16 shards) | `ShardedObject` |
+| Store more than 10 GB | not possible | 10 GB per shard: 160 GB on 16 | `ShardedObject` |
+| Write a table row with two indexes, 1,024 in flight | 1,604 writes/s, 9,089 failed | **8,117 writes/s, none failed** (64 shards) | `ShardedTable` |
+| Get a table row by key, 1,024 in flight | 2,136 reads/s, 1,327 failed | **8,846 reads/s, none failed** (16 shards) | `ShardedTable` |
+| List one team's rows, newest first, 1,024 in flight | 340 pages/s, 2,931 failed | **9,778 pages/s, p50 67 ms** (16 + 16 shards) | `IndexedTable` |
+| Read one hot key, 1,024 in flight | 810 reads/s, p50 1,054 ms | **254,431 reads/s, p50 1 ms**; the source serves 29 reads/s | Leased reads |
+| The same key, with 1% of calls writing it | 881 calls/s, p50 1,180 ms | **56,600 calls/s, p50 1 ms** | Leased reads |
+| Change 2 keys together, 1,024 in flight | one transaction, within one object's ~2,000 calls/s | 1,030 calls/s, p50 743 ms, across 16 shards (plain 2-key calls: 2,826/s) | `atomically` |
+| The same, with every call on 8 hot keys | one transaction | **31–38 calls/s** up to 256 in flight; at 1,024 nearly every call times out | `atomically` |
+
+Reading the table:
+- **Sharding pays at high load, not low.** Below a few hundred calls in flight, one object is as fast or faster, because a sharded call is routed and a new shard may be placed far from the caller.
+- **Leased reads are for keys that are read far more than written.** A write waits until the leases on its key are over or given back, up to a second. A key written in the last 10 s isn't lent to relays, so its readers cache it from the source directly.
+- **Atomic calls cost three round trips and hold their keys meanwhile.** Use them for keys that rarely contend: calls on the same few keys wait on each other's holds. Keys that must change together often belong in one shard (`routeOf`).
+
+## The layers
 
 Everything is exported from `@leostera/do-kit`. Each layer also has its own path, if you want to import only that layer.
 
 | Layer | Also at | What it gives you |
 |---|---|---|
-| **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, routing that follows splits. |
+| **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, `atomically` across shards, and routing that follows splits. |
 | **Sharded table** (`ShardedTable`) | `@leostera/do-kit/table` | Typed rows on a sharded object: indexes in every shard, conditional writes on a version per row, counts, and sorted listings across shards with a cursor that survives splits. With no indexes, a key-value store. |
-| **Indexed table** (`IndexedTable`) | `@leostera/do-kit/indexed` ([RFD0003](docs/rfds/RFD0003-indexed-table.md)) | Global indexes on shards of their own: lookups by another column, unique constraints, and listings within a partition that read one index shard per page. A write returns once its index entries are written, at two to three times the cost of a plain table write ([numbers](docs/performance.md#indexed-tables)). |
+| **Indexed table** (`IndexedTable`) | `@leostera/do-kit/indexed` ([RFD0003](docs/rfds/RFD0003-indexed-table.md)) | Global indexes on shards of their own: lookups by another column, unique constraints, and listings within a partition that read one index shard per page. A write returns once its index entries are written. |
 | **Work graphs** (`WorkGraphRunner`) | `@leostera/do-kit/workgraph` ([RFD0005](docs/rfds/RFD0005-work-graphs.md)) | Incremental, parallel execution of a graph of pure units that your app defines, too big for one invocation's CPU. Typed edges, chunks sized to the CPU budget, N runners pulling leases, results keyed by a hash of their inputs and reused by later runs. |
-| **Leased reads** (`ReadLeases`, `RelayReads`, `RelayPlan`) | `@leostera/do-kit/leased` | Reads of one object's hot keys spread over relays and isolates, never stale: the object leases a key to relays, which answer from the lease and hand isolates sub-leases inside it. A write commits at once and is acknowledged once the leases on its key are over or given back, so no read misses an acknowledged write. For a key too hot for one object to answer, which splitting can't help. |
+| **Leased reads** (`ReadLeases`, `RelayReads`, `RelayPlan`) | `@leostera/do-kit/leased` | Reads of one object's hot keys spread over relays and isolates, never stale. The object leases a key to relays, which answer from the lease and give isolates sub-leases inside it. A write commits at once, and is acknowledged once the leases on its key are over or given back. |
 
-To try one, run an [example](examples): small apps for each layer, each started with `bun dev` or `npm run dev`, with a page that shows its shards splitting live.
+To try one, run an [example](examples): a small app for each layer, started with `bun dev` or `npm run dev`, with a page that shows its shards splitting live.
 
 ## Sharded objects: Durable Objects that split themselves when they get busy
 
@@ -22,19 +74,16 @@ A split moves that half with a single storage snapshot, so it takes seconds, not
 
 ## What it buys you over one Durable Object
 
-![Throughput vs concurrency](docs/bench/throughput.svg)
-
-At 2,048 writes in flight, a single Durable Object is past its limit. It completes 2,068 writes/s and refuses 23,263 calls in 10 seconds. The same object split into 16 shards completes **9,800 writes/s and refuses none**. Reads tell the same story: 1,611 reads/s with 31,785 failed calls, against **14,947 reads/s with none**.
+At 2,048 writes in flight, one Durable Object is past its limit: it completes 2,483 writes/s, with a median of 860 ms and a p99 of 1,493 ms. The same object split into 16 shards completes **9,295 writes/s, with a median of 122 ms and a p99 of 816 ms**. Reads tell the same story: 1,778 reads/s against **7,024 reads/s**.
 
 | 1 KiB values, uniform keys | One Durable Object | Sharded object, 16 shards |
 |---|---|---|
-| **Throughput**, 1,024 in flight | 2,064 writes/s | **5,527 writes/s** |
-| **Throughput**, 2,048 in flight | 2,068 writes/s, 23,263 calls refused in 10 s | **9,800 writes/s, none refused** |
-| **Reads**, 1,024 in flight | 1,753 reads/s, median 597 ms | **7,445 reads/s, median 79 ms** |
-| **Reads**, 2,048 in flight | 1,611 reads/s, 31,785 calls failed in 10 s | **14,947 reads/s, none failed** |
-| **Data written**, 2,048 in flight | 2.0 MiB/s | **9.6 MiB/s** |
-| **Median latency**, 1,024 in flight | 386 ms | **110 ms** |
-| **p99 latency**, 2,048 in flight | 1,357 ms | **705 ms** |
+| **Writes**, 1,024 in flight | 2,136 writes/s, median 409 ms | **4,643 writes/s, median 123 ms** |
+| **Writes**, 2,048 in flight | 2,483 writes/s, median 860 ms | **9,295 writes/s, median 122 ms** |
+| **Reads**, 1,024 in flight | 1,705 reads/s, median 363 ms | **4,909 reads/s, median 102 ms** |
+| **Reads**, 2,048 in flight | 1,778 reads/s, median 895 ms | **7,024 reads/s, median 112 ms** |
+| **Data written**, 2,048 in flight | 2.4 MiB/s | **9.1 MiB/s** |
+| **p99 latency**, 2,048 writes in flight | 1,493 ms | **816 ms** |
 | **Storage ceiling** | 10 GB | **160 GB** (10 GB per shard) |
 
 ![Write latency p99 vs concurrency](docs/bench/latency-p99.svg)
@@ -43,7 +92,9 @@ At 2,048 writes in flight, a single Durable Object is past its limit. It complet
 
 ![Data throughput vs concurrency](docs/bench/bandwidth.svg)
 
-These were measured on Cloudflare's network, with up to 128 load-driver Durable Objects in several regions. Each point is 10 s of one-key reads or writes. The 16-shard object was presplit, so these numbers show the capacity that splitting gives, not the cost of the splits along the way. That cost is next. More latency graphs ([p50](docs/bench/latency-p50.svg), [p95](docs/bench/latency-p95.svg), [max](docs/bench/latency-max.svg)) and the method are in [docs/performance.md](docs/performance.md).
+These were measured on Cloudflare's network, with up to 128 load-driver Durable Objects in several regions. Each point is 10 s of one-key reads or writes. The 16-shard object was presplit, so these numbers show the capacity that splitting gives, not the cost of the splits along the way. That cost is next.
+
+No call failed in this run, even one object's at 2,048 in flight. On 0.4.0 one object refused 23,263 calls at that load and peaked at 2,068 writes/s. What one object takes varies with the day and the machine it lands on, so compare targets measured in the same run. More latency graphs ([p50](docs/bench/latency-p50.svg), [p95](docs/bench/latency-p95.svg), [max](docs/bench/latency-max.svg)) and the method are in [docs/performance.md](docs/performance.md).
 
 ### A control plane: a handful of hot objects
 
@@ -53,11 +104,11 @@ Ten configuration objects, a few far more popular than the rest (Zipf), read 95%
 
 | In flight | One Durable Object | Sharded object, splitting by load | Sharded object, 16 shards |
 |---|---|---|---|
-| 256 | 1,142/s, p99 939 ms | 1,668/s | 1,904/s, p99 632 ms |
-| 1,024 | 1,527/s, p99 1,392 ms | 2,388/s | 3,547/s, p99 881 ms |
-| 2,048 | 1,713/s, 27,650 calls failed | 4,656/s, 9,655 calls failed | 4,522/s, 10,516 calls failed |
+| 256 | 1,927/s, p99 895 ms | 1,192/s, 8 shards | **3,410/s, p99 774 ms** |
+| 1,024 | 2,112/s, p99 1,072 ms | 1,442/s, 19 shards | **5,308/s, p99 800 ms** |
+| 2,048 | 1,890/s, **41,713 calls failed** | 2,718/s, 32 shards, 498 failed | **4,780/s, none failed** |
 
-With only ten keys, splitting still spreads them over several objects. It cannot split a single key, though, and the most popular object takes about a third of all calls, so throughput levels off near 4,700/s: the most one object can serve of that one key. At 2,048 in flight, that object is overloaded and refuses calls even with 16 shards. Splitting by load also kept splitting past the number of keys (to 29 shards for 10 keys), which cannot help. If one object is your bottleneck, look at the [control plane graphs](docs/performance.md#a-control-plane-a-handful-of-hot-objects).
+With only ten keys, a presplit object still spreads them over several shards (13 of its 16 hold one), and serves two and a half times what one object does. It can't split a single key, though, and the most popular object takes about a third of all calls, so throughput levels off near 5,000/s: the most one shard can serve of that one key. Splitting by load does worse than presplitting here. It kept splitting, to 32 shards for 10 keys, and each split pauses writes to the half that moves, which can't help: the split policy should stop splitting a shard whose load comes from one key. A key read far more than it's written is what [leased reads](#leased-reads-one-hot-key-read-through-relays) are for. See the [control plane graphs](docs/performance.md#a-control-plane-a-handful-of-hot-objects).
 
 ## Splits take seconds
 
@@ -69,12 +120,12 @@ When load splits an object, it pays for it once. Here an object seeded with 1 Mi
 
 | Data in the object | Sharded object | Freeze, snapshot into two new objects | v0.1: copy rows to two new objects |
 |---|---|---|---|
-| 1 MiB | 1.8 s | 1.2 s | 1.1 s |
-| 16 MiB | **1.7 s** | 2.1 s | 5.1 s |
-| 128 MiB | **3.4 s**, slowest write 3.0 s | 13.4 s, every write blocked for it | 267 s, write p95 2.2 s throughout |
-| 1 GiB | **16.9 s**, write p99 265 ms | the split failed (earlier version) | did not finish in 2 hours (earlier version) |
+| 1 MiB | 1.7 s | 1.4 s | 0.9 s |
+| 16 MiB | **1.8 s** | 2.9 s | 9.2 s |
+| 128 MiB | **4.8 s**, slowest write 4.5 s | 31.6 s, every write blocked for it | 245 s, write p95 2.7 s throughout |
+| 1 GiB | **29.5 s**, write p99 359 ms, slowest write 28.6 s | the split failed (earlier version) | did not finish in 2 hours (earlier version) |
 
-The times are until the new object serves with all of its data. The two older designs were not run again at 1 GiB: those two cells are from an earlier version. See [what was measured and how](docs/performance.md).
+The times are until the new object serves with all of its data. Only writes to the half that moves wait, so the slowest write is about the time to split, and the p99 stays low. The two older designs were not run again at 1 GiB: those two cells are from an earlier version. See [what was measured and how](docs/performance.md).
 
 ## What it costs
 
@@ -98,7 +149,7 @@ These are estimates from the [published prices](https://developers.cloudflare.co
 ## Why it is fast
 
 - **Only half moves.** A shard lives in the object named by its bits without trailing zeros, so when `01` splits, `010` stays where it is and only `011` goes to a new object. That means one copy, not two, and no object is left behind as a router.
-- **One snapshot, not a row stream.** The new object restores from `ctx.storage.snapshot()`, a point-in-time copy of the whole database made by the storage layer. It still takes longer for a bigger database, but far less than a row-by-row copy: 5.7 s against 235 s at 128 MiB.
+- **One snapshot, not a row stream.** The new object restores from `ctx.storage.snapshot()`, a point-in-time copy of the whole database made by the storage layer. It still takes longer for a bigger database, but far less than a row-by-row copy: 4.8 s against 245 s at 128 MiB.
 - **Most traffic never notices.** While the copy is made, reads go on, and so do writes to the half that stays. Only writes to the half that moves wait, and then they are sent to the new owner.
 - **Cleanup stays out of the way.** Each side deletes the half it gave away in small batches in the background. Those rows are invisible from the moment of the switch.
 
@@ -115,9 +166,25 @@ These are estimates from the [published prices](https://developers.cloudflare.co
 **It helps** when one logical object holds many independent keys and outgrows one Durable Object: too many writes per second, or too much data for 10 GB. Each shard is a full Durable Object with its own thread and storage limit.
 
 **It does not help:**
-- **One hot key.** A key always lives on one shard, so the most popular key caps what a shard can serve. The split policy does not yet know this, and keeps splitting a shard that is hot because of one key.
-- **Cheap cross-key transactions.** `update` is transactional within one shard. Keys that must be decided together can share a shard: declare a `routeOf(key)` on the class and the client, and keys with the same route stay in one shard through every split ([RFD0006](docs/rfds/RFD0006-co-location.md)). A client that routes differently from its object is refused with `RouteMismatch`. Keys that can't share a shard can still change together with `atomically` ([RFD0008](docs/rfds/RFD0008-atomic-calls-across-shards.md)): one call to the primary shard, which prepares, commits and resolves the others, holding their keys meanwhile.
+- **One hot key.** A key always lives on one shard, so the most popular key caps what a shard can serve. The split policy does not yet know this, and keeps splitting a shard that is hot because of one key. A key read far more than written can be spread with [leased reads](#leased-reads-one-hot-key-read-through-relays).
+- **Cheap cross-key transactions.** `update` is transactional within one shard. Keys that must be decided together can share a shard: declare a `routeOf(key)` on the class and the client, and keys with the same route stay in one shard through every split ([RFD0006](docs/rfds/RFD0006-co-location.md)). A client that routes differently from its object is refused with `RouteMismatch`. Keys that can't share a shard can still change together with `atomically` ([RFD0008](docs/rfds/RFD0008-atomic-calls-across-shards.md)): one call to the primary shard, which prepares, commits and resolves the others, holding their keys meanwhile (measured below).
 - **Small loads.** Below what one object can take, a plain Durable Object is simpler and as fast.
+
+### Keys that change together, measured
+
+`atomically` puts 1 KiB to 2 or 4 distinct keys of a 16-shard object, all or nothing. The comparison is the same put as one plain `call`, which writes each shard's keys in its own transaction, with no promise across shards.
+
+![Atomic calls across shards](docs/bench/atomic-throughput.svg)
+
+| Keys drawn from 10,000 | Plain call, 2 keys | `atomically`, 2 keys | Plain call, 4 keys | `atomically`, 4 keys |
+|---|---|---|---|---|
+| 1 in flight | 14/s, p50 63 ms | 2/s, p50 288 ms | 7/s, p50 118 ms | 3/s, p50 222 ms |
+| 64 | 680/s, p50 56 ms | 163/s, p50 362 ms | 241/s, p50 163 ms | 163/s, p50 364 ms |
+| 1,024 | 2,826/s, p50 202 ms | 1,030/s, p50 743 ms | 930/s, p50 608 ms | 431/s, p50 1,724 ms |
+
+- **An atomic call costs 220–290 ms at low load,** against 60–120 ms for the plain call: the caller sends it to the primary shard, which prepares on the others, decides, and commits, with the holds written to storage on the way.
+- **Throughput scales with shards, at a third to a half of the plain call's.** Every shard holds its keys until the outcome, and a write to a held key waits. No call failed at any load on uniform keys.
+- **Contended keys barely work.** With every call drawing its keys from 8, a younger call meeting an older one's hold gives way and retries. With 2 keys, 31–38 calls/s complete from 16 to 256 in flight, with a median of 0.4–5 s; with 4 keys, 5 calls/s at 16 in flight and almost none above. At 1,024 in flight nearly every call times out after 30 s ([graph](docs/bench/atomic-hot-throughput.svg)). Keep hot keys that change together in one shard (`routeOf`), where they are one transaction.
 
 ## Sharded tables: rows, indexes and listings
 
@@ -160,13 +227,13 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 
 | 1,024 in flight | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
-| **Writes** | 1,226/s, median 688 ms | 2,109/s | 5,125/s | **5,174/s, median 124 ms** |
-| **Reads by key** | 1,745/s, median 561 ms | 4,333/s | **5,555/s, median 127 ms** | not measured* |
-| **List pages** (50 rows) | 578/s | 564/s | 169/s, shed load | 369/s |
+| **Writes** | 1,604/s, median 515 ms, 9,089 failed | 1,633/s | 6,230/s | **8,117/s, median 61 ms** |
+| **Reads by key** | 2,136/s, median 446 ms, 1,327 failed | 3,330/s | 8,846/s | **10,241/s, median 39 ms*** |
+| **List pages** (50 rows), 64 in flight | 874/s, median 36 ms | 469/s | 297/s | 156/s, median 302 ms |
 
-\* The 64-shard read runs at 256 and 1,024 in flight never answered: a Durable Object used up its CPU time until the runtime reset it. Other runs on 0.4.0 hit the same thing at times (in the 4,096-shard benchmark too), and the cause is not known yet.
+\* Measured in a later run than the others in its row.
 
-**Listings do not scale with shards.** Every page asks every shard for its share, so each shard serves every page: listing throughput stays near what one object serves (about 560–580 pages/s here), and a page waits for its slowest shard. At 64 in flight, a page's median is 61 ms on 1 shard, 126 ms on 4, 193 ms on 16 and 456 ms on 64. Keep list-heavy tables to 16 shards or fewer. Listings that must scale further need an index stored by sort order rather than by key, which is the next layer.
+**Listings do not scale with shards.** Every page asks every shard for its share, so each shard serves every page: listing throughput stays below what one object serves, and a page waits for its slowest shard. At 256 and more in flight, 16 and 64 shards refuse most pages ("overloaded"), because every shard sees every page. A page also costs up to 3 × shards subrequests in the caller's invocation (one per shard per round; most pages take one round), and a Worker invocation may make only so many. Keep list-heavy tables to a few shards, or list by partition through an `IndexedTable`, which reads one index shard per page.
 
 ![Table listings vs concurrency](docs/bench/table-list-throughput.svg)
 
@@ -268,15 +335,15 @@ A graph's time on N runners is bounded by `T₁/N + T∞`: its work over N, plus
 
 | Graph | one runner | 64 runners | speedup | `T₁/64 + T∞` |
 |---|---|---|---|---|
-| 40,000 units, in trees of 5 | 236.5 s | 5.1 s | 47× | 4.7 s |
-| One random tree of 40,000 units | 185.0 s | 5.9 s | 32× | 3.9 s |
-| One chain of 2,000 units | 9.5 s | 9.3 s | 1× | 10.1 s |
+| 40,000 units, in trees of 5 | 460.5 s | 8.4 s | 55× | 7.2 s |
+| One random tree of 40,000 units | 289.6 s | 8.1 s | 36× | 4.6 s |
+| One chain of 2,000 units | 18.7 s | 13.1 s | 1.4× | 10.3 s |
 
 - A forest of small trees spreads across runners almost perfectly. One big tree is cut into pieces that replay the short path above them, so they need no other chunk, and it spreads too, at about 1.5× the bound. A chain is its own span: no runner count helps it.
-- On one runner, the same 200 s of planned work took 179 s to 266 s across six runs, depending on the machine the runner landed on. The table uses the median. This is also why the forest beats N× at 8 and 16 runners: its median single-runner run was a slow one.
-- **Faults cost what they redo.** On 16 runners, 13.6 s without faults; 21.9 s with 20% of chunks evicted once after computing (each is computed again on the alarm's retry); 16.8 s with 4 of the 16 runners lost for good, holding leases of 10 s that run out and pass on. Every unit is computed either way.
-- **Coarse units come within 1.02× of the bound.** 437 slices of about 10 s with binary inputs, and a few big trees cut into pieces, in 176 chunks of 30 s: 981 s on 4 runners, 514 s on 8, 250 s on 16, 147 s on 32, and 76 s on 64, each at or under `T₁/N + T∞` from that run's own measured work ([graph](docs/bench/workgraph-slices.svg)).
-- **One coordinator hands out about 450 to 630 chunks a second**, from 64 to 1,024 runners, measured with chunks that cost nothing. With chunks of 30 s that is room for over 10,000 runners on one run, and each run has its own coordinator.
+- Every run does the same work, calibrated once (a unit's rounds are pinned), so the time it takes depends on the machines the runners land on. In this run a unit planned at 5 ms took about 7 ms: the forest's 200 s of planned work took 460 s on one runner. Speedups are against that run's own single runner, so they hold.
+- **Faults cost what they redo.** On 16 runners, 20.9 s without faults; 46.5 s with 20% of chunks evicted once after computing (each is computed again on the alarm's retry); 25.0 s with 4 of the 16 runners lost for good, holding leases of 10 s that run out and pass on. Every unit is computed either way.
+- **Coarse units came within 1.4–1.9× of the bound in this run.** 437 slices of about 10 s with binary inputs, and a few big trees cut into pieces, in 176 chunks of 30 s: 3,147 s on 4 runners, 1,628 s on 8, 970 s on 16, 499 s on 32, and 272 s on 64 ([graph](docs/bench/workgraph-slices.svg)). On average only half the runners were computing a chunk, on every runner count, and two more runs on 16 runners did the same. An earlier run, on 2026-11-11, kept every runner busy and came within 1.02× of the bound. The cause is not known yet.
+- **One coordinator hands out about 450 to 630 chunks a second**, from 64 to 1,024 runners, measured on 2026-11-11 with chunks that cost nothing. With chunks of 30 s that is room for over 10,000 runners on one run, and each run has its own coordinator.
 
 Raw data in [bench/results/workgraph.json](bench/results/workgraph.json), more graphs ([time](docs/bench/workgraph-time.svg), [faults](docs/bench/workgraph-faults.svg), [coordinator](docs/bench/workgraph-ceiling.svg)), and the method in [bench/README.md](bench/README.md#work-graphs).
 
@@ -311,8 +378,35 @@ readers ──► isolate sub-lease ──► relay (lease from the source, rene
   hop), so its readers read the source and cache under its isolate leases.
 
 The layer is the logic a source and its relays embed. The objects, their storage of the horizon,
-and the calls between them are the app's. It was built for git refs read thousands of times a
-second while they are pushed.
+and the calls between them are the app's: [`bench/worker/src/leased.ts`](bench/worker/src/leased.ts)
+wires a source, its relays and the readers' isolates in about 150 lines.
+
+### What it buys you, measured
+
+One key of 1 KiB, read by drivers in five regions. Each driver is an isolate that keeps its
+sub-lease in memory, as an app's Worker would. The comparison is the same readers reading one
+Durable Object.
+
+![One hot key: reads per second](docs/bench/leased-read-throughput.svg)
+
+| In flight | One Durable Object | Leased reads |
+|---|---|---|
+| 1 | 29 reads/s, p50 29 ms | 953 reads/s, p50 1 ms |
+| 64 | 307 reads/s, p50 111 ms | 35,041 reads/s, p50 1 ms |
+| 256 | 670 reads/s, p50 234 ms | 95,480 reads/s, p50 1 ms |
+| 1,024 | 810 reads/s, p50 1,054 ms | **254,431 reads/s, p99 1 ms**; the source served 29/s, through 6 relays |
+
+- **A read is a lookup in the isolate's memory** for as long as its sub-lease lasts, at most a
+  second. The source answers each isolate and relay about once a second, whatever the read rate.
+  At these rates the load generator is the limit, not the system.
+- **A key that is written too is still helped.** With 1% of calls writing the key, leased reads
+  did 56,600 calls/s at 1,024 in flight, with a median of 1 ms, where one object did 881 with a
+  median of 1,180 ms ([graph](docs/bench/leased-mixed-throughput.svg)). A key written in the last
+  `WRITTEN_MS` (10 s) isn't relayed, so isolates read the source directly (813 reads/s here) and
+  cache under their own leases. The cost is in the writes: each is acknowledged once the leases
+  on its key are over or given back, up to a second later.
+
+It was built for git refs read thousands of times a second while they are pushed rarely.
 
 ## Install
 
@@ -419,18 +513,16 @@ bun run specs:check  # model-check the split protocol
 
 Design decisions are RFDs in [docs/rfds](docs/rfds/README.md): one numbered document per decision, proposals and snapshots of what is built. There are no other design documents.
 
-Locally, splits copy rows: workerd has no storage snapshots. To run the same tests against snapshots, deploy the test Worker under another name with a token, and point the tests at it:
+Locally, splits copy rows: workerd has no storage snapshots. To run the same tests against snapshots, deploy the test Worker under another name, on a custom domain of yours behind a Cloudflare Access application (it is never served on `workers.dev`), with a token, and point the tests at it:
 
 ```sh
 cd test/worker
 echo "TEST_TOKEN=$(openssl rand -hex 32)" > /tmp/do-kit-test.vars   # not .dev.vars: cf dev would read it
-TEST_WORKER_NAME=do-kit-test-snapshots cf deploy --secrets-file /tmp/do-kit-test.vars
+TEST_WORKER_NAME=do-kit-test-snapshots TEST_HOSTNAME=do-kit-test.<your-zone> cf deploy --secrets-file /tmp/do-kit-test.vars
 cd ../..
 set -a; . /tmp/do-kit-test.vars; set +a
-TEST_URL=https://do-kit-test-snapshots.<your-subdomain>.workers.dev bun test --timeout 300000
+TEST_URL=https://do-kit-test.<your-zone> TEST_ACCESS_TOKEN=$(cloudflared access token -app=https://do-kit-test.<your-zone>) bun test --timeout 300000
 ```
-
-Behind Cloudflare Access, also set `TEST_ACCESS_TOKEN` (`cloudflared access token -app=$TEST_URL`).
 
 The benchmark Worker and the scripts that produced the graphs above are in [`bench/`](bench/README.md).
 
