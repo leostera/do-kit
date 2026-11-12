@@ -505,7 +505,7 @@ export class BenchFleet extends DurableObject<Env> {
 interface ProbeTable {
   readonly target: TableTarget;
   readonly objectName: string;
-  readonly op: "list" | "count" | "read";
+  readonly op: "list" | "count" | "read" | "walk";
   readonly times?: number;
   readonly fromObject?: boolean;
 }
@@ -513,7 +513,21 @@ interface ProbeTable {
 async function probeTable(env: Env, body: ProbeTable): Promise<{ runs: { ms: number; rows?: number; error?: string }[] }> {
   const t = rowsClient(env, body.target, body.objectName);
   const runs: { ms: number; rows?: number; error?: string }[] = [];
-  for (let i = 0; i < Math.min(body.times ?? 3, 10); i++) {
+  // A walk follows the cursor, page after page, as each list worker of a load does.
+  let cursor: string | null = null;
+  if (body.op === "walk")
+    for (let i = 0; i < Math.min(body.times ?? 20, 400); i++) {
+      const started = Date.now();
+      try {
+        const page = await bounded(() => t.list({ index: "byCreated", direction: "desc", limit: 50, cursor }), 60_000, "walk");
+        cursor = page.cursor;
+        runs.push({ ms: Date.now() - started, rows: page.rows.length });
+      } catch (error) {
+        runs.push({ ms: Date.now() - started, error: String(error).slice(0, 300) });
+        break;
+      }
+    }
+  for (let i = 0; body.op !== "walk" && i < Math.min(body.times ?? 3, 10); i++) {
     const started = Date.now();
     try {
       const rows = await bounded(async () => (body.op === "count" ? await t.count() : body.op === "read" ? (await t.getMany([`key-${i}`])).length : (await t.list({ index: "byCreated", direction: "desc", limit: 50 })).rows.length), 60_000, body.op);
