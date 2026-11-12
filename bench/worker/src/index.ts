@@ -426,6 +426,15 @@ async function bounded<T>(call: () => Promise<T>, ms = CALL_TIMEOUT_MS, what = "
   }
 }
 
+/**
+ * The clock moves only with I/O, so a call that did none (a read from a sub-lease, or one that
+ * failed before it sent anything) took 0 ms: a loop of them never sees its stop time, and starves
+ * everything else in the object, its timers too, until the CPU limit resets it. Outside the timed call.
+ */
+async function yieldIfNoIO(elapsedMs: number): Promise<void> {
+  if (elapsedMs === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+}
+
 /** `n` distinct keys for one multi-key call: of `keyCount` keys, or of HOT_POOL for "hot". */
 function distinctKeys(config: MeasureConfig, n: number): string[] {
   const pool = config.distribution === "hot" ? HOT_POOL : config.keyCount;
@@ -693,6 +702,7 @@ export class BenchDriver extends DurableObject<Env> {
           maxLatencyMs = Math.max(maxLatencyMs, elapsed);
           latencyMs[Math.min(120_000, Math.floor(elapsed))]++;
         }
+        await yieldIfNoIO(performance.now() - before);
       }
     };
 
@@ -737,9 +747,7 @@ export class BenchDriver extends DurableObject<Env> {
           const bucket = Math.min(120_000, Math.floor(elapsed));
           latencyMs[bucket]++;
         }
-        // A read from the isolate's sub-lease does no I/O, and the clock moves only with I/O:
-        // without this the loop never sees stopAt. Outside the timed call.
-        if (isReader(config.target)) await new Promise((resolve) => setTimeout(resolve, 1));
+        await yieldIfNoIO(performance.now() - before);
       }
     };
 
