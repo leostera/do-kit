@@ -186,9 +186,11 @@ describe("relay reads", () => {
 });
 
 describe("relay plan", () => {
+  const notWritten = () => false;
+
   test("a ref is relayed once read HOT_READS times a second", () => {
     at(0);
-    const plan = new RelayPlan(HOT_READS);
+    const plan = new RelayPlan(HOT_READS, notWritten);
     // HOT_READS reads spread over a second: hot, at a rate one relay takes.
     for (let i = 1; i < HOT_READS; i++) {
       at(i * 10);
@@ -203,20 +205,20 @@ describe("relay plan", () => {
     // 7,000 reads a second: HOT_READS of them in the window's first 14 ms. One relay would
     // take them all until its reports raised the count, and queue until it failed.
     at(0);
-    const plan = new RelayPlan(HOT_READS);
+    const plan = new RelayPlan(HOT_READS, notWritten);
     for (let i = 1; i < HOT_READS; i++) plan.direct(["main"]);
     at(14);
     expect(plan.direct(["main"])).toEqual([Math.ceil((HOT_READS * 1000) / 14 / RELAY_READS)]);
     // A burst all at once counts as if over 10 ms, and the count never passes MAX_RELAYS.
     at(2000);
-    const burst = new RelayPlan(HOT_READS);
+    const burst = new RelayPlan(HOT_READS, notWritten);
     for (let i = 1; i < HOT_READS; i++) burst.direct(["main"]);
     expect(burst.direct(["main"])).toEqual([Math.min(MAX_RELAYS, Math.ceil((HOT_READS * 100) / RELAY_READS))]);
   });
 
   test("the relay count follows the relays' reported asks, up at once and down after a while", () => {
     at(0);
-    const plan = new RelayPlan(4);
+    const plan = new RelayPlan(4, notWritten);
     for (let i = 0; i < 4; i++) plan.direct(["main"]);
     expect(plan.reported(["main"], 0, 4 * RELAY_READS)).toEqual([4]);
     at(500);
@@ -236,9 +238,27 @@ describe("relay plan", () => {
     expect(plan.direct(["main"])).toEqual([0]);
   });
 
+  test("a key being written is not relayed, however hot, and a relayed key that is written stops being relayed", () => {
+    at(0);
+    const written = new Set<string>(["main"]);
+    const plan = new RelayPlan(HOT_READS, (key) => written.has(key));
+    for (let i = 0; i < 2 * HOT_READS; i++) expect(plan.direct(["main"])).toEqual([0]);
+    // Another key, read as often, is relayed.
+    for (let i = 1; i < HOT_READS; i++) plan.direct(["other"]);
+    expect(plan.direct(["other"])[0]).toBeGreaterThan(0);
+    // Relayed while quiet; written, its relays' reads say 0 relays, and so do direct reads.
+    written.clear();
+    at(1000);
+    for (let i = 0; i < HOT_READS; i++) plan.direct(["main"]);
+    expect(plan.direct(["main"])[0]).toBeGreaterThan(0);
+    written.add("main");
+    expect(plan.reported(["main"], 0, RELAY_READS)).toEqual([0]);
+    expect(plan.direct(["main"])).toEqual([0]);
+  });
+
   test("a restarted leaf learns its relays from their reads", () => {
     at(0);
-    const plan = new RelayPlan(HOT_READS);
+    const plan = new RelayPlan(HOT_READS, notWritten);
     expect(plan.reported(["main"], 6, RELAY_READS)).toEqual([7]);
     expect(plan.direct(["main"])).toEqual([7]);
   });

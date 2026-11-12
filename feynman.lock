@@ -21,7 +21,7 @@
     "src/indexed/table.ts#IndexedTable.rowWritten": "58556f4950d3",
     "src/indexed/table.ts#IndexedTable.send": "66ec8e5d5276",
     "src/indexed/table.ts#IndexedTable.writeBatch": "39a84054f3ec",
-    "src/leased/read-leases.ts#ReadLeases.grant": "22ce92046c9d",
+    "src/leased/read-leases.ts#ReadLeases.grant": "de08731246e9",
     "src/leased/read-leases.ts#ReadLeases.holdUntil": "fb3a193acd78",
     "src/leased/read-leases.ts#ReadLeases.leaseEnd": "07e47edb901b",
     "src/leased/read-leases.ts#ReadLeases.readableAt": "3faaad91778a",

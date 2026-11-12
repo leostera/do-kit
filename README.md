@@ -299,14 +299,16 @@ readers ──► isolate sub-lease ──► relay (lease from the source, rene
   write until then. The keys with a held write are stored too, through the source's `HeldKeys`
   (three synchronous calls over its own storage): call `holdUntil` in the transaction that
   commits the write, and wait until `readableAt(keys)` before answering a read, so a restarted
-  source answers no read of a key it was holding a write on until every lease from before is over. A key written in the last `WRITTEN_MS` (10 s) isn't leased to relays: they
-  read it through, so a lease never holds the next write.
+  source answers no read of a key it was holding a write on until every lease from before is over. A key written in the last `WRITTEN_MS` (10 s) isn't leased to relays
+  (`written(key)`), so a lease never holds the next write.
 - **`RelayReads<V>`**, in a relay: answers from its lease and renews it early; without one, asks
   share a source read that started after they arrived. `fresh()` is a value at least as new as
   every write acknowledged before the ask, for writers checking the current value.
 - **`RelayPlan`**, in the source: when a key is hot (`HOT_READS` direct reads a second), how many
   relays it gets (sized by the relays' reports, `RELAY_READS` each), and the tree they form
-  (`relayParent`: fanout 8, at most 584 relays, so the source answers at most 8).
+  (`relayParent`: fanout 8, at most 584 relays, so the source answers at most 8). Give it the
+  leases' `written`: a key being written isn't relayed (relays without a lease would only add a
+  hop), so its readers read the source and cache under its isolate leases.
 
 The layer is the logic a source and its relays embed. The objects, their storage of the horizon,
 and the calls between them are the app's. It was built for git refs read thousands of times a

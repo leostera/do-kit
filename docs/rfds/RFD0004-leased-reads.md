@@ -266,6 +266,13 @@ the key stops being relayed: answers name K = 0, and isolates read the shard dir
 A shard that restarted knows no relays. Their reports rebuild K, which starts at least at the
 reporting relay's index plus one.
 
+A key written in the last `WRITTEN_MS` is not relayed, and a relayed key that is written stops
+being relayed at once (K = 0). Relays get no lease on it, so they could only read it through: one
+more hop for every read, while the shard still answers each relay's read. Its readers read the
+shard instead, and cache under the shard's isolate leases, which writes wait out as they do
+relays'. A relay's answers pass K on, so the isolates reading through one come back on their
+next read.
+
 ### Time
 
 Each holder times its lease from before it asked, less the margin `READ_LEASE_MARGIN_MS`
@@ -466,6 +473,12 @@ either accept stale reads or build this themselves.
   writes do, was passed over: the horizon is stored up to 5 s ahead, so each restart of a source
   with leases out would stall all its reads for seconds, not only those of the keys being written.
 
+- **Written keys and relays.** Relaying a key that was being written made reads slower than one
+  object: benchmarked on the edge with 1% writes, 256 readers in flight read 522 times a second
+  through one relay (the source alone: 2,240), because a relay without a lease forwards every ask,
+  and one relay object serves a few hundred calls a second. With 64 readers, reading the source
+  under isolate leases, it was 4,640. So a written key is not relayed (*Relay counts*); keys read
+  hot and written often are bounded by what the shard's isolate leases can serve.
 - How a `LeaseRelay` subclass reads values of a `ShardedTable`: decoded rows, or the stored form.
 - Whether the client fixes one `draw` per isolate, or one per key, to spread isolates better over
   the relays of several hot keys.
