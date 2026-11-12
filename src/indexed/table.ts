@@ -531,8 +531,9 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
 
   private async wake(time: number): Promise<void> {
     if (this.wakeAt !== null && this.wakeAt <= time && this.wakeAt > Date.now()) return;
-    this.wakeAt = time;
+    // Remembered only once it is asked for: a failed ask must not make later ones look done.
     await this.scheduleAlarm(time);
+    if (this.wakeAt === null || time < this.wakeAt || this.wakeAt <= Date.now()) this.wakeAt = time;
   }
 
   private indexShards(): Untyped {

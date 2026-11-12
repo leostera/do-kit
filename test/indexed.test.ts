@@ -165,6 +165,46 @@ test("custom methods deliver their index changes, and cannot change a unique val
   expect((await lookup(t, "a@example.com"))!.row.id).toBe("u1");
 });
 
+test("a reservation whose alarm could not be set is still resolved, once a later write on its index shard comes", async () => {
+  const t = fresh("users");
+  await put(t, user("u0", "warm@example.com"));
+  await sleep(2_500); // the index shard's alarm has run, and nothing is left for it
+  // The reservation is stored, and its wake; setting the alarm for it fails.
+  await op(t, "failSetAlarmOnce", "");
+  expect(await op<Result<WriteResult>>(t, "put", user("u1", "a@example.com"))).toMatchObject({ error: "Error" });
+  // Another write reserves on the same shard (reservations time out after 1 s in the test class).
+  await put(t, user("u2", "b@example.com"));
+  const pending = (s: { pending: number }[]) => s.reduce((a, x) => a + x.pending, 0);
+  expect(pending(await eventually(() => op<{ pending: number }[]>(t, "indexStats"), (s) => pending(s) === 0, 8_000))).toBe(0);
+}, 30_000);
+
+test("a reservation whose wake could not be stored is still resolved by the next write's wake", async () => {
+  const t = fresh("users");
+  await put(t, user("u0", "warm@example.com"));
+  await sleep(2_500); // the index shard's alarm has run, and nothing is left for it
+  // The reservation is stored; storing the wake that would resolve it fails, so no alarm comes.
+  await op(t, "failStatementOnce", "index", "", "INSERT INTO sharded_meta (key, value) VALUES ('wake'");
+  expect(await op<Result<WriteResult>>(t, "put", user("u1", "a@example.com"))).toMatchObject({ error: "Error" });
+  // The next write's reservation asks for a wake of its own: it must not be taken for done.
+  await put(t, user("u2", "b@example.com"));
+  const pending = (s: { pending: number }[]) => s.reduce((a, x) => a + x.pending, 0);
+  expect(pending(await eventually(() => op<{ pending: number }[]>(t, "indexStats"), (s) => pending(s) === 0, 8_000))).toBe(0);
+}, 30_000);
+
+test("index changes whose alarm was lost are still delivered, once a call reaches their row shard", async () => {
+  const t = fresh("users");
+  await put(t, user("u0", "warm@example.com"));
+  await op(t, "failApply", true);
+  expect(await op<Result<WriteResult>>(t, "put", user("u1", "late@example.com"))).toMatchObject({ error: "IndexPending" });
+  await op(t, "loseAlarm", "");
+  await op(t, "failApply", false);
+  // Past ALARM_CHECK_MS since the last call to the row shard; then a read reaches it.
+  await sleep(5_500);
+  await ok(op<Result<Versioned | null>>(t, "get", "u0"));
+  expect(await eventually(() => op<number>(t, "outbox"), (left) => left === 0, 8_000)).toBe(0);
+  expect((await lookup(t, "late@example.com"))!.row.id).toBe("u1");
+}, 30_000);
+
 test("a write whose entries cannot be delivered throws IndexPending, and the alarm delivers them later", async () => {
   const t = fresh("users");
   await put(t, user("u0", "warm@example.com")); // the index shard exists

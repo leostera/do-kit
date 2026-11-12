@@ -90,6 +90,17 @@ export const users = defineTable<User>({
   },
 });
 
+/** The next SQL statement on `storage` containing `text` throws, once, as a storage error would. */
+function failStatementOnce(storage: DurableObjectStorage, text: string): void {
+  const sql = storage.sql;
+  const exec = sql.exec.bind(sql);
+  sql.exec = ((query: string, ...bindings: unknown[]) => {
+    if (!query.includes(text)) return exec(query, ...bindings);
+    sql.exec = exec;
+    throw new Error("test: storage error");
+  }) as typeof sql.exec;
+}
+
 export class Users extends IndexedTable<Env, User> {
   protected table = users;
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
@@ -99,6 +110,14 @@ export class Users extends IndexedTable<Env, User> {
   }
   protected indexNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.USER_INDEXES as never;
+  }
+  /** The next SQL statement containing `text` throws, once. */
+  async failStatementOnce(text: string): Promise<void> {
+    failStatementOnce(this.ctx.storage, text);
+  }
+  /** Loses this object's alarm, as a failed setAlarm or an alarm the runtime gave up on would. */
+  async loseAlarm(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
   }
   /** The keys with index changes not delivered yet, on this object, and whether it owns each. */
   async outboxKeys(): Promise<{ key: string; owned: boolean }[]> {
@@ -126,6 +145,19 @@ export class UserIndexes extends GlobalIndex<Env> {
   }
   protected rowNodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.USERS as never;
+  }
+  /** The next SQL statement containing `text` throws, once. */
+  async failStatementOnce(text: string): Promise<void> {
+    failStatementOnce(this.ctx.storage, text);
+  }
+  /** The next setAlarm throws, once, as a storage error would. */
+  async failSetAlarmOnce(): Promise<void> {
+    const storage = this.ctx.storage;
+    const setAlarm = storage.setAlarm.bind(storage);
+    storage.setAlarm = (async () => {
+      storage.setAlarm = setAlarm;
+      throw new Error("test: setAlarm failed");
+    }) as typeof storage.setAlarm;
   }
   /** While set, deliveries to this object fail (the flag is copied with the rest). */
   async failApply(fail: boolean): Promise<void> {
@@ -236,13 +268,7 @@ export class FlakyDocs extends EvolvingDocs {
   }
   /** The next SQL statement containing `text` throws, once, as a storage error would. */
   async failStatementOnce(text: string): Promise<void> {
-    const sql = this.ctx.storage.sql;
-    const exec = sql.exec.bind(sql);
-    sql.exec = ((query: string, ...bindings: unknown[]) => {
-      if (!query.includes(text)) return exec(query, ...bindings);
-      sql.exec = exec;
-      throw new Error("test: storage error");
-    }) as typeof sql.exec;
+    failStatementOnce(this.ctx.storage, text);
   }
   /** Asks for onAlarm in `ms`. */
   async wakeIn(ms: number): Promise<void> {
@@ -695,6 +721,14 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
       return (await untyped(rows).scan("outboxSize")).reduce((a: number, b) => a + (b as number), 0);
     case "split": // [side, bits]
       return (body.args[0] === "rows" ? rowNs : indexNs).get((body.args[0] === "rows" ? rowNs : indexNs).idFromName(shardObjectName(body.name, body.args[1] as string))).shardedSplit(body.name, body.args[1] as string);
+    case "failStatementOnce": { // [side, bits, text]
+      const ns = (body.args[0] === "rows" ? rowNs : indexNs) as unknown as DurableObjectNamespace<Users>;
+      return ns.get(ns.idFromName(shardObjectName(body.name, body.args[1] as string))).failStatementOnce(body.args[2] as string);
+    }
+    case "failSetAlarmOnce": // [bits]: of an index shard
+      return env.USER_INDEXES.get(env.USER_INDEXES.idFromName(shardObjectName(body.name, body.args[0] as string))).failSetAlarmOnce();
+    case "loseAlarm": // [bits]: of a row shard
+      return env.USERS.get(env.USERS.idFromName(shardObjectName(body.name, body.args[0] as string))).loseAlarm();
     case "failApply": // [fail, bits]
       return env.USER_INDEXES.get(env.USER_INDEXES.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).failApply(body.args[0] as boolean);
   }

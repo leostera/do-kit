@@ -1532,16 +1532,17 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   /**
    * While a split's work is pending here (a sibling to activate, rows to clear), an atomic call
-   * holds keys, or outcomes wait for their TTL, makes sure an alarm will come for it, at most every
-   * ALARM_CHECK_MS: an alarm can be lost, and nothing else would activate the sibling, end a hold
-   * (reads do not wait on holds) or purge the outcomes. Called on routed calls, which keep reaching
-   * the shard.
+   * holds keys, outcomes wait for their TTL, or the subclass asked for `onAlarm`, makes sure an
+   * alarm will come for it, at most every ALARM_CHECK_MS: an alarm can be lost, and nothing else
+   * would activate the sibling, end a hold (reads do not wait on holds), purge the outcomes or run
+   * the subclass's alarm. Called on routed calls, which keep reaching the shard.
    */
   private checkAlarm(): void {
     const meta = this.meta;
     if (!meta || Date.now() - this.alarmCheckedAt < ALARM_CHECK_MS) return;
-    const atomic = [this.nextHoldDeadline(), this.outcomeExpiry()].filter((t): t is number => t !== null);
-    const due = meta.activate || meta.cleanup.length > 0 || meta.foreign ? Date.now() : atomic.length > 0 ? Math.min(...atomic) : null;
+    const wake = meta.state === "shard" && this.onAlarmAsked === undefined ? this.loadWake() : null;
+    const later = [this.nextHoldDeadline(), this.outcomeExpiry(), wake].filter((t): t is number => t !== null);
+    const due = meta.activate || meta.cleanup.length > 0 || meta.foreign ? Date.now() : later.length > 0 ? Math.max(Date.now(), Math.min(...later)) : null;
     if (due === null) return;
     this.alarmCheckedAt = Date.now();
     void this.ctx.storage.getAlarm().then((at) => (at === null || at > due ? this.ctx.storage.setAlarm(due) : undefined));
