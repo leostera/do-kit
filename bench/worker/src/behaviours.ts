@@ -29,6 +29,16 @@ const CREATE = "CREATE TABLE IF NOT EXISTS bench_values (key TEXT PRIMARY KEY, v
 const UPSERT = "INSERT INTO bench_values (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value";
 const SELECT = "SELECT value FROM bench_values WHERE key = ?";
 
+/**
+ * A 1 KiB value no other write stored: a write of the bytes a key already holds changes no page, so
+ * the object commits nothing durable and the write costs what a read does.
+ */
+let written = 0;
+const freshValue = (): string => {
+  const tag = `${Date.now()}:${++written}:${Math.random()}:`;
+  return tag + "x".repeat(1024 - tag.length);
+};
+
 /** The work every target does, as SingleObject does it. Callbacks already run in a transaction. */
 function kv(sql: SqlStorage, call: KvCall): number | (string | null)[] {
   if (call.op === "put") {
@@ -66,8 +76,7 @@ export class KvServer extends GenServer<BehavioursEnv, Counter, KvCall | { reado
 
   /** `n` puts through the behaviour: one event each, as a call from a client would run. */
   async probeEvents(n: number, mode: "put" | "inc"): Promise<number> {
-    const value = "x".repeat(1024);
-    for (let i = 0; i < n; i++) await this.call(mode === "put" ? { op: "put", keys: [`key-${i % 1000}`], values: [value] } : { op: "inc" });
+    for (let i = 0; i < n; i++) await this.call(mode === "put" ? { op: "put", keys: [`key-${i % 1000}`], values: [freshValue()] } : { op: "inc" });
     return n;
   }
 
@@ -76,10 +85,9 @@ export class KvServer extends GenServer<BehavioursEnv, Counter, KvCall | { reado
    * idempotency key when `keyed` (each kept, for retries of the same call).
    */
   async probeReceive(n: number, keyed: boolean): Promise<number> {
-    const value = "x".repeat(1024);
     const run = crypto.randomUUID();
     for (let i = 0; i < n; i++) {
-      const message = { op: "put", keys: [`key-${i % 1000}`], values: [value] };
+      const message = { op: "put", keys: [`key-${i % 1000}`], values: [freshValue()] };
       await this.receive(keyed ? { kind: "call", message, deadline: Date.now() + 30_000, key: `${run}-${i}` } : { kind: "call", message, deadline: Date.now() + 30_000 });
     }
     return n;
@@ -87,11 +95,13 @@ export class KvServer extends GenServer<BehavioursEnv, Counter, KvCall | { reado
 
   /** The same `n` puts as SingleObject does them: a transaction each, no behaviour. */
   async probePlain(n: number, mode: "put" | "inc"): Promise<number> {
-    const value = "x".repeat(1024);
     this.sql.exec(CREATE);
     this.sql.exec("CREATE TABLE IF NOT EXISTS bench_counter (k INTEGER PRIMARY KEY, n INTEGER NOT NULL)");
     for (let i = 0; i < n; i++) {
-      if (mode === "put") this.ctx.storage.transactionSync(() => this.sql.exec(UPSERT, `key-${i % 1000}`, value));
+      if (mode === "put") {
+        const value = freshValue();
+        this.ctx.storage.transactionSync(() => this.sql.exec(UPSERT, `key-${i % 1000}`, value));
+      }
       else this.ctx.storage.transactionSync(() => this.sql.exec("INSERT INTO bench_counter (k, n) VALUES (0, 1) ON CONFLICT (k) DO UPDATE SET n = n + 1"));
       await Promise.resolve(); // as `await this.call` yields once per event
     }
@@ -229,9 +239,9 @@ type RpcTarget = "single" | BehaviourTarget | "kvserver-plain" | "kvserver-recei
  */
 export async function probeRpc(env: BehavioursEnv, probe: ProbeRpc): Promise<{ calls: number; rounds: number; microsPerCall: Record<string, number[]> }> {
   const targets: readonly RpcTarget[] = probe.targets ?? ["single", ...BEHAVIOUR_TARGETS];
-  const value = "x".repeat(1024);
   const put = (target: RpcTarget, i: number): Promise<unknown> => {
     const keys = [`key-${i % 1000}`];
+    const value = freshValue();
     if (target === "single") return env.SINGLE.getByName(probe.objectName).put(keys, [value]);
     if (target === "kvserver-plain") return env.KV_SERVER.getByName(probe.objectName).probePlain(1, "put");
     if (target === "kvserver-receive-keyed") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] }, key: crypto.randomUUID() });

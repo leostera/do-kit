@@ -246,6 +246,12 @@ interface MeasureConfig {
   readonly objectName: string;
   readonly keyCount: number;
   readonly payloadBytes: number;
+  /**
+   * Every write a value no write stored before. Off, every write stores the same bytes, and a write
+   * over a key that holds them changes no page: the object commits nothing durable, and the write
+   * costs what a read does.
+   */
+  readonly uniqueValues?: boolean;
   readonly driverIndex: number;
   readonly driverCount: number;
   readonly concurrency: number;
@@ -750,7 +756,7 @@ export class BenchDriver extends DurableObject<Env> {
                 bytes += config.payloadBytes;
               } else bytes += (await readHot(this.env, config.target, config.objectName, "hot-key"))?.length ?? 0;
             } else if (write) {
-              await this.write(config.target, config.objectName, [key], ["x".repeat(config.payloadBytes)]);
+              await this.write(config.target, config.objectName, [key], [config.uniqueValues ? uniqueValue(config, seq) : "x".repeat(config.payloadBytes)]);
               bytes += config.payloadBytes;
             } else {
               const value = await this.read(config.target, config.objectName, key);
@@ -823,7 +829,14 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (!Number.isSafeInteger(payloadBytes) || (payloadBytes as number) < 16 || (payloadBytes as number) > 64 * 1024) throw new Error("payloadBytes must be from 16 to 65536");
   const objectName = body.objectName;
   if (typeof objectName !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(objectName)) throw new Error("objectName must be 1-80 safe characters");
-  return { target: target as Target, operation: operation as Operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
+  const uniqueValues = body.uniqueValues === true;
+  return { target: target as Target, operation: operation as Operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName, uniqueValues };
+}
+
+/** A value of `payloadBytes` that no other write of this measurement stores: its start, driver and call. */
+function uniqueValue(config: MeasureConfig, seq: number): string {
+  const tag = `${config.startAt}:${config.driverIndex}:${seq}:`;
+  return tag + "x".repeat(Math.max(0, config.payloadBytes - tag.length));
 }
 
 function percentile(histogram: readonly number[], p: number): number {
