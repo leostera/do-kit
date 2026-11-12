@@ -1,16 +1,19 @@
 // RFD0008: an all-or-nothing call over keys in several shards. The shard of the call's smallest
 // key (the primary) records the outcome; every other shard prepares its share first and holds its
-// keys, then applies or drops it once it hears the outcome, from the client or, past its hold's
+// keys, then applies or drops it once it hears the outcome, from the coordinator or, past its hold's
 // deadline, by asking the primary, which records an abort if it has no outcome yet.
 //
 // Specs have no clock: a hold's deadline may pass at any moment (the `recover` step), which covers
-// a slow client as well as a dead one. Shards keep everything that matters in storage, so a crash
-// keeps it; the client keeps nothing, so its crash is a caller that died mid-call. Every shard call
-// the client makes is a DO RPC whose failure reaches it (a lost request or a lost answer), and the
-// client handles each failure as atomicAcross does. A prepare or a write that finds the keys held
+// a slow coordinator as well as a dead one. The caller sends the call to the primary, which
+// coordinates it (ShardedClient.coordinateAtomic, run by the primary's `coordinate` step); its
+// commit is a call to itself. Shards keep everything that matters in storage, so a crash keeps it;
+// the coordination is in memory, so its crash is the primary restarting mid-call. Every shard call
+// the coordinator makes is a DO RPC whose failure reaches it (a lost request or a lost answer), and
+// it handles each failure as coordinateAtomic does. A caller whose answer is lost asks the primary
+// for the outcome, as a recovering shard does (AskOutcome). A prepare or a write that finds the keys held
 // stays in flight until the hold ends, as the RPC waiting on the hold does. A prepare that finds
 // them held by an older call gives way instead (wait-die): it holds nothing and answers contended,
-// and the client aborts and makes the call again. Here calls come one after another, so a hold
+// and the coordinator aborts, and the caller makes the call again. Here calls come one after another, so a hold
 // another call left is always older; RFD0008 has why age keeps concurrent calls from waiting in a
 // ring.
 //
@@ -23,7 +26,7 @@
 import { type Ctx, atMost, budget, crash, defineActor, defineCall, defineLimit, defineMessage, defineProperty, defineRule, defineScenario, defineSpec, defineVariable, defineZone, failed, input, lose, oneOf } from "@leostera/feynman";
 
 type Outcome = "commit" | "abort";
-/** Where the client's call is refused, if anywhere: by no shard, the primary, or the first other shard. */
+/** Where the call is refused, if anywhere: by no shard, the primary, or the first other shard. */
 type RefusedBy = "none" | "primary" | "other";
 /** What the caller was told: committed, refused, or an error (the outcome unknown to it); or "retry", the call given way and made again. */
 type Told = Outcome | "error" | "retry";
@@ -47,18 +50,18 @@ const AskOutcome = defineCall("AskOutcome", { tx: String }, { name: "outcome?", 
 const OutcomeIs = defineMessage("OutcomeIs", { tx: String, outcome: OutcomeSchema }, { name: "outcome", over: "DO RPC", tone: "reply" });
 const Write = defineMessage("Write", {}, { name: "write", over: "DO RPC" });
 
-const youngerGivesWay = defineRule("youngerGivesWay", { description: "A prepare that finds its keys held by an older call holds nothing and answers contended; the client aborts and calls again." });
+const youngerGivesWay = defineRule("youngerGivesWay", { description: "A prepare that finds its keys held by an older call holds nothing and answers contended; the coordinator aborts, and the caller calls again." });
 const writesWait = defineRule("writesWait", { description: "A write to a held key waits until the hold ends." });
 const commitHonoursOutcome = defineRule("commitHonoursOutcome", { description: "The primary's commit answers an outcome recorded already instead of deciding again." });
 const recoveryRecordsAbort = defineRule("recoveryRecordsAbort", { description: "Asked for an outcome it has not recorded, the primary records an abort before it answers one." });
-const forgetAfterAllResolved = defineRule("forgetAfterAllResolved", { description: "The client asks the primary to forget an outcome only once every other shard has answered its resolve." });
+const forgetAfterAllResolved = defineRule("forgetAfterAllResolved", { description: "The coordinator asks the primary to forget an outcome only once every other shard has answered its resolve." });
 
 const workers = defineZone({ name: "Workers", description: "the caller, which keeps nothing" });
 const objects = defineZone({ name: "Durable Objects", description: "shards, which keep their holds and outcomes in storage" });
 
 const holdDeadline = defineLimit({ name: "Hold deadline", value: 5, unit: "seconds", sources: ["src/sharded/atomic.ts#ATOMIC_HOLD_MS"] });
 
-type ClientState = {
+type CoordinatorState = {
   tx: string | null;
   refuse: RefusedBy;
   /** Shards (by index) that answered prepared, refused, or contended, and whether every prepare has answered. */
@@ -74,12 +77,12 @@ type ClientState = {
   told: Told | null;
 };
 
-export const Client = defineActor({
-  name: "Client",
-  description: "The Worker making the atomic call (ShardedClient.atomically).",
-  zone: workers,
+export const Coordinator = defineActor({
+  name: "Coordinator",
+  description: "The primary shard's coordination of the call (the coordinate step): in memory only, so the primary's restart loses it, and keeps its outcomes.",
+  zone: objects,
   singleton: true,
-  initialState: (): ClientState => ({ tx: null, refuse: "none", prepared: [], refusedBy: [], contendedBy: [], answered: 0, decided: false, outcome: null, resolved: 0, resolveFailed: false, told: null }),
+  initialState: (): CoordinatorState => ({ tx: null, refuse: "none", prepared: [], refusedBy: [], contendedBy: [], answered: 0, decided: false, outcome: null, resolved: 0, resolveFailed: false, told: null }),
   display: {
     icon: "code",
     status: (s) => (s.told ? `told: ${s.told}` : s.tx ? (s.decided ? "committing" : `${s.answered} prepare(s) answered`) : "idle"),
@@ -89,10 +92,10 @@ export const Client = defineActor({
     call: {
       with: [atMost(repeats)],
       label: "Atomic call",
-      description: "Asks every other shard to prepare its share; one of them, or the primary, may refuse.",
+      description: "The call reaches the primary, which asks every other shard to prepare its share; one of them, or the primary, may refuse.",
       inputs: { refuse: input(String, { examples: ["none", "primary", "other"] }) },
       when: (s) => s.tx === null || s.told !== null,
-      sources: ["src/sharded/client.ts#ShardedClient.atomically", "src/sharded/client.ts#ShardedClient.atomicAcross"],
+      sources: ["src/sharded/client.ts#ShardedClient.atomically", "src/sharded/client.ts#ShardedClient.coordinateAtomic"],
       sends: [Prepare],
       run(s, { refuse }, ctx) {
         Object.assign(s, { tx: ctx.fresh("tx"), refuse: refuse as RefusedBy, prepared: [], refusedBy: [], contendedBy: [], answered: 0, decided: false, outcome: null, resolved: 0, resolveFailed: false, told: null });
@@ -104,7 +107,7 @@ export const Client = defineActor({
     prepared: {
       on: Prepared,
       description: "Counts a prepared share; once every prepare has answered, commits or aborts.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic"],
       sends: [Commit, Decide, Resolve],
       run(s, msg, ctx) {
         if (msg.tx !== s.tx || s.decided) return;
@@ -116,7 +119,7 @@ export const Client = defineActor({
     prepareRefused: {
       on: PrepareRefused,
       description: "Counts a refused share; once every prepare has answered, aborts.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic"],
       sends: [Commit, Decide, Resolve],
       run(s, msg, ctx) {
         if (msg.tx !== s.tx || s.decided) return;
@@ -128,7 +131,7 @@ export const Client = defineActor({
     contended: {
       on: Contended,
       description: "Counts a share that gave way to an older call; once every prepare has answered, aborts and calls again.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross", "src/sharded/client.ts#ShardedClient.atomically"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic", "src/sharded/client.ts#ShardedClient.atomically"],
       sends: [Commit, Decide, Resolve],
       run(s, msg, ctx) {
         if (msg.tx !== s.tx || s.decided) return;
@@ -140,7 +143,7 @@ export const Client = defineActor({
     prepareFailed: {
       on: failed(Prepare),
       description: "A prepare threw: records an abort at the primary and throws; shards that hold end at their deadline.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross", "src/sharded/client.ts#ShardedClient.decideAbort"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic", "src/sharded/client.ts#ShardedClient.decideAbort"],
       sends: [Decide],
       run(s, failure, ctx) {
         if (failure.payload.tx !== s.tx || s.decided) return;
@@ -152,7 +155,7 @@ export const Client = defineActor({
     committed: {
       on: Committed,
       description: "Committed: every other shard is told to apply its share.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross", "src/sharded/client.ts#ShardedClient.resolveAll"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic", "src/sharded/client.ts#ShardedClient.resolveAll"],
       sends: [Resolve, Forget],
       run(s, msg, ctx) {
         if (msg.tx !== s.tx || s.outcome) return;
@@ -164,7 +167,7 @@ export const Client = defineActor({
     notCommitted: {
       on: NotCommitted,
       description: "The primary refused, or a recovery aborted first: the shards drop their holds.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross", "src/sharded/client.ts#ShardedClient.resolveAll"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic", "src/sharded/client.ts#ShardedClient.resolveAll"],
       sends: [Resolve],
       run(s, msg, ctx) {
         if (msg.tx !== s.tx || s.outcome) return;
@@ -175,7 +178,7 @@ export const Client = defineActor({
     commitFailed: {
       on: failed(Commit),
       description: "The commit's answer is lost: asks the primary for the outcome, as a shard would.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross", "src/sharded/client.ts#ShardedClient.atomicOutcome"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic", "src/sharded/client.ts#ShardedClient.atomicOutcome"],
       sends: [AskOutcome],
       run(s, failure, ctx) {
         if (failure.payload.tx !== s.tx) return;
@@ -185,7 +188,7 @@ export const Client = defineActor({
     outcomeIs: {
       on: OutcomeIs,
       description: "The outcome after a lost commit answer: the shards are told it; the caller hears commit, or an error.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross", "src/sharded/client.ts#ShardedClient.resolveAll"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic", "src/sharded/client.ts#ShardedClient.resolveAll"],
       sends: [Resolve],
       run(s, msg, ctx) {
         if (msg.tx !== s.tx || s.outcome) return;
@@ -197,7 +200,7 @@ export const Client = defineActor({
     askOutcomeFailed: {
       on: failed(AskOutcome),
       description: "No outcome either: throws; the shards that hold end at their deadline.",
-      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross"],
+      sources: ["src/sharded/client.ts#ShardedClient.coordinateAtomic"],
       run(s, failure) {
         if (failure.payload.tx === s.tx && !s.outcome) s.told = "error";
       },
@@ -205,7 +208,7 @@ export const Client = defineActor({
     resolved: {
       on: Resolved,
       description: "A shard resolved its share; once all did, after a commit, the primary may forget the outcome.",
-      sources: ["src/sharded/client.ts#ShardedClient.resolveAll", "src/sharded/client.ts#ShardedClient.atomicAcross"],
+      sources: ["src/sharded/client.ts#ShardedClient.resolveAll", "src/sharded/client.ts#ShardedClient.coordinateAtomic"],
       sends: [Forget],
       run(s, msg, ctx) {
         if (msg.tx !== s.tx) return;
@@ -232,16 +235,16 @@ export const Client = defineActor({
   },
 });
 
-type ClientCtx = Ctx<typeof Commit | typeof Decide | typeof Resolve>;
+type CoordinatorCtx = Ctx<typeof Commit | typeof Decide | typeof Resolve>;
 
 /** After the last prepare answers: refused or given way anywhere, abort (recorded at the primary first); else commit at the primary. */
-function afterPrepares(s: ClientState, ctx: ClientCtx): void {
+function afterPrepares(s: CoordinatorState, ctx: CoordinatorCtx): void {
   if (s.answered < ctx.all(Other).length) return;
   s.decided = true;
   if (s.refusedBy.length > 0 || s.contendedBy.length > 0) {
     ctx.send(ctx.the(Primary), Decide, { tx: s.tx! });
     resolveAll(s, "abort", ctx);
-    // Refused wins: the call would be refused again. Given way, the client calls again (the next `call`).
+    // Refused wins: the call would be refused again. Given way, the caller calls again (the next `call`).
     s.told = s.refusedBy.length > 0 ? "abort" : "retry";
     return;
   }
@@ -249,7 +252,7 @@ function afterPrepares(s: ClientState, ctx: ClientCtx): void {
 }
 
 /** Tells every shard that prepared the outcome. */
-function resolveAll(s: ClientState, outcome: Outcome, ctx: ClientCtx): void {
+function resolveAll(s: CoordinatorState, outcome: Outcome, ctx: CoordinatorCtx): void {
   s.outcome = outcome;
   for (const i of s.prepared) ctx.send(ctx.all(Other)[i]!, Resolve, { tx: s.tx!, outcome });
 }
@@ -378,7 +381,7 @@ export const Other = defineActor({
     },
     outcomeIs: {
       on: OutcomeIs,
-      description: "The primary's outcome, asked for after the deadline: applied or dropped as from the client.",
+      description: "The primary's outcome, asked for after the deadline: applied or dropped as from the coordinator.",
       sources: ["src/sharded/index.ts#ShardedObject.recoverDue"],
       run(s, msg) {
         if (s.hold?.tx === msg.tx) end(s, msg.outcome);
@@ -474,7 +477,7 @@ const heldKeysAreFrozen = defineProperty("heldKeysAreFrozen", {
 const callerToldTheTruth = defineProperty("callerToldTheTruth", {
   description: "The caller is told commit only if the primary committed, and abort only if it did not.",
   always: (w) => {
-    const c = w.the(Client).state;
+    const c = w.the(Coordinator).state;
     if (c.tx === null || c.told === null || c.told === "error") return true;
     // "retry": the call is made again, so it must not have applied anywhere.
     return c.told === "commit" ? committed(w, c.tx) : !committed(w, c.tx);
@@ -504,7 +507,7 @@ const commitAcross = defineScenario("Commit across two shards", {
   description: "Every other shard prepares, the primary commits, the other shard applies, and the primary forgets the outcome.",
   run(s) {
     s.spawn(Other, "Shard 1");
-    s.act(s.the(Client), "call", { refuse: "none" });
+    s.act(s.the(Coordinator), "call", { refuse: "none" });
     s.settle();
   },
 });
@@ -514,18 +517,18 @@ const refusedByAShard = defineScenario("Refused by another shard", {
   run(s) {
     s.spawn(Other, "Shard 1");
     s.spawn(Other, "Shard 2");
-    s.act(s.the(Client), "call", { refuse: "other" });
+    s.act(s.the(Coordinator), "call", { refuse: "other" });
     s.settle();
   },
 });
 
-const callerDies = defineScenario("The caller dies after the prepares", {
-  description: "The other shard holds its keys until its deadline, then asks the primary, which records an abort.",
+const callerDies = defineScenario("The coordination dies after the prepares", {
+  description: "Its primary restarts mid-call: the other shard holds its keys until its deadline, then asks the primary, which records an abort.",
   run(s) {
     const shard = s.spawn(Other, "Shard 1");
-    s.act(s.the(Client), "call", { refuse: "none" });
+    s.act(s.the(Coordinator), "call", { refuse: "none" });
     s.settle({ until: (w) => w.all(Other).every((o) => o.state.hold !== null) });
-    s.step(s.the(Client), "crash");
+    s.step(s.the(Coordinator), "crash");
     s.step(shard, "recover");
     s.settle();
   },
@@ -535,7 +538,7 @@ const recoveryFirst = defineScenario("A recovery reaches the primary first", {
   description: "The hold's deadline passes before the commit: the recovery records the abort, and the late commit is refused.",
   run(s) {
     const shard = s.spawn(Other, "Shard 1");
-    s.act(s.the(Client), "call", { refuse: "none" });
+    s.act(s.the(Coordinator), "call", { refuse: "none" });
     s.settle({ until: (w) => w.all(Other).every((o) => o.state.hold !== null) });
     s.step(shard, "recover");
     s.deliver(s.the(Primary), AskOutcome);
@@ -548,29 +551,29 @@ const lateAsk = defineScenario("A recovery's ask arrives after the forget", {
     "Intended: the hold's deadline passes and it asks, but the commit and its resolve get there first and the primary forgets; the late ask then records an abort. No shard holds for the call any more, so nothing reads it, and it is purged with the outcomes past their TTL.",
   run(s) {
     const shard = s.spawn(Other, "Shard 1");
-    s.act(s.the(Client), "call", { refuse: "none" });
+    s.act(s.the(Coordinator), "call", { refuse: "none" });
     s.settle({ until: (w) => w.all(Other).every((o) => o.state.hold !== null) });
     s.step(shard, "recover");
-    const [client, primary] = [s.the(Client), s.the(Primary)];
-    s.deliver(client, Prepared);
+    const [coordinator, primary] = [s.the(Coordinator), s.the(Primary)];
+    s.deliver(coordinator, Prepared);
     s.deliver(primary, Commit);
-    s.deliver(client, Committed);
+    s.deliver(coordinator, Committed);
     s.deliver(shard, Resolve);
-    s.deliver(client, Resolved);
+    s.deliver(coordinator, Resolved);
     s.deliver(primary, Forget);
     s.settle();
   },
 });
 
 const givesWay = defineScenario("A call gives way to an older call's hold", {
-  description: "A caller dies holding a shard's keys; the next call's prepare there gives way at once, holding nothing, and the call aborts to be made again. The old hold ends at its deadline, aborted.",
+  description: "A coordination dies (its primary restarts) holding a shard's keys; the next call's prepare there gives way at once, holding nothing, and the call aborts to be made again. The old hold ends at its deadline, aborted.",
   run(s) {
     s.spawn(Other, "Shard 1");
-    s.act(s.the(Client), "call", { refuse: "none" });
+    s.act(s.the(Coordinator), "call", { refuse: "none" });
     s.settle({ until: (w) => w.all(Other).every((o) => o.state.hold !== null) });
-    s.step(s.the(Client), "crash");
-    s.act(s.the(Client), "call", { refuse: "none" });
-    s.settle({ until: (w) => w.the(Client).state.told === "retry" });
+    s.step(s.the(Coordinator), "crash");
+    s.act(s.the(Coordinator), "call", { refuse: "none" });
+    s.settle({ until: (w) => w.the(Coordinator).state.told === "retry" });
     s.settle();
   },
 });
@@ -578,12 +581,12 @@ const givesWay = defineScenario("A call gives way to an older call's hold", {
 export default defineSpec({
   name: "Atomic calls across shards",
   description: "How a call over keys in several shards applies in all of them or in none, whether its caller stays or goes.",
-  actors: [Client, Primary, Other, Writer],
+  actors: [Coordinator, Primary, Other, Writer],
   limits: [holdDeadline],
   properties: [allOrNothing, oneOutcome, heldKeysAreFrozen, holdsEndBeforeTheNext, callerToldTheTruth, committedSharesApply, everyHoldEnds],
   scenarios: [commitAcross, refusedByAShard, callerDies, recoveryFirst, lateAsk, givesWay],
   finalState: {
     description: "No shard holds keys, nothing is in flight, and the caller has its answer or is gone.",
-    when: (w) => w.quiet && w.all(Other).every((o) => o.state.hold === null) && (w.the(Client).state.tx === null || w.the(Client).state.told !== null),
+    when: (w) => w.quiet && w.all(Other).every((o) => o.state.hold === null) && (w.the(Coordinator).state.tx === null || w.the(Coordinator).state.told !== null),
   },
 });

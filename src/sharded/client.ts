@@ -334,7 +334,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           throw error;
         }
       }
-      const outcome = await this.atomicAcross<R, A>(keys, method, payloads, args, startedAt);
+      const outcome = await this.atomicAtPrimary<R, A>(keys, method, payloads, args, startedAt);
       if (outcome === "again") splits++;
       else if (outcome === "contended") await contention.next();
       else return outcome;
@@ -342,12 +342,35 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   }
 
   /**
-   * An atomic call over several shards. Nothing applied, to be retried: "again" if a split moved the
-   * primary's keys apart before the commit, "contended" if a shard gave way to an older call.
+   * An atomic call over several shards, coordinated by the primary (`coordinate`), so a share is
+   * held for a round trip between shards, not between this caller and each of them. If the
+   * primary's answer is lost, its outcome decides: the primary records an abort if it has none,
+   * so a coordination still running then commits nothing. Committed, the results are unknown.
    */
-  private async atomicAcross<R, A>(keys: readonly string[], method: string, payloads: readonly unknown[] | null, args: readonly unknown[], startedAt: number): Promise<AtomicOutcome<R, A> | "again" | "contended"> {
-    const started = Date.now();
+  private async atomicAtPrimary<R, A>(keys: readonly string[], method: string, payloads: readonly unknown[] | null, args: readonly unknown[], startedAt: number): Promise<AtomicOutcome<R, A> | "again" | "contended"> {
     const tx = atomicTxId(startedAt);
+    const primaryKey = [...keys].sort()[0]!;
+    let answer: AtomicAnswer;
+    try {
+      answer = await this.atomicTo(primaryKey, { step: "coordinate", tx, method, keys, payloads }, args);
+    } catch (error) {
+      const outcome = await this.atomicOutcome(tx, primaryKey).catch(() => null);
+      if (outcome === "commit") return { committed: true, results: [] };
+      throw error;
+    }
+    return (answer as { coordinated: AtomicOutcome<R, A> | "again" | "contended" }).coordinated;
+  }
+
+  /**
+   * The coordination of an atomic call over several shards, as the primary runs it (the
+   * `coordinate` step): not for callers, who use `atomically`. Nothing applied, to be retried:
+   * "again" if a split moved the primary's keys apart before the commit, "contended" if a shard
+   * gave way to an older call.
+   * @internal
+   */
+  async coordinateAtomic<R, A>(tx: string, keys: readonly string[], method: string, payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<AtomicOutcome<R, A> | "again" | "contended"> {
+    await this.loadCache();
+    const started = Date.now();
     const primaryKey = [...keys].sort()[0]!;
     const primaryBits = this.shardFor(this.routeHash(primaryKey));
     const mine = keys.map((k) => this.shardFor(this.routeHash(k)) === primaryBits);
@@ -425,8 +448,8 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   }
 
   /** A step at the primary of `tx`. */
-  private async atomicTo(primaryKey: string, step: AtomicStep): Promise<AtomicAnswer> {
-    const [only] = await this.route(true, [primaryKey], step.step, null, this.atomicStep(step, []));
+  private async atomicTo(primaryKey: string, step: AtomicStep, args: readonly unknown[] = []): Promise<AtomicAnswer> {
+    const [only] = await this.route(true, [primaryKey], step.step, null, this.atomicStep(step, args));
     return only!.result as AtomicAnswer;
   }
 

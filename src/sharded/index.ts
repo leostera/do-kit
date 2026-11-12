@@ -18,7 +18,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { ATOMIC_OUTCOME_TTL_MS, olderTx, type AtomicAnswer, type AtomicMethod, type AtomicStep, type Outcome } from "./atomic.js";
-import { sharded } from "./client.js";
+import { sharded, type ShardedClient } from "./client.js";
 import { hashBit, keyHash } from "./hash.js";
 
 export { ATOMIC_HOLD_MS, ATOMIC_OUTCOME_TTL_MS, type AtomicMethod, type AtomicOutcome, type AtomicShardResult, type Prepared } from "./atomic.js";
@@ -775,6 +775,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     switch (step.step) {
       case "solo":
         return this.atomicSolo(step.method, keys, payloads, args);
+      case "coordinate":
+        // Routed by the primary key: this shard records the outcome, and drives the other shards.
+        this.assertOwner(keys);
+        return { coordinated: await this.atomicClient().coordinateAtomic(step.tx, step.keys, step.method, step.payloads, args) };
       case "prepare":
         return this.atomicPrepare(step, keys, payloads, args);
       case "commit": {
@@ -945,6 +949,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return { applied: m.applied ? await m.applied(h.keys, result) : result };
   }
 
+  /** A client of this sharded object, from a shard: for recovery, and for the calls a primary coordinates. */
+  private atomicClient(): ShardedClient<ShardedObject<Env, V>> {
+    return sharded(this.nodes() as DurableObjectNamespace<ShardedObject<Env, V>>, this.objectName(), {
+      ...(this.routesByKey() ? {} : { routeOf: (key: string) => this.routeOf(key) }),
+      ...(this.callerStubOptions ? { stubOptions: this.callerStubOptions } : {}),
+    });
+  }
+
   /** Holds past their deadline: asks each one's primary for the outcome, and resolves it. */
   private recovering: Promise<void> | null = null;
   private recoverHolds(): Promise<void> {
@@ -955,10 +967,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private async recoverDue(): Promise<void> {
     const due = this.loadHolds().filter((h) => h.deadline <= Date.now());
     if (due.length === 0) return;
-    const client = sharded(this.nodes() as DurableObjectNamespace<ShardedObject<Env, V>>, this.objectName(), {
-      ...(this.routesByKey() ? {} : { routeOf: (key: string) => this.routeOf(key) }),
-      ...(this.callerStubOptions ? { stubOptions: this.callerStubOptions } : {}),
-    });
+    const client = this.atomicClient();
     await Promise.all(
       due.map(async (h) => {
         const outcome = await client.atomicOutcome(h.tx, h.primaryKey);

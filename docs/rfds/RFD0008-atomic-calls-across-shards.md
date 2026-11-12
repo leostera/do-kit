@@ -95,24 +95,29 @@ for work that waits on other objects; its answer is what the caller gets.
 
 ```mermaid
 sequenceDiagram
-  participant C as Client
-  participant B as Shard of "bob" (other)
+  participant W as Caller
   participant A as Shard of "alice" (primary: smallest key)
-  C->>B: prepare(tx, primary "alice", deadline)
-  B-->>C: prepared (holds "bob", keeps its write)
-  C->>A: commit(tx, its share)
-  A-->>C: committed (checked, recorded "commit", applied, in one transaction)
-  C->>B: resolve(tx, commit)
-  B-->>C: applied (hold released)
-  C->>A: forget(tx)
-  Note over B: caller gone? at the deadline B asks A: "commit", or A records "abort" now
+  participant B as Shard of "bob" (other)
+  W->>A: coordinate(tx, every key and payload)
+  A->>B: prepare(tx, primary "alice", deadline)
+  B-->>A: prepared (holds "bob", keeps its write)
+  Note over A: commit: checked, recorded "commit", applied, in one transaction
+  A->>B: resolve(tx, commit)
+  B-->>A: applied (hold released)
+  Note over A: forget(tx)
+  A-->>W: committed
+  Note over B: coordination gone? at the deadline B asks A: "commit", or A records "abort" now
 ```
 
 ## Reference-level explanation
 
 ### Architecture and boundaries
 
-The client (`ShardedClient.atomically`) drives the call. The shards hold keys and keep what they
+The primary drives the call: the client (`ShardedClient.atomically`) sends it, every key and
+payload, to the primary key's shard (the `coordinate` step), which runs the protocol below with a
+client of its own (`coordinateAtomic`; its commit is a call to itself). So a share is held for a
+round trip between two shards, not between the caller and each shard in turn, and the caller waits
+for one round trip to the primary. The shards hold keys and keep what they
 would write (`sharded_atomic_holds`); the primary keeps the outcome (`sharded_atomic_outcomes`).
 The subclass gives `check` and `apply`, and optionally `gather`, `holdKeys` and `applied`; it
 never sees transaction ids. Every step reaches a shard through one routed entry point,
@@ -144,7 +149,11 @@ Tables, in every shard (created with the others):
 ### Lifecycle and failure semantics
 
 1. **Route.** The client routes the keys as `call` does. One shard: the `solo` step, with `gather`,
-   then `check` and `apply` in one transaction; no ids, no tables.
+   then `check` and `apply` in one transaction; no ids, no tables. Several: the `coordinate` step
+   at the primary, which runs 2 to 5 (below, "the client" is the primary's). If its answer is lost,
+   the caller asks the primary for the outcome (6): "commit" is a committed call (its results
+   unknown); anything else is the error, the outcome unknown to the caller, since once every share
+   resolved the primary forgets it, and the ask then records an abort no shard reads.
 2. **Prepare** every shard but the primary's, in parallel (`prepare` step). The shard waits out
    holds on these keys (a split's, or a younger atomic call's: two calls holding one key would each
    check against rows the other is about to change; an older call's hold it gives way to, see
@@ -218,15 +227,16 @@ copied with its storage to both halves on a split; only the half owning the prim
    other share prepared, and never once "abort" is recorded.
 3. **Held keys are frozen:** between a shard's prepare and its resolve, no other write to its held
    keys applies (fenced writes wait on them).
-4. **Every hold ends:** each hold is resolved by its caller or, after its deadline, by recovery.
+4. **Every hold ends:** each hold is resolved by its coordinator or, after its deadline, by recovery.
 5. **Nothing staged shows before the outcome:** reads see rows from before until a shard applies.
 6. **Single-shard calls unchanged:** a call in one shard writes no ids, holds or outcomes.
 
-Modelled in `specs/atomic-across-shards.ts` (Feynman 0.15): a client, a primary and other shards;
-a refusal by either kind of shard or none; another writer on a held key; the client, the primary
+Modelled in `specs/atomic-across-shards.ts` (Feynman 0.15): a coordinator (the primary's, which
+keeps nothing), a primary and other shards; a refusal by either kind of shard or none; another
+writer on a held key; the coordinator, the primary
 and each shard crashing (the shards keep their holds and outcomes), every request and answer lost
-(a lost one fails the client's call, as a DO RPC does, and the client handles it as
-`atomicAcross` does), messages overtaking each other, and holds reaching their deadline at any
+(a lost one fails the coordinator's call, as a DO RPC does, and it handles it as
+`coordinateAtomic` does), messages overtaking each other, and holds reaching their deadline at any
 moment. Seven properties: all or nothing (and the primary's record true while a shard holds for the
 call), one outcome, held keys frozen, a hold ending before the next, the caller told the truth,
 every committed share applied, every hold ended. Exhaustive in three bounds: two other shards and
@@ -319,6 +329,14 @@ A git server on sharded refs keeps refusing most atomic pushes, which stock git 
 - **The primary's own keys and a stale map.** A client whose map is stale can route a key as
   another shard's when it is the primary's; that share then holds a key in the primary's own
   object. The primary's commit doesn't wait on holds of its own call.
+- **The primary coordinates.** The first design had the caller drive every step. Benchmarked on
+  the edge, with callers in five regions, a two-shard call took about 380 ms against 105 ms for a
+  plain write to two shards, and its shares were held for about two caller round trips, which
+  bounds a hot key: a key held that long takes a few calls a second, and 8 hot keys in pairs
+  committed 10 to 13 calls a second whatever the load. The primary now coordinates (step 1): the
+  messages and their failure handling are the same, sent from the primary, whose coordination,
+  in memory, ends with it if it restarts, as a caller's did. `test/atomic.test.ts` covers a lost
+  answer from the primary, committed and not.
 - **Hot keys and wait-die.** The first design waited out every other call's hold, up to
   `holdWaitMs`, while keeping its own. Benchmarked on the edge, calls over 8 hot keys collapsed (see
   *Contention*); `test/atomic.test.ts` has a commit and a prepare that meet an older call's hold and

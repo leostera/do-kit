@@ -90,6 +90,34 @@ export const users = defineTable<User>({
   },
 });
 
+/** `target[prop]`, bound to `target` if it is a method (the runtime's objects check `this`). */
+function bound(target: object, prop: string | symbol): unknown {
+  const value = Reflect.get(target, prop);
+  return typeof value === "function" ? value.bind(target) : value;
+}
+
+/** `ns`, whose stubs lose the answer to each `coordinate` step once it has come back. */
+function losingCoordinateAnswers<T extends Rpc.DurableObjectBranded>(ns: DurableObjectNamespace<T>): DurableObjectNamespace<T> {
+  return new Proxy(ns, {
+    get(target, prop) {
+      if (prop !== "get") return bound(target, prop);
+      return (id: DurableObjectId, options?: DurableObjectNamespaceGetDurableObjectOptions) => {
+        const stub = target.get(id, options) as unknown as { shardedAtomic(...a: unknown[]): Promise<unknown> };
+        return new Proxy(stub, {
+          get(s, p) {
+            if (p !== "shardedAtomic") return bound(s, p);
+            return async (...a: unknown[]) => {
+              const answer = await s.shardedAtomic(...a);
+              if ((a[2] as AtomicStep).step === "coordinate") throw new Error("test: the answer was lost");
+              return answer;
+            };
+          },
+        });
+      };
+    },
+  });
+}
+
 /** The next SQL statement on `storage` containing `text` throws, once, as a storage error would. */
 function failStatementOnce(storage: DurableObjectStorage, text: string): void {
   const sql = storage.sql;
@@ -368,6 +396,12 @@ class CounterBase extends ShardedObject<Env, number> {
   /** The stub options this shard would make its stubs with now (see `stubOptions`). */
   async seenStubOptions(keys: readonly string[], _payloads: null): Promise<unknown[]> {
     return keys.map(() => this.stubOptions());
+  }
+
+  /** The next SQL statement here containing `payloads[0]` throws, once, as a storage error would. */
+  async failNextStatement(keys: readonly string[], payloads: readonly string[]): Promise<null[]> {
+    failStatementOnce(this.ctx.storage, payloads[0]!);
+    return keys.map(() => null);
   }
 
   /** Restarts this shard (the call fails); once restarted, its first read of the atomic holds throws, as a storage error would. */
@@ -853,6 +887,14 @@ export default {
           const routed = (body as { routeOf?: "refs" }).routeOf === "refs";
           return Response.json(await sharded(ns, body.name, routed ? { routeOf: refRoute } : {}).atomically(body.keys, body.method, body.payloads ?? null, ...((body.args as unknown[]) ?? [])));
         }
+        case "/atomicallyLosingAnswer":
+          // As /atomically, but the primary's answer to the call it coordinates is lost on its way
+          // back: the call has run, and the caller sees an error.
+          return Response.json(
+            await sharded(losingCoordinateAnswers(ns), body.name)
+              .atomically(body.keys, body.method, body.payloads ?? null)
+              .catch((error: unknown) => ({ threw: String(error) })),
+          );
         case "/atomicStep":
           // One step of the protocol, as a client would send it: a caller that stops partway.
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedAtomic(body.name, body.bits, (body as unknown as { step: AtomicStep }).step, body.keys, body.payloads ?? null, []));

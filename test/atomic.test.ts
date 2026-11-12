@@ -74,6 +74,28 @@ test("a refusal by either shard applies nothing anywhere, and says why", async (
   expect([...l.holds, ...r.holds]).toEqual([]);
 }, 30_000);
 
+test("a call whose primary's answer is lost: committed if the primary still has the outcome, else an error", async () => {
+  const name = `atomic-lost-answer-${unique()}`;
+  const { left, right } = keysByHalf(1);
+  const [a, b] = [left[0]!, right[0]!].sort() as [string, string];
+  await twoShards(name, { [a]: 100, [b]: 5 });
+  const lost = (deltas: number[]) => post<Outcome | { threw: string }>("/atomicallyLosingAnswer", { cls: "counters", name, method: "transfer", keys: [a, b], payloads: deltas });
+  // The other shard's resolve fails, so the primary keeps the outcome: asked, it says commit.
+  await call("counters", name, "failNextStatement", [b], ["DELETE FROM sharded_atomic_holds"]);
+  expect(await lost([-30, 30])).toEqual({ committed: true, results: [] });
+  // That share applies once its hold ends, by recovery.
+  for (let i = 0; i < 80 && (await values(name, [b]))[0] !== 35; i++) await Bun.sleep(100);
+  expect(await values(name, [a, b])).toEqual([70, 35]);
+  // Every share resolved, the outcome is forgotten: the caller can't tell, and hears the error.
+  expect(await lost([-10, 10])).toEqual({ threw: expect.stringContaining("the answer was lost") });
+  expect(await values(name, [a, b])).toEqual([60, 45]);
+  // Refused: nothing applied, and the caller hears the error.
+  expect(await lost([-1000, 1000])).toEqual({ threw: expect.stringContaining("the answer was lost") });
+  expect(await values(name, [a, b])).toEqual([60, 45]);
+  const [l, r] = await Promise.all([tables(name, "0"), tables(name, "1")]);
+  expect([...l.holds, ...r.holds]).toEqual([]);
+}, 30_000);
+
 test("a call in one shard is one call: no holds, no outcomes, no tables", async () => {
   const name = `atomic-solo-${unique()}`;
   await call("counters", name, "add", ["x", "y"], [5, 0]);
