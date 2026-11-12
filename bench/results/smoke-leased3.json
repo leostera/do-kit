@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 3,
+  "suite": "bench-a5a4593a53e7",
+  "generatedAt": "2026-11-12T11:52:20.974Z",
+  "provenance": {
+    "commit": "4f15c565d49ae7e0e9dbc8e77ece09abf6b77096",
+    "dirty": true,
+    "doKitVersion": "0.4.0",
+    "workerVersion": ""
+  },
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 5000,
+    "concurrencyLevels": [
+      64,
+      1024
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "reader-single",
+      "operation": "read",
+      "distribution": "hot",
+      "concurrency": 64,
+      "durationMs": 5000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-a5a4593a53e7-reader-single-read-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 7006,
+      "errors": 0,
+      "elapsedMs": 5179,
+      "operationsPerSecond": 1352.770805174744,
+      "mebibytesPerSecond": 0.33507464037458967,
+      "latencyMs": {
+        "p50": 30,
+        "p95": 149,
+        "p99": 222,
+        "max": 704
+      },
+      "topology": null,
+      "leased": null,
+      "errorSample": null
+    },
+    {
+      "target": "reader-single",
+      "operation": "read",
+      "distribution": "hot",
+      "concurrency": 1024,
+      "durationMs": 5000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-a5a4593a53e7-reader-single-read-hot",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 13877,
+      "errors": 0,
+      "elapsedMs": 5315,
+      "operationsPerSecond": 2610.912511759172,
+      "mebibytesPerSecond": 0.161504880056444,
+      "latencyMs": {
+        "p50": 352,
+        "p95": 623,
+        "p99": 918,
+        "max": 1716
+      },
+      "topology": null,
+      "leased": null,
+      "errorSample": null
+    }
+  ],
+  "splits": []
+}
