@@ -1,7 +1,7 @@
 // The client side of sharded objects: routes keys to shards through the splits it
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
-import { ATOMIC_HOLD_MS, type AtomicAnswer, type AtomicOutcome, type AtomicShardResult, type AtomicStep, type Outcome } from "./atomic.js";
+import { ATOMIC_HOLD_MS, atomicTxId, type AtomicAnswer, type AtomicOutcome, type AtomicShardResult, type AtomicStep, type Outcome } from "./atomic.js";
 import { hashBit, keyHash } from "./hash.js";
 import { hostBits, shardObjectName, nodeName, type CallAnswer, type NodeDescription, type ShardedObject, type StubOptions } from "./index.js";
 
@@ -155,13 +155,14 @@ class Backoff {
   constructor(
     private readonly what: string,
     private readonly limitMs: number,
+    private readonly reason = "a new shard did not start serving",
   ) {}
   /** A shard holding the call for a split that gives up at `until` (its clock). */
   extend(until: number | undefined): void {
     if (until !== undefined) this.until = Math.max(this.until, Math.min(until, Date.now() + MAX_HELD_WAIT_MS));
   }
   async next(): Promise<void> {
-    if (this.waited > this.limitMs && Date.now() > this.until + ACTIVATION_SLACK_MS) throw new Error(`${this.what}: a new shard did not start serving`);
+    if (this.waited > this.limitMs && Date.now() > this.until + ACTIVATION_SLACK_MS) throw new Error(`${this.what}: ${this.reason}`);
     // Jittered: callers held by one split are released together, and must not retry in step.
     const wait = this.wait / 2 + Math.random() * this.wait;
     await sleep(wait);
@@ -313,8 +314,12 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     if (keys.length === 0) throw new Error(`sharded ${this.name}: atomically needs at least one key`);
     if (payloads && payloads.length !== keys.length) throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
     await this.loadCache();
-    for (let attempt = 0; ; attempt++) {
-      if (attempt > MAX_HOPS) throw new Error(`sharded ${this.name}: atomic call did not settle`);
+    // The call's age, kept across retries: an older call never gives way to a younger one.
+    const startedAt = Date.now();
+    // A call that gave way waits out the older one, up to notReadyWaitMs over all its retries.
+    const contention = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs, "an atomic call kept giving way to older calls");
+    for (let splits = 0; ; ) {
+      if (splits > MAX_HOPS) throw new Error(`sharded ${this.name}: atomic call did not settle`);
       if (new Set(keys.map((k) => this.shardFor(this.routeHash(k)))).size === 1) {
         try {
           const [only] = await this.route(true, keys, method, payloads, this.atomicStep({ step: "solo", method }, args));
@@ -322,19 +327,27 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           return "refused" in answer ? { committed: false, refusals: [{ keys, result: answer.refused as R }] } : { committed: true, results: [{ keys, result: (answer as { applied: A }).applied }] };
         } catch (error) {
           // A split this client had not heard of: the keys span shards now.
-          if (error instanceof SpansShards) continue;
+          if (error instanceof SpansShards) {
+            splits++;
+            continue;
+          }
           throw error;
         }
       }
-      const outcome = await this.atomicAcross<R, A>(keys, method, payloads, args);
-      if (outcome !== "again") return outcome;
+      const outcome = await this.atomicAcross<R, A>(keys, method, payloads, args, startedAt);
+      if (outcome === "again") splits++;
+      else if (outcome === "contended") await contention.next();
+      else return outcome;
     }
   }
 
-  /** An atomic call over several shards; "again" if a split moved the primary's keys apart before the commit (nothing applied). */
-  private async atomicAcross<R, A>(keys: readonly string[], method: string, payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<AtomicOutcome<R, A> | "again"> {
+  /**
+   * An atomic call over several shards. Nothing applied, to be retried: "again" if a split moved the
+   * primary's keys apart before the commit, "contended" if a shard gave way to an older call.
+   */
+  private async atomicAcross<R, A>(keys: readonly string[], method: string, payloads: readonly unknown[] | null, args: readonly unknown[], startedAt: number): Promise<AtomicOutcome<R, A> | "again" | "contended"> {
     const started = Date.now();
-    const tx = crypto.randomUUID();
+    const tx = atomicTxId(startedAt);
     const primaryKey = [...keys].sort()[0]!;
     const primaryBits = this.shardFor(this.routeHash(primaryKey));
     const mine = keys.map((k) => this.shardFor(this.routeHash(k)) === primaryBits);
@@ -350,14 +363,20 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       throw error;
     }
     const prepared = prepares.filter((r) => "prepared" in (r.result as AtomicAnswer));
+    const contended = prepares.some((r) => "contended" in (r.result as AtomicAnswer));
     const refusals = prepares.flatMap((r) => ("refused" in (r.result as AtomicAnswer) ? [{ keys: r.keys, result: (r.result as { refused: R }).refused }] : []));
     const preparedAt = Date.now();
     const log = (outcome: string, extra: Record<string, unknown> = {}) => console.log(JSON.stringify({ event: "sharded-atomic", object: this.name, shards: prepares.length + 1, keys: keys.length, outcome, prepareMs: preparedAt - started, ms: Date.now() - started, ...extra }));
-    if (refusals.length > 0) {
+    if (refusals.length > 0 || contended) {
       await this.decideAbort(tx, primaryKey);
       await this.resolveAll(prepared, tx, "abort");
-      log("refused");
-      return { committed: false, refusals };
+      // Refused wins: the call would be refused again.
+      if (refusals.length > 0) {
+        log("refused");
+        return { committed: false, refusals };
+      }
+      log("contended");
+      return "contended";
     }
     let answer: AtomicAnswer;
     let primaryKeys: readonly string[];
@@ -379,6 +398,12 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       log(outcome, { lostCommitAnswer: true });
       if (outcome === "abort") throw error;
       return { committed: true, results: resolved.results as AtomicShardResult<A>[] };
+    }
+    if ("contended" in answer) {
+      // The primary gave way to an older call, and recorded an abort.
+      await this.resolveAll(prepared, tx, "abort");
+      log("contended at the primary");
+      return "contended";
     }
     if ("refused" in answer || ("outcome" in answer && answer.outcome === "abort")) {
       await this.resolveAll(prepared, tx, "abort");

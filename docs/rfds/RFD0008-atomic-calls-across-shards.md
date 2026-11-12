@@ -146,8 +146,9 @@ Tables, in every shard (created with the others):
 1. **Route.** The client routes the keys as `call` does. One shard: the `solo` step, with `gather`,
    then `check` and `apply` in one transaction; no ids, no tables.
 2. **Prepare** every shard but the primary's, in parallel (`prepare` step). The shard waits out
-   holds on these keys (a split's, or another atomic call's: two calls holding one key would each
-   check against rows the other is about to change), runs `gather`, waits out any hold that
+   holds on these keys (a split's, or a younger atomic call's: two calls holding one key would each
+   check against rows the other is about to change; an older call's hold it gives way to, see
+   *Contention* below), runs `gather`, waits out any hold that
    appeared meanwhile (and gathers again), then in one fenced transaction runs `check` and, if
    staged, stores the hold; then asks for an alarm at the deadline. "moved" and "not ready" answers are retried as `call`
    retries them; a group that moved may become two shards, both prepared.
@@ -157,7 +158,8 @@ Tables, in every shard (created with the others):
    holds end at their deadline (6). (Deciding on the first refusal would leave a shard whose
    prepare answered later holding until its deadline: correct, but a stall.)
 4. **Commit** at the primary (`commit` step) waits out holds on its keys (but its own call's: a
-   stale client may have prepared one of the primary's keys as another shard's), gathers and checks. Refused: it records "abort" and answers the refusal (then 3). Staged: in
+   stale client may have prepared one of the primary's keys as another shard's, and an older
+   call's, to which it gives way, recording "abort"), gathers and checks. Refused: it records "abort" and answers the refusal (then 3). Staged: in
    one transaction it records "commit", unless an outcome for `tx` exists ("abort" from a recovery,
    6: it answers that), and runs `apply`. Then `applied`.
 5. **Resolve** every prepared shard, in parallel: `resolve(tx, "commit")` runs `apply` and
@@ -173,6 +175,20 @@ Tables, in every shard (created with the others):
    failed `setAlarm`, or one the runtime stopped retrying), and reads do not wait on holds: so every
    routed call that reaches a shard holding keys checks, at most every 5 s, that an alarm is set no
    later than its earliest hold's deadline, as it does for a split's pending work.
+
+**Contention (wait-die).** A call's id starts with the time its first attempt started, so ids
+order calls by age, and a call made again keeps its age. A prepare or commit that finds its keys
+held by an older call does not wait: it holds nothing, the commit records "abort", and it answers
+`contended`; the client aborts the call (3), waits with jittered backoff, and makes it again, until
+`notReadyWaitMs` (30 s) has gone by. Only older calls wait on younger ones, so waits can't form a
+ring: without the rule, two calls that prepare in parallel can each hold a key the other needs and
+wait on each other until a deadline aborts one of them. And a call does not keep its keys while it
+waits on an older one: the hold that blocks it and the hold it keeps would otherwise chain, which
+on a few hot keys held every call's keys past its deadline, so most calls ended aborted by
+recovery: over 8 hot keys at 1,024 in flight, plain two-key writes ran 2,194 calls/s, and atomic
+ones 9, with 1,016 of them failed. The
+oldest call never gives way, so each call commits once it is the oldest one left on its keys.
+Plain writes and `solo` calls hold nothing, and wait as before.
 
 Deadline: `ATOMIC_HOLD_MS` (5 s) after the prepare. The whole call takes a few round trips,
 so a hold reaches its deadline only if its caller is gone or the primary is slow; then the hold's
@@ -216,10 +232,13 @@ call), one outcome, held keys frozen, a hold ending before the next, the caller 
 every committed share applied, every hold ended. Exhaustive in three bounds: two other shards and
 1 fault (1.3M states), one other shard and two calls (5.3M), and 2 faults (48k); safety also
 holds over 9M states with two other shards and 2 faults. Five rules, each needed (check breaks a
-property without it): a prepare waits out another call's hold, writes wait out holds, the commit
+property without it): a prepare gives way to an older call's hold, writes wait out holds, the commit
 answers a recorded outcome, a recovery's ask records the abort it answers, and the client forgets
 only once every share has resolved. Found while modelling: the prepare's wait, which the first
 design lacked, and the stale "abort" a late ask records after a forget (above), which is harmless.
+Calls come one after another in the spec, so a hold another call left is always older there; it
+checks that a call given way holds nothing and is not committed, and the argument above that age
+keeps waits from forming a ring covers calls at the same time.
 
 ### Compatibility and migration
 
@@ -300,6 +319,10 @@ A git server on sharded refs keeps refusing most atomic pushes, which stock git 
 - **The primary's own keys and a stale map.** A client whose map is stale can route a key as
   another shard's when it is the primary's; that share then holds a key in the primary's own
   object. The primary's commit doesn't wait on holds of its own call.
+- **Hot keys and wait-die.** The first design waited out every other call's hold, up to
+  `holdWaitMs`, while keeping its own. Benchmarked on the edge, calls over 8 hot keys collapsed (see
+  *Contention*); `test/atomic.test.ts` has a commit and a prepare that meet an older call's hold and
+  give their keys back at once, and 24 contended calls over three shards that all commit.
 - **Recovery has two triggers:** the alarm at the earliest deadline (the guarantee), and a write
   that waits on a hold past its deadline (sooner).
 - Tested under `cf dev`, `test/atomic.test.ts` (11 tests): commit across two shards; a refusal by

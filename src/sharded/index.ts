@@ -17,7 +17,7 @@
 // The protocol is modelled in specs/snapshot-split.ts and specs/lazy-presplit.ts.
 import { DurableObject } from "cloudflare:workers";
 
-import { ATOMIC_OUTCOME_TTL_MS, type AtomicAnswer, type AtomicMethod, type AtomicStep, type Outcome } from "./atomic.js";
+import { ATOMIC_OUTCOME_TTL_MS, olderTx, type AtomicAnswer, type AtomicMethod, type AtomicStep, type Outcome } from "./atomic.js";
 import { sharded } from "./client.js";
 import { hashBit, keyHash } from "./hash.js";
 
@@ -215,7 +215,7 @@ type Hold = { epoch: number; right: string; released: Promise<void>; deadline: n
 /** An atomic call's share prepared here (RFD0008): its keys are held until it is resolved. */
 type AtomicHold = { readonly tx: string; readonly primaryKey: string; readonly deadline: number; readonly method: string; readonly keys: readonly string[]; readonly staged: unknown };
 /** What a write waits for: a split's hold or an atomic call's (`atomic`), released at the latest around `until`. */
-type Waiting = { readonly released: Promise<void>; readonly until: number; readonly atomic: boolean };
+type Waiting = { readonly released: Promise<void>; readonly until: number; readonly atomic: boolean; readonly tx?: string };
 
 /** Writes to a key an atomic call holds wait for `released`. */
 type HeldKey = { readonly tx: string; readonly deadline: number; readonly released: Promise<void>; readonly release: () => void };
@@ -290,6 +290,8 @@ class NotReady extends Error {
     super("not ready");
   }
 }
+/** An atomic step met an older call's hold: it gives way rather than wait (wait-die, RFD0008). */
+class Contended extends Error {}
 const HOLD_WAIT_MS = 2_000;
 /** Keys whose route hash a shard remembers. */
 const ROUTE_HASHES = 4_096;
@@ -736,14 +738,28 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * holding them, this shard owning them. `gather` (I/O) runs first, and again if a hold appeared
    * while it ran, so the transaction checks rows nobody holds.
    */
-  private async whenFree<T>(keys: readonly string[], exceptTx: string | undefined, gather: () => Promise<unknown>, inTransaction: (gathered: unknown) => T): Promise<T> {
+  private async whenFree<T>(keys: readonly string[], exceptTx: string | undefined, gather: () => Promise<unknown>, inTransaction: (gathered: unknown) => T, requester?: string): Promise<T> {
     for (;;) {
+      // Wait-die: a step of an atomic call waits only on the holds of younger calls, and gives way
+      // to an older one's. Waits then only go from older to younger calls, so no ring of calls
+      // can wait on each other's holds, each holding what the next one needs.
+      this.giveWayToOlder(keys, exceptTx, requester);
       await this.waitForHold(keys, exceptTx);
       const gathered = await gather();
       // No await from here on: the check and the transaction see the same holds and split state.
       if (this.holding(keys, exceptTx)) continue;
       this.assertOwner(keys);
       return this.ctx.storage.transactionSync(() => inTransaction(gathered));
+    }
+  }
+
+  /** Throws Contended if `requester` (an atomic call) meets the hold of an older call on these keys. */
+  private giveWayToOlder(keys: readonly string[], exceptTx: string | undefined, requester: string | undefined): void {
+    if (requester === undefined) return;
+    const held = this.heldKeys();
+    for (const key of keys) {
+      const h = held.get(key);
+      if (h && h.tx !== exceptTx && olderTx(h.tx, requester)) throw new Contended();
     }
   }
 
@@ -804,7 +820,20 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (this.loadHold(step.tx)) return { prepared: true };
     const m = this.atomicMethod(step.method);
     const keysHeld = this.holdKeysOf(m, keys, payloads, args);
-    const done = await this.whenFree(keysHeld, undefined, this.gatherOf(m, keys, payloads, args), (gathered): AtomicAnswer => {
+    let done: AtomicAnswer;
+    try {
+      done = await this.whenFree(keysHeld, undefined, this.gatherOf(m, keys, payloads, args), (gathered): AtomicAnswer => this.prepareShare(step, m, keysHeld, keys, payloads, gathered, args), step.tx);
+    } catch (error) {
+      if (error instanceof Contended) return { contended: true };
+      throw error;
+    }
+    if ("prepared" in done) await this.armAlarm(step.deadline);
+    return done;
+  }
+
+  /** In the transaction that holds them: checks the share, and if it would apply, keeps it and holds its keys. */
+  private prepareShare(step: Extract<AtomicStep, { step: "prepare" }>, m: AtomicMethod<V, unknown, unknown, unknown, unknown>, keysHeld: readonly string[], keys: readonly string[], payloads: readonly unknown[] | null, gathered: unknown, args: readonly unknown[]): AtomicAnswer {
+    {
       const p = this.checkOf(m, this.rowsOf(keysHeld), keys, payloads, gathered, args);
       if ("refused" in p) return { refused: p.refused };
       this.ensureAtomicSchema();
@@ -813,9 +842,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       // Held in memory in the same turn: a write that runs once this transaction is done waits.
       this.holdInMemory({ tx: step.tx, primaryKey: step.primaryKey, deadline: step.deadline, method: step.method, keys: keysHeld, staged: null });
       return { prepared: true };
-    });
-    if ("prepared" in done) await this.armAlarm(step.deadline);
-    return done;
+    }
   }
 
   /**
@@ -827,7 +854,21 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const m = this.atomicMethod(method);
     const hold = this.holdKeysOf(m, keys, payloads, args);
     // Its own shares held here (a client that routed a key here as another shard's) don't block it.
-    const done = await this.whenFree(hold, tx, this.gatherOf(m, keys, payloads, args), (gathered): AtomicAnswer => {
+    let done: AtomicAnswer;
+    try {
+      done = await this.whenFree(hold, tx, this.gatherOf(m, keys, payloads, args), (gathered): AtomicAnswer => this.commitShare(tx, m, hold, keys, payloads, gathered, args), tx);
+    } catch (error) {
+      if (!(error instanceof Contended)) throw error;
+      // Given way to an older call: the outcome is abort, so the shares that hold drop theirs.
+      const outcome = this.recordOutcome(tx, "abort");
+      return outcome === "commit" ? { outcome } : { contended: true };
+    }
+    return "applied" in done && m.applied ? { applied: await m.applied(keys, done.applied) } : done;
+  }
+
+  /** In one transaction: the outcome recorded and the primary's share applied, or refused and aborted. */
+  private commitShare(tx: string, m: AtomicMethod<V, unknown, unknown, unknown, unknown>, hold: readonly string[], keys: readonly string[], payloads: readonly unknown[] | null, gathered: unknown, args: readonly unknown[]): AtomicAnswer {
+    {
       const recorded = this.outcomeOf(tx);
       if (recorded) return { outcome: recorded };
       const current = this.rowsOf(hold);
@@ -840,8 +881,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       const { writes, result } = m.apply(current, p.staged);
       this.writeRows(hold, writes);
       return { applied: result };
-    });
-    return "applied" in done && m.applied ? { applied: await m.applied(keys, done.applied) } : done;
+    }
   }
 
   private outcomeOf(tx: string): Outcome | null {

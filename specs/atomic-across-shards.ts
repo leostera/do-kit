@@ -8,10 +8,14 @@
 // keeps it; the client keeps nothing, so its crash is a caller that died mid-call. Every shard call
 // the client makes is a DO RPC whose failure reaches it (a lost request or a lost answer), and the
 // client handles each failure as atomicAcross does. A prepare or a write that finds the keys held
-// stays in flight until the hold ends, as the RPC waiting on the hold does.
+// stays in flight until the hold ends, as the RPC waiting on the hold does. A prepare that finds
+// them held by an older call gives way instead (wait-die): it holds nothing and answers contended,
+// and the client aborts and makes the call again. Here calls come one after another, so a hold
+// another call left is always older; RFD0008 has why age keeps concurrent calls from waiting in a
+// ring.
 //
 // Each rule is needed; `--without` shows how each property breaks:
-// - waitOutHolds: a second call's prepare overwrites the first's hold (needs two calls, repeats=2);
+// - youngerGivesWay: a second call's prepare overwrites the first's hold (needs two calls, repeats=2);
 // - writesWait: a write lands on a held key;
 // - commitHonoursOutcome: a commit after a recovery's abort applies at the primary only;
 // - recoveryRecordsAbort: an answered abort the primary did not record lets the commit through;
@@ -21,8 +25,8 @@ import { type Ctx, atMost, budget, crash, defineActor, defineCall, defineLimit, 
 type Outcome = "commit" | "abort";
 /** Where the client's call is refused, if anywhere: by no shard, the primary, or the first other shard. */
 type RefusedBy = "none" | "primary" | "other";
-/** What the caller was told: committed, refused, or an error (the outcome unknown to it). */
-type Told = Outcome | "error";
+/** What the caller was told: committed, refused, or an error (the outcome unknown to it); or "retry", the call given way and made again. */
+type Told = Outcome | "error" | "retry";
 
 const faults = budget("faults", 1);
 const repeats = defineVariable("repeats", 1);
@@ -31,6 +35,7 @@ const OutcomeSchema = oneOf("commit", "abort");
 const Prepare = defineCall("Prepare", { tx: String, refuse: Boolean }, { name: "prepare", over: "DO RPC" });
 const Prepared = defineMessage("Prepared", { tx: String, shard: Number }, { name: "prepared", over: "DO RPC", tone: "reply" });
 const PrepareRefused = defineMessage("PrepareRefused", { tx: String, shard: Number }, { name: "refused", over: "DO RPC", tone: "refused" });
+const Contended = defineMessage("Contended", { tx: String, shard: Number }, { name: "contended", over: "DO RPC", tone: "refused" });
 const Commit = defineCall("Commit", { tx: String, refuse: Boolean }, { name: "commit", over: "DO RPC" });
 const Committed = defineMessage("Committed", { tx: String }, { name: "committed", over: "DO RPC", tone: "reply" });
 const NotCommitted = defineMessage("NotCommitted", { tx: String }, { name: "not committed", over: "DO RPC", tone: "refused" });
@@ -42,7 +47,7 @@ const AskOutcome = defineCall("AskOutcome", { tx: String }, { name: "outcome?", 
 const OutcomeIs = defineMessage("OutcomeIs", { tx: String, outcome: OutcomeSchema }, { name: "outcome", over: "DO RPC", tone: "reply" });
 const Write = defineMessage("Write", {}, { name: "write", over: "DO RPC" });
 
-const waitOutHolds = defineRule("waitOutHolds", { description: "A prepare waits until no other call holds its keys." });
+const youngerGivesWay = defineRule("youngerGivesWay", { description: "A prepare that finds its keys held by an older call holds nothing and answers contended; the client aborts and calls again." });
 const writesWait = defineRule("writesWait", { description: "A write to a held key waits until the hold ends." });
 const commitHonoursOutcome = defineRule("commitHonoursOutcome", { description: "The primary's commit answers an outcome recorded already instead of deciding again." });
 const recoveryRecordsAbort = defineRule("recoveryRecordsAbort", { description: "Asked for an outcome it has not recorded, the primary records an abort before it answers one." });
@@ -56,9 +61,10 @@ const holdDeadline = defineLimit({ name: "Hold deadline", value: 5, unit: "secon
 type ClientState = {
   tx: string | null;
   refuse: RefusedBy;
-  /** Shards (by index) that answered prepared, refused, and whether every prepare has answered. */
+  /** Shards (by index) that answered prepared, refused, or contended, and whether every prepare has answered. */
   prepared: number[];
   refusedBy: number[];
+  contendedBy: number[];
   answered: number;
   /** The call is past its prepares: committing, resolving, or done. */
   decided: boolean;
@@ -73,7 +79,7 @@ export const Client = defineActor({
   description: "The Worker making the atomic call (ShardedClient.atomically).",
   zone: workers,
   singleton: true,
-  initialState: (): ClientState => ({ tx: null, refuse: "none", prepared: [], refusedBy: [], answered: 0, decided: false, outcome: null, resolved: 0, resolveFailed: false, told: null }),
+  initialState: (): ClientState => ({ tx: null, refuse: "none", prepared: [], refusedBy: [], contendedBy: [], answered: 0, decided: false, outcome: null, resolved: 0, resolveFailed: false, told: null }),
   display: {
     icon: "code",
     status: (s) => (s.told ? `told: ${s.told}` : s.tx ? (s.decided ? "committing" : `${s.answered} prepare(s) answered`) : "idle"),
@@ -89,7 +95,7 @@ export const Client = defineActor({
       sources: ["src/sharded/client.ts#ShardedClient.atomically", "src/sharded/client.ts#ShardedClient.atomicAcross"],
       sends: [Prepare],
       run(s, { refuse }, ctx) {
-        Object.assign(s, { tx: ctx.fresh("tx"), refuse: refuse as RefusedBy, prepared: [], refusedBy: [], answered: 0, decided: false, outcome: null, resolved: 0, resolveFailed: false, told: null });
+        Object.assign(s, { tx: ctx.fresh("tx"), refuse: refuse as RefusedBy, prepared: [], refusedBy: [], contendedBy: [], answered: 0, decided: false, outcome: null, resolved: 0, resolveFailed: false, told: null });
         ctx.all(Other).forEach((o, i) => ctx.send(o, Prepare, { tx: s.tx!, refuse: s.refuse === "other" && i === 0 }));
       },
     },
@@ -115,6 +121,18 @@ export const Client = defineActor({
       run(s, msg, ctx) {
         if (msg.tx !== s.tx || s.decided) return;
         s.refusedBy.push(msg.shard);
+        s.answered++;
+        afterPrepares(s, ctx);
+      },
+    },
+    contended: {
+      on: Contended,
+      description: "Counts a share that gave way to an older call; once every prepare has answered, aborts and calls again.",
+      sources: ["src/sharded/client.ts#ShardedClient.atomicAcross", "src/sharded/client.ts#ShardedClient.atomically"],
+      sends: [Commit, Decide, Resolve],
+      run(s, msg, ctx) {
+        if (msg.tx !== s.tx || s.decided) return;
+        s.contendedBy.push(msg.shard);
         s.answered++;
         afterPrepares(s, ctx);
       },
@@ -205,6 +223,7 @@ export const Client = defineActor({
     },
     preparedLost: lose(Prepared, { fails: Prepare, spend: faults }),
     prepareRefusedLost: lose(PrepareRefused, { fails: Prepare, spend: faults }),
+    contendedLost: lose(Contended, { fails: Prepare, spend: faults }),
     committedLost: lose(Committed, { fails: Commit, spend: faults }),
     notCommittedLost: lose(NotCommitted, { fails: Commit, spend: faults }),
     resolvedLost: lose(Resolved, { fails: Resolve, spend: faults }),
@@ -215,14 +234,15 @@ export const Client = defineActor({
 
 type ClientCtx = Ctx<typeof Commit | typeof Decide | typeof Resolve>;
 
-/** After the last prepare answers: refused anywhere, abort (recorded at the primary first); else commit at the primary. */
+/** After the last prepare answers: refused or given way anywhere, abort (recorded at the primary first); else commit at the primary. */
 function afterPrepares(s: ClientState, ctx: ClientCtx): void {
   if (s.answered < ctx.all(Other).length) return;
   s.decided = true;
-  if (s.refusedBy.length > 0) {
+  if (s.refusedBy.length > 0 || s.contendedBy.length > 0) {
     ctx.send(ctx.the(Primary), Decide, { tx: s.tx! });
     resolveAll(s, "abort", ctx);
-    s.told = "abort";
+    // Refused wins: the call would be refused again. Given way, the client calls again (the next `call`).
+    s.told = s.refusedBy.length > 0 ? "abort" : "retry";
     return;
   }
   ctx.send(ctx.the(Primary), Commit, { tx: s.tx!, refuse: s.refuse === "primary" });
@@ -333,12 +353,12 @@ export const Other = defineActor({
   transitions: {
     prepare: {
       on: Prepare,
-      when: (s) => !waitOutHolds.on || s.hold === null,
-      description: "Once no other call holds the keys, checks its share and, if it would apply, keeps it and holds the keys (writes to them now wait).",
-      sources: ["src/sharded/index.ts#ShardedObject.atomicPrepare", "src/sharded/index.ts#ShardedObject.whenFree", "src/sharded/index.ts#ShardedObject.waitForHold"],
-      sends: [Prepared, PrepareRefused],
+      description: "Keys held by an older call: gives way, holding nothing. Else checks its share and, if it would apply, keeps it and holds the keys (writes to them now wait).",
+      sources: ["src/sharded/index.ts#ShardedObject.atomicPrepare", "src/sharded/index.ts#ShardedObject.whenFree", "src/sharded/index.ts#ShardedObject.giveWayToOlder"],
+      sends: [Prepared, PrepareRefused, Contended],
       run(s, msg, ctx) {
         const shard = ctx.all(Other).findIndex((o) => o.id === ctx.id);
+        if (youngerGivesWay.on && s.hold !== null && s.hold.tx !== msg.tx) return ctx.reply(Contended, { tx: msg.tx, shard });
         if (msg.refuse) return ctx.reply(PrepareRefused, { tx: msg.tx, shard });
         s.hold = { tx: msg.tx };
         s.prepared.push(msg.tx);
@@ -456,6 +476,7 @@ const callerToldTheTruth = defineProperty("callerToldTheTruth", {
   always: (w) => {
     const c = w.the(Client).state;
     if (c.tx === null || c.told === null || c.told === "error") return true;
+    // "retry": the call is made again, so it must not have applied anywhere.
     return c.told === "commit" ? committed(w, c.tx) : !committed(w, c.tx);
   },
 });
@@ -463,7 +484,7 @@ const callerToldTheTruth = defineProperty("callerToldTheTruth", {
 const holdsEndBeforeTheNext = defineProperty("holdsEndBeforeTheNext", {
   description: "A shard's hold for one call ends before it holds the keys for another.",
   everyStep: (before, after) => before.all(Other).every((o, i) => o.state.hold === null || (after.all(Other)[i]?.state.hold ?? null) === null || after.all(Other)[i]!.state.hold!.tx === o.state.hold.tx),
-  needs: [waitOutHolds],
+  needs: [youngerGivesWay],
 });
 
 const committedSharesApply = defineProperty("committedSharesApply", {
@@ -541,13 +562,26 @@ const lateAsk = defineScenario("A recovery's ask arrives after the forget", {
   },
 });
 
+const givesWay = defineScenario("A call gives way to an older call's hold", {
+  description: "A caller dies holding a shard's keys; the next call's prepare there gives way at once, holding nothing, and the call aborts to be made again. The old hold ends at its deadline, aborted.",
+  run(s) {
+    s.spawn(Other, "Shard 1");
+    s.act(s.the(Client), "call", { refuse: "none" });
+    s.settle({ until: (w) => w.all(Other).every((o) => o.state.hold !== null) });
+    s.step(s.the(Client), "crash");
+    s.act(s.the(Client), "call", { refuse: "none" });
+    s.settle({ until: (w) => w.the(Client).state.told === "retry" });
+    s.settle();
+  },
+});
+
 export default defineSpec({
   name: "Atomic calls across shards",
   description: "How a call over keys in several shards applies in all of them or in none, whether its caller stays or goes.",
   actors: [Client, Primary, Other, Writer],
   limits: [holdDeadline],
   properties: [allOrNothing, oneOutcome, heldKeysAreFrozen, holdsEndBeforeTheNext, callerToldTheTruth, committedSharesApply, everyHoldEnds],
-  scenarios: [commitAcross, refusedByAShard, callerDies, recoveryFirst, lateAsk],
+  scenarios: [commitAcross, refusedByAShard, callerDies, recoveryFirst, lateAsk, givesWay],
   finalState: {
     description: "No shard holds keys, nothing is in flight, and the caller has its answer or is gone.",
     when: (w) => w.quiet && w.all(Other).every((o) => o.state.hold === null) && (w.the(Client).state.tx === null || w.the(Client).state.told !== null),

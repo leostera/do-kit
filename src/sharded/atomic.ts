@@ -60,7 +60,26 @@ export type AtomicAnswer =
   | { readonly prepared: true }
   | { readonly outcome: Outcome }
   /** A resolve for a share that is not held here (already resolved, or never prepared). */
-  | { readonly gone: true };
+  | { readonly gone: true }
+  /**
+   * A prepare or commit that met an older call's hold on its keys: nothing is held or applied for
+   * it (a commit records an abort), and the client aborts and retries the call (wait-die).
+   */
+  | { readonly contended: true };
+
+/**
+ * A call's id, which orders calls by age: its first attempt's start (fixed width, so ids sort as
+ * the times do) and a random part. Retries keep the start, so a call that keeps meeting holds
+ * becomes the oldest, and the oldest call never gives way (wait-die).
+ */
+export function atomicTxId(startedAt: number): string {
+  return `${String(startedAt).padStart(15, "0")}-${crypto.randomUUID()}`;
+}
+
+/** Whether call `a` is older than call `b`, by their ids: only an older call waits on another's hold. */
+export function olderTx(a: string, b: string): boolean {
+  return a < b;
+}
 
 /**
  * How long a share holds its keys before it asks the primary for the outcome. The whole call

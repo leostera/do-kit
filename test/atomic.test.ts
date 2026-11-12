@@ -277,3 +277,79 @@ test("transfers racing across shards, with plain writes beside them, never lose 
   expect([...l.holds, ...r.holds]).toEqual([]);
   console.log(JSON.stringify({ committed, refused, deposits }));
 }, 60_000);
+
+test("a call whose commit meets an older call's hold gives its keys back at once, and commits once that hold ends", async () => {
+  const name = `atomic-gives-way-${unique()}`;
+  const { left, right } = keysByHalf(2);
+  // The primary's key sorts first; the call's other key is in the other shard.
+  const [a, b] = [left[0]!, right[0]!].sort() as [string, string];
+  const [aBits, bBits] = [half(a), half(b)];
+  await twoShards(name, { [a]: 100, [b]: 100 });
+  // An older call, from a caller that stopped, holds `a` for 3 s. Its primary is in a's shard.
+  const older = `${String(Date.now() - 60_000).padStart(15, "0")}-older`;
+  const otherInA = (aBits === "0" ? left : right).find((k) => k !== a)!;
+  const held = await step(name, aBits, { step: "prepare", tx: older, method: "transfer", primaryKey: otherInA, deadline: Date.now() + 3_000 }, [a], [0]);
+  expect(held.ok).toEqual({ prepared: true });
+  // A younger call: its prepare holds `b`, then its commit at a's shard meets the older hold.
+  const start = Date.now();
+  const call1 = atomically(name, [a, b], [-10, 10]);
+  await Bun.sleep(300);
+  // It does not keep `b` while it waits: a write to `b` goes through at once.
+  const writeStart = Date.now();
+  await call("counters", name, "add", [b], [1]);
+  expect(Date.now() - writeStart).toBeLessThan(1_000);
+  // Once the older hold ends (aborted at its deadline), the call commits.
+  const out = await call1;
+  expect(out.committed).toBe(true);
+  expect(Date.now() - start).toBeGreaterThan(2_500);
+  expect(await values(name, [a, b])).toEqual([90, 111]);
+  const [l, r] = await Promise.all([tables(name, "0"), tables(name, "1")]);
+  expect([...l.holds, ...r.holds]).toEqual([]);
+}, 60_000);
+
+/** One key in each of the four shards of a presplit tree (depth 2), sorted, with each one's shard. */
+function keysByQuarter(): { keys: string[]; bits: Record<string, string> } {
+  const quarter = (key: string) => hashBit(keyHash(key), 0) + hashBit(keyHash(key), 1);
+  const bits: Record<string, string> = {};
+  const seen = new Set<string>();
+  for (let i = 0; seen.size < 4; i++) {
+    const q = quarter(`k${i}`);
+    if (seen.has(q)) continue;
+    seen.add(q);
+    bits[`k${i}`] = q;
+  }
+  return { keys: Object.keys(bits).sort(), bits };
+}
+
+test("a call whose prepare meets an older call's hold gives back what its other prepares hold, at once", async () => {
+  const name = `atomic-prepare-gives-way-${unique()}`;
+  const { keys, bits } = keysByQuarter();
+  const [p, r, s] = keys as [string, string, string];
+  await call("presplit", name, "add", [p, r, s], [100, 100, 100]);
+  // An older call, from a caller that stopped, holds `s` for 3 s.
+  const older = `${String(Date.now() - 60_000).padStart(15, "0")}-older`;
+  const held = await post<{ ok?: unknown }>("/atomicStep", { cls: "presplit", name, bits: bits[s], step: { step: "prepare", tx: older, method: "transfer", primaryKey: s, deadline: Date.now() + 3_000 }, keys: [s], payloads: [0] });
+  expect(held.ok).toEqual({ prepared: true });
+  // A younger call prepares `r` and `s` at once: `s` is held, so it lets `r` go.
+  const younger = post<Outcome>("/atomically", { cls: "presplit", name, method: "transfer", keys: [p, r, s], payloads: [-10, 5, 5] });
+  await Bun.sleep(300);
+  const writeStart = Date.now();
+  await call("presplit", name, "add", [r], [1]);
+  expect(Date.now() - writeStart).toBeLessThan(1_000);
+  expect((await younger).committed).toBe(true);
+  expect(await call("presplit", name, "get", [p, r, s])).toEqual([90, 106, 105]);
+}, 60_000);
+
+test("many calls over the same keys in three shards all commit, and keep the total", async () => {
+  // Each call prepares in two shards at once: the calls that give way retry until each is the oldest.
+  const name = `atomic-contended-${unique()}`;
+  const keys = keysByQuarter().keys.slice(0, 3);
+  await call("presplit", name, "add", keys, [1000, 1000, 1000]);
+  const rounds = Array.from({ length: 24 }, async (_, i) => {
+    const deltas = [[-1, 2, -1], [2, -1, -1], [-1, -1, 2]][i % 3]!;
+    const out = await post<Outcome>("/atomically", { cls: "presplit", name, method: "transfer", keys, payloads: deltas });
+    expect(out.committed).toBe(true);
+  });
+  await Promise.all(rounds);
+  expect(await call("presplit", name, "get", keys)).toEqual([1000, 1000, 1000]);
+}, 120_000);
