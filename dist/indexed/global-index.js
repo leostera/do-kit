@@ -101,6 +101,9 @@ export class GlobalIndex extends ShardedObject {
     async reserve(route, entry, owner) {
         for (let round = 0;; round++) {
             const now = Date.now();
+            // Before the transaction, as a row shard's outbox does: a reservation is never stored without
+            // the alarm that resolves it, if its writer never writes (asking may fail, or never come).
+            await this.wake(now + this.reservationTimeoutMs);
             const decided = await this.transact([route], () => {
                 const e = this.get(route, entry);
                 const fresh = () => {
@@ -124,11 +127,8 @@ export class GlobalIndex extends ShardedObject {
                     return { taken: e.owner };
                 return { resolve: { owner: e.owner, token: e.issued } };
             });
-            if (!("resolve" in decided)) {
-                if ("reserved" in decided)
-                    await this.wake(now + this.reservationTimeoutMs);
+            if (!("resolve" in decided))
                 return decided;
-            }
             if (round >= RESOLVE_ROUNDS)
                 return { contended: true };
             await this.resolve(route, entry, decided.resolve.owner, decided.resolve.token);
