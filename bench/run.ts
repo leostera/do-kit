@@ -110,7 +110,9 @@ async function measure(config: {
     }
     if (response.ok) {
       try {
-        return JSON.parse(text) as Point;
+        const point = JSON.parse(text) as Point | null;
+        // Anything but a measured point (the Worker answered null, say) is a failed attempt.
+        if (point !== null && typeof point === "object" && typeof point.operationsPerSecond === "number") return point;
       } catch {
         // not JSON: fall through
       }
