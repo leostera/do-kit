@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
-  "suite": "bench-593a4c76f40a",
-  "generatedAt": "2026-11-12T12:54:40.447Z",
+  "suite": "bench-cfc5b3d3afd3",
+  "generatedAt": "2026-11-12T18:39:27.028Z",
   "provenance": {
-    "commit": "3ed0436f9874f2840a803afcad6201e029919b3d",
-    "dirty": true,
+    "commit": "442c5366f7ab6804d015354b0d9cb851470873e6",
+    "dirty": false,
     "doKitVersion": "0.4.0",
-    "workerVersion": "eec48ace-4b7f-468e-8b32-5d95646572cc"
+    "workerVersion": "91d33290-cf18-48d5-b6f6-807c86b46af9"
   },
   "runtime": {
     "compatibilityDate": "2026-10-29",
@@ -43,27 +43,28 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-uniform",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-uniform",
       "driverCount": 1,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 249,
+      "successes": 83,
       "errors": 0,
-      "elapsedMs": 10001,
-      "operationsPerSecond": 24.897510248975102,
-      "mebibytesPerSecond": 0.0486279497050295,
+      "elapsedMs": 10013,
+      "operationsPerSecond": 8.289224008788574,
+      "mebibytesPerSecond": 0.016189890642165184,
       "latencyMs": {
-        "p50": 40,
-        "p95": 71,
-        "p99": 74,
-        "max": 89
+        "p50": 105,
+        "p95": 269,
+        "p99": 435,
+        "max": 434
       },
       "topology": {
         "leaves": 16,
-        "rows": 815,
+        "rows": 237,
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -74,27 +75,28 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-uniform",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-uniform",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 1643,
+      "successes": 930,
       "errors": 0,
-      "elapsedMs": 10204,
-      "operationsPerSecond": 161.01528812230498,
-      "mebibytesPerSecond": 0.3144829846138769,
+      "elapsedMs": 10600,
+      "operationsPerSecond": 87.73584905660378,
+      "mebibytesPerSecond": 0.17135908018867926,
       "latencyMs": {
-        "p50": 76,
-        "p95": 204,
-        "p99": 226,
-        "max": 594
+        "p50": 147,
+        "p95": 339,
+        "p99": 760,
+        "max": 2054
       },
       "topology": {
         "leaves": 16,
-        "rows": 4961,
+        "rows": 2844,
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -105,27 +107,28 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-uniform",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-uniform",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 6674,
+      "successes": 3535,
       "errors": 0,
-      "elapsedMs": 10254,
-      "operationsPerSecond": 650.8679539691827,
-      "mebibytesPerSecond": 1.27122647259606,
+      "elapsedMs": 10443,
+      "operationsPerSecond": 338.5042612276166,
+      "mebibytesPerSecond": 0.6611411352101887,
       "latencyMs": {
-        "p50": 65,
-        "p95": 306,
-        "p99": 414,
-        "max": 921
+        "p50": 123,
+        "p95": 513,
+        "p99": 814,
+        "max": 2145
       },
       "topology": {
         "leaves": 16,
-        "rows": 9620,
+        "rows": 8286,
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -136,27 +139,28 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-uniform",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-uniform",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 8192,
+      "successes": 6908,
       "errors": 0,
-      "elapsedMs": 10961,
-      "operationsPerSecond": 747.3770641364839,
-      "mebibytesPerSecond": 1.4597208283915701,
+      "elapsedMs": 14350,
+      "operationsPerSecond": 481.3937282229965,
+      "mebibytesPerSecond": 0.9402221254355401,
       "latencyMs": {
-        "p50": 214,
-        "p95": 900,
-        "p99": 998,
-        "max": 1483
+        "p50": 223,
+        "p95": 1070,
+        "p99": 1766,
+        "max": 5862
       },
       "topology": {
         "leaves": 16,
-        "rows": 9989,
+        "rows": 9892,
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -167,20 +171,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-uniform",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-uniform",
       "driverCount": 64,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 31909,
+      "successes": 21512,
       "errors": 0,
-      "elapsedMs": 11246,
-      "operationsPerSecond": 2837.3643962297706,
-      "mebibytesPerSecond": 5.541727336386271,
+      "elapsedMs": 12553,
+      "operationsPerSecond": 1713.6939377041344,
+      "mebibytesPerSecond": 3.3470584720783876,
       "latencyMs": {
-        "p50": 211,
-        "p95": 1039,
-        "p99": 1213,
-        "max": 3851
+        "p50": 352,
+        "p95": 1299,
+        "p99": 1732,
+        "max": 3827
       },
       "topology": {
         "leaves": 16,
@@ -188,6 +192,7 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -198,20 +203,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-hot",
       "driverCount": 1,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 955,
+      "successes": 140,
       "errors": 0,
-      "elapsedMs": 10004,
-      "operationsPerSecond": 95.46181527389045,
-      "mebibytesPerSecond": 0.1864488579568173,
+      "elapsedMs": 10046,
+      "operationsPerSecond": 13.935894883535736,
+      "mebibytesPerSecond": 0.027218544694405735,
       "latencyMs": {
-        "p50": 11,
-        "p95": 15,
-        "p99": 23,
-        "max": 124
+        "p50": 77,
+        "p95": 96,
+        "p99": 132,
+        "max": 264
       },
       "topology": {
         "leaves": 5,
@@ -219,6 +224,7 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -229,20 +235,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 3053,
+      "successes": 1602,
       "errors": 0,
-      "elapsedMs": 10197,
-      "operationsPerSecond": 299.40178483867805,
-      "mebibytesPerSecond": 0.5847691110130431,
+      "elapsedMs": 10160,
+      "operationsPerSecond": 157.6771653543307,
+      "mebibytesPerSecond": 0.30796321358267714,
       "latencyMs": {
-        "p50": 34,
-        "p95": 170,
-        "p99": 221,
-        "max": 425
+        "p50": 75,
+        "p95": 236,
+        "p99": 370,
+        "max": 1809
       },
       "topology": {
         "leaves": 5,
@@ -250,6 +256,7 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -260,20 +267,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 8431,
+      "successes": 5470,
       "errors": 0,
-      "elapsedMs": 10420,
-      "operationsPerSecond": 809.1170825335893,
-      "mebibytesPerSecond": 1.5803068018234165,
+      "elapsedMs": 10649,
+      "operationsPerSecond": 513.6632547657057,
+      "mebibytesPerSecond": 1.003248544464269,
       "latencyMs": {
-        "p50": 42,
-        "p95": 287,
-        "p99": 424,
-        "max": 663
+        "p50": 70,
+        "p95": 401,
+        "p99": 514,
+        "max": 1414
       },
       "topology": {
         "leaves": 5,
@@ -281,6 +288,7 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -291,20 +299,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 11226,
+      "successes": 7055,
       "errors": 0,
-      "elapsedMs": 11029,
-      "operationsPerSecond": 1017.8620001813401,
-      "mebibytesPerSecond": 1.98801171910418,
+      "elapsedMs": 11659,
+      "operationsPerSecond": 605.1119306973153,
+      "mebibytesPerSecond": 1.181859239643194,
       "latencyMs": {
-        "p50": 149,
-        "p95": 798,
-        "p99": 1074,
-        "max": 1870
+        "p50": 263,
+        "p95": 945,
+        "p99": 1503,
+        "max": 3001
       },
       "topology": {
         "leaves": 5,
@@ -312,6 +320,7 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -322,20 +331,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-2-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-2-hot",
       "driverCount": 64,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 24875,
+      "successes": 20463,
       "errors": 0,
-      "elapsedMs": 11340,
-      "operationsPerSecond": 2193.5626102292767,
-      "mebibytesPerSecond": 4.284301973104056,
+      "elapsedMs": 11820,
+      "operationsPerSecond": 1731.218274111675,
+      "mebibytesPerSecond": 3.3812856916243654,
       "latencyMs": {
-        "p50": 347,
-        "p95": 1113,
-        "p99": 1431,
-        "max": 2082
+        "p50": 380,
+        "p95": 1388,
+        "p99": 1661,
+        "max": 3184
       },
       "topology": {
         "leaves": 5,
@@ -343,6 +352,7 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -353,27 +363,28 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-uniform",
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-uniform",
       "driverCount": 1,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 43,
+      "successes": 22,
       "errors": 0,
-      "elapsedMs": 10038,
-      "operationsPerSecond": 4.283721856943614,
-      "mebibytesPerSecond": 0.008366644251842996,
+      "elapsedMs": 10167,
+      "operationsPerSecond": 2.1638634798859053,
+      "mebibytesPerSecond": 0.004226295859152159,
       "latencyMs": {
-        "p50": 250,
-        "p95": 325,
-        "p99": 367,
-        "max": 366
+        "p50": 382,
+        "p95": 942,
+        "p99": 1326,
+        "max": 1325
       },
       "topology": {
         "leaves": 16,
-        "rows": 144,
+        "rows": 66,
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -384,27 +395,28 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-uniform",
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-uniform",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 423,
+      "successes": 271,
       "errors": 0,
-      "elapsedMs": 10789,
-      "operationsPerSecond": 39.20659931411623,
-      "mebibytesPerSecond": 0.07657538928538327,
+      "elapsedMs": 11784,
+      "operationsPerSecond": 22.997284453496263,
+      "mebibytesPerSecond": 0.04491657119823489,
       "latencyMs": {
-        "p50": 291,
-        "p95": 912,
-        "p99": 1529,
-        "max": 2272
+        "p50": 508,
+        "p95": 1160,
+        "p99": 1921,
+        "max": 2971
       },
       "topology": {
         "leaves": 16,
-        "rows": 1607,
+        "rows": 1007,
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -415,368 +427,89 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-uniform",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 1837,
-      "errors": 0,
-      "elapsedMs": 11196,
-      "operationsPerSecond": 164.07645587709897,
-      "mebibytesPerSecond": 0.3204618278849589,
-      "latencyMs": {
-        "p50": 273,
-        "p95": 787,
-        "p99": 1049,
-        "max": 2720
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 5844,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-2",
-      "distribution": "uniform",
-      "concurrency": 256,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-uniform",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 6299,
-      "errors": 0,
-      "elapsedMs": 12842,
-      "operationsPerSecond": 490.4999221305092,
-      "mebibytesPerSecond": 0.9580076604111508,
-      "latencyMs": {
-        "p50": 279,
-        "p95": 1206,
-        "p99": 1664,
-        "max": 6938
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 9632,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-2",
-      "distribution": "uniform",
-      "concurrency": 1024,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-uniform",
-      "driverCount": 64,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 20317,
-      "errors": 0,
-      "elapsedMs": 13587,
-      "operationsPerSecond": 1495.3264149554723,
-      "mebibytesPerSecond": 2.920559404209907,
-      "latencyMs": {
-        "p50": 349,
-        "p95": 1301,
-        "p99": 1857,
-        "max": 6812
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 10000,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-2",
-      "distribution": "hot",
-      "concurrency": 1,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-hot",
-      "driverCount": 1,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 49,
-      "errors": 0,
-      "elapsedMs": 10087,
-      "operationsPerSecond": 4.857737682165163,
-      "mebibytesPerSecond": 0.009487768910478834,
-      "latencyMs": {
-        "p50": 203,
-        "p95": 341,
-        "p99": 415,
-        "max": 414
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-2",
-      "distribution": "hot",
-      "concurrency": 16,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-hot",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 157,
-      "errors": 0,
-      "elapsedMs": 11400,
-      "operationsPerSecond": 13.771929824561402,
-      "mebibytesPerSecond": 0.02689830043859649,
-      "latencyMs": {
-        "p50": 889,
-        "p95": 2830,
-        "p99": 3233,
-        "max": 3261
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-2",
-      "distribution": "hot",
-      "concurrency": 64,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-uniform",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [
+        "Network connection lost."
+      ],
+      "successes": 1233,
+      "errors": 1,
+      "elapsedMs": 17284,
+      "operationsPerSecond": 71.33765332099051,
+      "mebibytesPerSecond": 0.1393313541425596,
+      "latencyMs": {
+        "p50": 451,
+        "p95": 909,
+        "p99": 1482,
+        "max": 13068
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 4487,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": "Network connection lost."
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-2",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 4357,
+      "errors": 0,
+      "elapsedMs": 13859,
+      "operationsPerSecond": 314.38054693700843,
+      "mebibytesPerSecond": 0.6140245057363446,
+      "latencyMs": {
+        "p50": 466,
+        "p95": 1411,
+        "p99": 2358,
+        "max": 4599
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 9023,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-2",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "Network connection lost.",
         "atomic put refused"
       ],
-      "successes": 154,
-      "errors": 38,
-      "elapsedMs": 14182,
-      "operationsPerSecond": 10.85883514313919,
-      "mebibytesPerSecond": 0.02120866238894373,
+      "successes": 15349,
+      "errors": 13,
+      "elapsedMs": 26939,
+      "operationsPerSecond": 569.7687367756783,
+      "mebibytesPerSecond": 1.1128295640149968,
       "latencyMs": {
-        "p50": 4014,
-        "p95": 10657,
-        "p99": 13223,
-        "max": 14074
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": "atomic put refused"
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-2",
-      "distribution": "hot",
-      "concurrency": 256,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-hot",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [
-        "atomic put refused"
-      ],
-      "successes": 211,
-      "errors": 273,
-      "elapsedMs": 16286,
-      "operationsPerSecond": 12.955913054156943,
-      "mebibytesPerSecond": 0.02530451768390028,
-      "latencyMs": {
-        "p50": 6857,
-        "p95": 14513,
-        "p99": 14813,
-        "max": 16046
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": "atomic put refused"
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-2",
-      "distribution": "hot",
-      "concurrency": 1024,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-2-hot",
-      "driverCount": 64,
-      "failedDrivers": 0,
-      "errorSamples": [
-        "atomic put refused",
-        "no answer in 30 s"
-      ],
-      "successes": 272,
-      "errors": 1016,
-      "elapsedMs": 30807,
-      "operationsPerSecond": 8.829162203395333,
-      "mebibytesPerSecond": 0.017815046093420328,
-      "latencyMs": {
-        "p50": 13512,
-        "p95": 25180,
-        "p99": 30001,
-        "max": 30000
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": "atomic put refused"
-    },
-    {
-      "target": "presplit",
-      "operation": "multi-4",
-      "distribution": "uniform",
-      "concurrency": 1,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-uniform",
-      "driverCount": 1,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 159,
-      "errors": 0,
-      "elapsedMs": 10045,
-      "operationsPerSecond": 15.828770532603285,
-      "mebibytesPerSecond": 0.06183113489298158,
-      "latencyMs": {
-        "p50": 65,
-        "p95": 89,
-        "p99": 108,
-        "max": 120
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 1105,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "multi-4",
-      "distribution": "uniform",
-      "concurrency": 16,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-uniform",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 1326,
-      "errors": 0,
-      "elapsedMs": 10337,
-      "operationsPerSecond": 128.2770629776531,
-      "mebibytesPerSecond": 0.5010822772564574,
-      "latencyMs": {
-        "p50": 85,
-        "p95": 263,
-        "p99": 437,
-        "max": 934
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 6696,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "multi-4",
-      "distribution": "uniform",
-      "concurrency": 64,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-uniform",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 4138,
-      "errors": 0,
-      "elapsedMs": 11840,
-      "operationsPerSecond": 349.4932432432432,
-      "mebibytesPerSecond": 1.3652079814189189,
-      "latencyMs": {
-        "p50": 90,
-        "p95": 508,
-        "p99": 692,
-        "max": 3344
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 9861,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "multi-4",
-      "distribution": "uniform",
-      "concurrency": 256,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-uniform",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 4517,
-      "errors": 0,
-      "elapsedMs": 11926,
-      "operationsPerSecond": 378.7523058862988,
-      "mebibytesPerSecond": 1.4795011948683547,
-      "latencyMs": {
-        "p50": 326,
-        "p95": 1622,
-        "p99": 2117,
-        "max": 3663
+        "p50": 551,
+        "p95": 1497,
+        "p99": 2281,
+        "max": 22783
       },
       "topology": {
         "leaves": 16,
@@ -784,61 +517,31 @@
         "depth": 4
       },
       "leased": null,
-      "errorSample": null
+      "stalls": [],
+      "errorSample": "Network connection lost."
     },
     {
       "target": "presplit",
-      "operation": "multi-4",
-      "distribution": "uniform",
-      "concurrency": 1024,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-uniform",
-      "driverCount": 64,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 15465,
-      "errors": 0,
-      "elapsedMs": 13476,
-      "operationsPerSecond": 1147.5957257346392,
-      "mebibytesPerSecond": 4.4827958036509346,
-      "latencyMs": {
-        "p50": 435,
-        "p95": 1976,
-        "p99": 2362,
-        "max": 3848
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 10000,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "multi-4",
+      "operation": "atomic-2",
       "distribution": "hot",
       "concurrency": 1,
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-hot",
       "driverCount": 1,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 174,
+      "successes": 51,
       "errors": 0,
-      "elapsedMs": 10036,
-      "operationsPerSecond": 17.33758469509765,
-      "mebibytesPerSecond": 0.0677249402152252,
+      "elapsedMs": 10040,
+      "operationsPerSecond": 5.079681274900399,
+      "mebibytesPerSecond": 0.009921252490039842,
       "latencyMs": {
-        "p50": 59,
-        "p95": 75,
-        "p99": 85,
-        "max": 89
+        "p50": 200,
+        "p95": 326,
+        "p99": 396,
+        "max": 395
       },
       "topology": {
         "leaves": 5,
@@ -846,30 +549,31 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
       "target": "presplit",
-      "operation": "multi-4",
+      "operation": "atomic-2",
       "distribution": "hot",
       "concurrency": 16,
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 1603,
+      "successes": 159,
       "errors": 0,
-      "elapsedMs": 11066,
-      "operationsPerSecond": 144.85812398337248,
-      "mebibytesPerSecond": 0.5658520468100487,
+      "elapsedMs": 12428,
+      "operationsPerSecond": 12.79369166398455,
+      "mebibytesPerSecond": 0.024987679031219824,
       "latencyMs": {
-        "p50": 66,
-        "p95": 233,
-        "p99": 433,
-        "max": 1390
+        "p50": 763,
+        "p95": 3111,
+        "p99": 3633,
+        "max": 4265
       },
       "topology": {
         "leaves": 5,
@@ -877,30 +581,31 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
       "target": "presplit",
-      "operation": "multi-4",
+      "operation": "atomic-2",
       "distribution": "hot",
       "concurrency": 64,
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-hot",
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 4352,
+      "successes": 201,
       "errors": 0,
-      "elapsedMs": 10973,
-      "operationsPerSecond": 396.60986056684584,
-      "mebibytesPerSecond": 1.5492572678392416,
+      "elapsedMs": 17453,
+      "operationsPerSecond": 11.516644702916404,
+      "mebibytesPerSecond": 0.0224934466853836,
       "latencyMs": {
-        "p50": 93,
-        "p95": 463,
-        "p99": 657,
-        "max": 2891
+        "p50": 3541,
+        "p95": 11136,
+        "p99": 12415,
+        "max": 14489
       },
       "topology": {
         "leaves": 5,
@@ -908,382 +613,32 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
       "target": "presplit",
-      "operation": "multi-4",
+      "operation": "atomic-2",
       "distribution": "hot",
       "concurrency": 256,
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-hot",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 4755,
-      "errors": 0,
-      "elapsedMs": 12141,
-      "operationsPerSecond": 391.64813442055845,
-      "mebibytesPerSecond": 1.5298755250803064,
-      "latencyMs": {
-        "p50": 336,
-        "p95": 1552,
-        "p99": 1801,
-        "max": 2936
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "multi-4",
-      "distribution": "hot",
-      "concurrency": 1024,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-multi-4-hot",
-      "driverCount": 64,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 12571,
-      "errors": 0,
-      "elapsedMs": 12985,
-      "operationsPerSecond": 968.1170581440124,
-      "mebibytesPerSecond": 3.7817072583750484,
-      "latencyMs": {
-        "p50": 636,
-        "p95": 2017,
-        "p99": 2349,
-        "max": 7069
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "uniform",
-      "concurrency": 1,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-uniform",
-      "driverCount": 1,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 22,
-      "errors": 0,
-      "elapsedMs": 10036,
-      "operationsPerSecond": 2.19210840972499,
-      "mebibytesPerSecond": 0.008562923475488243,
-      "latencyMs": {
-        "p50": 369,
-        "p95": 511,
-        "p99": 2622,
-        "max": 2621
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 168,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "uniform",
-      "concurrency": 16,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-uniform",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 360,
-      "errors": 0,
-      "elapsedMs": 14722,
-      "operationsPerSecond": 24.453199293574244,
-      "mebibytesPerSecond": 0.09552030974052439,
-      "latencyMs": {
-        "p50": 343,
-        "p95": 896,
-        "p99": 1992,
-        "max": 5657
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 2445,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "uniform",
-      "concurrency": 64,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-uniform",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 1421,
-      "errors": 0,
-      "elapsedMs": 11903,
-      "operationsPerSecond": 119.38166848693606,
-      "mebibytesPerSecond": 0.466334642527094,
-      "latencyMs": {
-        "p50": 333,
-        "p95": 922,
-        "p99": 1998,
-        "max": 5530
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 7586,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "uniform",
-      "concurrency": 256,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-uniform",
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [
+        "call: no answer in 30 s",
         "atomic put refused"
       ],
-      "successes": 3597,
-      "errors": 4,
-      "elapsedMs": 16136,
-      "operationsPerSecond": 222.91769955379277,
-      "mebibytesPerSecond": 0.870772263882003,
+      "successes": 383,
+      "errors": 31,
+      "elapsedMs": 39323,
+      "operationsPerSecond": 9.739846908933703,
+      "mebibytesPerSecond": 0.02006618264120235,
       "latencyMs": {
-        "p50": 454,
-        "p95": 2011,
-        "p99": 4014,
-        "max": 8874
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 9835,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": "atomic put refused"
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "uniform",
-      "concurrency": 1024,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-uniform",
-      "driverCount": 64,
-      "failedDrivers": 0,
-      "errorSamples": [
-        "atomic put refused"
-      ],
-      "successes": 8921,
-      "errors": 35,
-      "elapsedMs": 21764,
-      "operationsPerSecond": 409.89707774306197,
-      "mebibytesPerSecond": 1.6011604599338358,
-      "latencyMs": {
-        "p50": 1018,
-        "p95": 3520,
-        "p99": 4938,
-        "max": 11825
-      },
-      "topology": {
-        "leaves": 16,
-        "rows": 10000,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": "atomic put refused"
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "hot",
-      "concurrency": 1,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-hot",
-      "driverCount": 1,
-      "failedDrivers": 0,
-      "errorSamples": [],
-      "successes": 82,
-      "errors": 0,
-      "elapsedMs": 10004,
-      "operationsPerSecond": 8.196721311475411,
-      "mebibytesPerSecond": 0.032018442622950824,
-      "latencyMs": {
-        "p50": 115,
-        "p95": 161,
-        "p99": 303,
-        "max": 302
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": null
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "hot",
-      "concurrency": 16,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-hot",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [
-        "atomic put refused"
-      ],
-      "successes": 6,
-      "errors": 23,
-      "elapsedMs": 11482,
-      "operationsPerSecond": 0.5225570458108344,
-      "mebibytesPerSecond": 0.002041238460198572,
-      "latencyMs": {
-        "p50": 5512,
-        "p95": 11153,
-        "p99": 11426,
-        "max": 11425
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": "atomic put refused"
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "hot",
-      "concurrency": 64,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-hot",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [
-        "atomic put refused"
-      ],
-      "successes": 1,
-      "errors": 83,
-      "elapsedMs": 12541,
-      "operationsPerSecond": 0.07973845785822502,
-      "mebibytesPerSecond": 0.0003114783510086915,
-      "latencyMs": {
-        "p50": 10787,
-        "p95": 12387,
-        "p99": 12542,
-        "max": 12541
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": "atomic put refused"
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "hot",
-      "concurrency": 256,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-hot",
-      "driverCount": 16,
-      "failedDrivers": 0,
-      "errorSamples": [
-        "atomic put refused"
-      ],
-      "successes": 4,
-      "errors": 307,
-      "elapsedMs": 18276,
-      "operationsPerSecond": 0.2188662727073758,
-      "mebibytesPerSecond": 0.0008549463777631867,
-      "latencyMs": {
-        "p50": 14181,
-        "p95": 17466,
-        "p99": 17898,
-        "max": 18276
-      },
-      "topology": {
-        "leaves": 5,
-        "rows": 2,
-        "depth": 4
-      },
-      "leased": null,
-      "errorSample": "atomic put refused"
-    },
-    {
-      "target": "presplit",
-      "operation": "atomic-4",
-      "distribution": "hot",
-      "concurrency": 1024,
-      "durationMs": 10000,
-      "keyCount": 10000,
-      "payloadBytes": 1024,
-      "objectName": "bench-593a4c76f40a-presplit-atomic-4-hot",
-      "driverCount": 64,
-      "failedDrivers": 0,
-      "errorSamples": [
-        "atomic put refused",
-        "no answer in 30 s"
-      ],
-      "successes": 0,
-      "errors": 1073,
-      "elapsedMs": 31794,
-      "operationsPerSecond": 0,
-      "mebibytesPerSecond": 0,
-      "latencyMs": {
-        "p50": 21324,
-        "p95": 29804,
+        "p50": 12549,
+        "p95": 30001,
         "p99": 30001,
         "max": 30000
       },
@@ -1293,7 +648,692 @@
         "depth": 4
       },
       "leased": null,
+      "stalls": [],
+      "errorSample": "call: no answer in 30 s"
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-2",
+      "distribution": "hot",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-2-hot",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "call: no answer in 30 s",
+        "Durable Object is overloaded. Requests queued for too long."
+      ],
+      "successes": 46,
+      "errors": 996,
+      "elapsedMs": 39591,
+      "operationsPerSecond": 1.1618802253037306,
+      "mebibytesPerSecond": 0.0023679624157005377,
+      "latencyMs": {
+        "p50": 30001,
+        "p95": 30001,
+        "p99": 30001,
+        "max": 30000
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": "call: no answer in 30 s"
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 202,
+      "errors": 0,
+      "elapsedMs": 10000,
+      "operationsPerSecond": 20.2,
+      "mebibytesPerSecond": 0.07890625,
+      "latencyMs": {
+        "p50": 47,
+        "p95": 71,
+        "p99": 112,
+        "max": 183
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 1195,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 962,
+      "errors": 0,
+      "elapsedMs": 10766,
+      "operationsPerSecond": 89.35537804198403,
+      "mebibytesPerSecond": 0.3490444454765001,
+      "latencyMs": {
+        "p50": 126,
+        "p95": 422,
+        "p99": 530,
+        "max": 1417
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 5984,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 4156,
+      "errors": 0,
+      "elapsedMs": 10544,
+      "operationsPerSecond": 394.1578148710167,
+      "mebibytesPerSecond": 1.539678964339909,
+      "latencyMs": {
+        "p50": 89,
+        "p95": 663,
+        "p99": 780,
+        "max": 951
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 9823,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 6227,
+      "errors": 0,
+      "elapsedMs": 11525,
+      "operationsPerSecond": 540.3036876355749,
+      "mebibytesPerSecond": 2.1105612798264644,
+      "latencyMs": {
+        "p50": 188,
+        "p95": 1410,
+        "p99": 1593,
+        "max": 1918
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 9999,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 15787,
+      "errors": 0,
+      "elapsedMs": 13532,
+      "operationsPerSecond": 1166.6420336979013,
+      "mebibytesPerSecond": 4.557195444132427,
+      "latencyMs": {
+        "p50": 405,
+        "p95": 2626,
+        "p99": 3181,
+        "max": 3919
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "hot",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-hot",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 369,
+      "errors": 0,
+      "elapsedMs": 10025,
+      "operationsPerSecond": 36.80798004987531,
+      "mebibytesPerSecond": 0.14378117206982544,
+      "latencyMs": {
+        "p50": 26,
+        "p95": 47,
+        "p99": 74,
+        "max": 125
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "hot",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 1890,
+      "errors": 0,
+      "elapsedMs": 10144,
+      "operationsPerSecond": 186.31703470031545,
+      "mebibytesPerSecond": 0.7278009167981072,
+      "latencyMs": {
+        "p50": 52,
+        "p95": 235,
+        "p99": 332,
+        "max": 535
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "hot",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 4698,
+      "errors": 0,
+      "elapsedMs": 10503,
+      "operationsPerSecond": 447.3007712082262,
+      "mebibytesPerSecond": 1.7472686375321336,
+      "latencyMs": {
+        "p50": 82,
+        "p95": 459,
+        "p99": 605,
+        "max": 1035
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "hot",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 5556,
+      "errors": 0,
+      "elapsedMs": 11800,
+      "operationsPerSecond": 470.8474576271186,
+      "mebibytesPerSecond": 1.839247881355932,
+      "latencyMs": {
+        "p50": 305,
+        "p95": 1418,
+        "p99": 1878,
+        "max": 2039
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-4",
+      "distribution": "hot",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-multi-4-hot",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 8908,
+      "errors": 0,
+      "elapsedMs": 11854,
+      "operationsPerSecond": 751.4762949215456,
+      "mebibytesPerSecond": 2.9354542770372873,
+      "latencyMs": {
+        "p50": 1215,
+        "p95": 2350,
+        "p99": 2950,
+        "max": 3701
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 36,
+      "errors": 0,
+      "elapsedMs": 10163,
+      "operationsPerSecond": 3.54226114336318,
+      "mebibytesPerSecond": 0.013836957591262421,
+      "latencyMs": {
+        "p50": 279,
+        "p95": 465,
+        "p99": 473,
+        "max": 472
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 225,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 264,
+      "errors": 0,
+      "elapsedMs": 10843,
+      "operationsPerSecond": 24.347505302960435,
+      "mebibytesPerSecond": 0.0951074425896892,
+      "latencyMs": {
+        "p50": 478,
+        "p95": 1397,
+        "p99": 2660,
+        "max": 3419
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 2000,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 1168,
+      "errors": 0,
+      "elapsedMs": 11243,
+      "operationsPerSecond": 103.88686293693854,
+      "mebibytesPerSecond": 0.4058080583474162,
+      "latencyMs": {
+        "p50": 443,
+        "p95": 1118,
+        "p99": 1409,
+        "max": 2068
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 6744,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 3303,
+      "errors": 0,
+      "elapsedMs": 11643,
+      "operationsPerSecond": 283.68977067766036,
+      "mebibytesPerSecond": 1.1081631667096108,
+      "latencyMs": {
+        "p50": 514,
+        "p95": 2191,
+        "p99": 2753,
+        "max": 3807
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 9751,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 6616,
+      "errors": 0,
+      "elapsedMs": 13091,
+      "operationsPerSecond": 505.38537926819953,
+      "mebibytesPerSecond": 1.9741616377664044,
+      "latencyMs": {
+        "p50": 1524,
+        "p95": 3651,
+        "p99": 4775,
+        "max": 7563
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 9998,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "hot",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-hot",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 51,
+      "errors": 0,
+      "elapsedMs": 10195,
+      "operationsPerSecond": 5.002452182442374,
+      "mebibytesPerSecond": 0.019540828837665523,
+      "latencyMs": {
+        "p50": 195,
+        "p95": 253,
+        "p99": 268,
+        "max": 267
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "hot",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "atomic put refused"
+      ],
+      "successes": 27,
+      "errors": 1,
+      "elapsedMs": 18627,
+      "operationsPerSecond": 1.449508777580931,
+      "mebibytesPerSecond": 0.005662143662425512,
+      "latencyMs": {
+        "p50": 9263,
+        "p95": 14892,
+        "p99": 16797,
+        "max": 16796
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
       "errorSample": "atomic put refused"
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "hot",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "call: no answer in 30 s"
+      ],
+      "successes": 0,
+      "errors": 64,
+      "elapsedMs": 30000,
+      "operationsPerSecond": 0,
+      "mebibytesPerSecond": 0,
+      "latencyMs": {
+        "p50": 30001,
+        "p95": 30001,
+        "p99": 30001,
+        "max": 30000
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": "call: no answer in 30 s"
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "hot",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "call: no answer in 30 s"
+      ],
+      "successes": 0,
+      "errors": 256,
+      "elapsedMs": 30000,
+      "operationsPerSecond": 0,
+      "mebibytesPerSecond": 0,
+      "latencyMs": {
+        "p50": 30001,
+        "p95": 30001,
+        "p99": 30001,
+        "max": 30000
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": "call: no answer in 30 s"
+    },
+    {
+      "target": "presplit",
+      "operation": "atomic-4",
+      "distribution": "hot",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-cfc5b3d3afd3-presplit-atomic-4-hot",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [
+        "Durable Object is overloaded. Requests queued for too long.",
+        "call: no answer in 30 s"
+      ],
+      "successes": 0,
+      "errors": 1036,
+      "elapsedMs": 39235,
+      "operationsPerSecond": 0,
+      "mebibytesPerSecond": 0,
+      "latencyMs": {
+        "p50": 30001,
+        "p95": 30001,
+        "p99": 30001,
+        "max": 30000
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "errorSample": "Durable Object is overloaded. Requests queued for too long."
     }
   ],
   "splits": []
