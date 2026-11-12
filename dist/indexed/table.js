@@ -336,9 +336,17 @@ export class IndexedTable extends ShardedTable {
     async indexBuildStatus() {
         this.migrate();
         this.assertOwns([]);
-        const building = this.store.exec(`SELECT name FROM ${GLOBALS} WHERE done = 0 ORDER BY name`).toArray().map((r) => r.name);
+        // Built once every page is read and delivered: a page still in the outbox may yet bring back
+        // a duplicate, and the last page is read before it is delivered.
+        const building = new Set(this.store.exec(`SELECT name FROM ${GLOBALS} WHERE done = 0`).toArray().map((r) => r.name));
+        const [lo, hi] = this.ownedHashRange();
+        for (const { op } of this.store.exec(`SELECT op FROM ${OUTBOX} WHERE hash >= ? AND hash <= ? AND op LIKE '%"backfill":true%'`, lo, hi)) {
+            const stored = JSON.parse(op);
+            if (stored.kind === "put" && stored.backfill)
+                building.add(indexNameOfId(indexIdOfRoute(stored.route)));
+        }
         const duplicates = this.store.exec(`SELECT ix, key, owner FROM ${DUPLICATES} ORDER BY ix, key LIMIT 100`).toArray().filter((d) => this.owns(d.key)).map((d) => ({ index: d.ix, key: d.key, owner: d.owner }));
-        return { building, duplicates };
+        return { building: [...building].sort(), duplicates };
     }
     /**
      * Builds the indexes added since this shard last saw the schema, over the rows it owns: a few
