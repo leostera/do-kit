@@ -26,7 +26,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export class LeasedSource extends DurableObject<LeasedEnv> {
   private readonly sql: SqlStorage;
   private readonly leases: ReadLeases<Value>;
-  private readonly plan = new RelayPlan(HOT_READS);
+  private readonly plan: RelayPlan;
   private name = "";
   /** Reads and writes this source served, since it started (in memory): what a benchmark point reports. */
   private readonly served = { direct: 0, relay: 0, writes: 0, relays: 0 };
@@ -43,6 +43,8 @@ export class LeasedSource extends DurableObject<LeasedEnv> {
       put: ({ key, until }) => void this.sql.exec("INSERT INTO held (key, until) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET until = excluded.until", key, until),
       delete: (key) => void this.sql.exec("DELETE FROM held WHERE key = ?", key),
     });
+    // A key being written gets no relay lease, so it isn't relayed: its readers read here.
+    this.plan = new RelayPlan(HOT_READS, (key) => this.leases.written(key));
   }
 
   private committed(key: string): Value | undefined {
