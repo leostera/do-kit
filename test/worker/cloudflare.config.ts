@@ -5,11 +5,14 @@ import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
 // Deployed (to run the tests against real storage snapshots), it takes another name.
 const NAME = process.env.TEST_WORKER_NAME ?? "do-kit-test";
+/** Deployed, it is served only on this custom domain, which must be behind a Cloudflare Access application. */
+const HOSTNAME = process.env.TEST_HOSTNAME;
 
 export default defineConfig(() => ({
   worker: {
     name: NAME,
     // Never on workers.dev or preview URLs: deploy it on a custom domain behind Cloudflare Access.
+    domains: HOSTNAME ? [HOSTNAME] : [],
     workersDev: false,
     previewUrls: false,
     compatibilityDate: "2026-10-27",
