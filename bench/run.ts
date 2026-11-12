@@ -1,8 +1,9 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { $ } from "bun";
 
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | "table-1" | "table-4" | "table-16" | "table-64" | "indexed-1" | "indexed-4" | "indexed-16";
-type Operation = "read" | "write" | "list" | "create";
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | "table-1" | "table-4" | "table-16" | "table-64" | "indexed-1" | "indexed-4" | "indexed-16" | "reader-single" | "reader-leased";
+type Operation = "read" | "write" | "list" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
 type Distribution = "uniform" | "hot" | "control-plane";
 
 interface Point {
@@ -37,6 +38,13 @@ const keyCount = Number(process.env.BENCH_KEY_COUNT ?? 10_000);
 const suites = new Set((process.env.BENCH_SUITES ?? "load,split").split(","));
 const splitSizesMiB = (process.env.BENCH_SPLIT_MIB ?? "1,16,128,1024").split(",").map(Number);
 const splitRowBytes = Number(process.env.BENCH_SPLIT_ROW_BYTES ?? 1024);
+// What was measured: the commit (and whether the tree had changes), and the deployed Worker version.
+const provenance = {
+  commit: (await $`git rev-parse HEAD`.quiet().text()).trim(),
+  dirty: (await $`git status --porcelain -- src bench`.quiet().text()).trim().length > 0,
+  doKitVersion: (JSON.parse(await Bun.file(join(import.meta.dir, "..", "package.json")).text()) as { version: string }).version,
+  workerVersion: process.env.BENCH_WORKER_VERSION ?? null,
+};
 const points: Point[] = [];
 const splits: unknown[] = [];
 const headers = { authorization: `Bearer ${token}`, ...(accessToken ? { "cf-access-token": accessToken } : {}), "content-type": "application/json" };
@@ -92,9 +100,10 @@ async function measure(config: {
 
 function save(): void {
 const results = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   suite,
   generatedAt: new Date().toISOString(),
+  provenance,
   runtime: { compatibilityDate: "2026-10-29", payloadBytes, keyCount, durationMs, concurrencyLevels, splitSizesMiB, splitRowBytes },
   notes: [
     "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",

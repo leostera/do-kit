@@ -1,5 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import { nodeName, sharded, ShardedObject, shardObjectName, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
+import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
+import { LeasedRelay, LeasedSource, Reader, type ReaderTarget } from "./leased.ts";
+
+export { LeasedRelay, LeasedSource, Reader };
 import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedTableClient } from "../../../src/indexed/index.ts";
 import { entryOf, globalIndexes as globalIndexesOf } from "../../../src/indexed/entries.ts";
@@ -8,8 +11,10 @@ import { splittable as legacySplittable, SplittableObject as LegacySplittableObj
 
 const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget;
-const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16"];
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget | ReaderTarget;
+const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16", "reader-single", "reader-leased"];
+/** Reads through a stateless entrypoint, as readers reach an app: to one object, or with leased reads. */
+const isReader = (t: Target): t is ReaderTarget => t === "reader-single" || t === "reader-leased";
 /** A ShardedTable that starts as this many shards and never splits by load: "table-1" is one object. */
 type TableTarget = "table-1" | "table-4" | "table-16" | "table-64";
 const isTable = (t: Target): t is TableTarget => t.startsWith("table-");
@@ -31,7 +36,17 @@ const MAX_DRIVERS = 8192;
 const CALLS_PER_DRIVER = 16;
 /** "list": one page of 50 rows, newest first, each worker walking its own cursor (tables only). */
 /** "create": a new row each time, only if absent (`ifVersion: 0`); tables only. */
-type Operation = "read" | "write" | "list" | "create";
+/**
+ * "atomic-N": one `atomically` put of N distinct keys (sharded targets); "multi-N": the same put as
+ * one plain `call`, which is not all-or-nothing, for comparison. "mixed": reads, and MIXED_WRITES of
+ * the calls write (entrypoint targets).
+ */
+type Operation = "read" | "write" | "list" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
+const OPERATIONS: readonly Operation[] = ["read", "write", "list", "create", "atomic-2", "atomic-4", "multi-2", "multi-4", "mixed"];
+const keysPerCall = (op: Operation): number => (op.startsWith("atomic-") || op.startsWith("multi-") ? Number(op.slice(op.indexOf("-") + 1)) : 1);
+const MIXED_WRITES = 0.01;
+/** Keys a "hot" multi-key call picks from: a few, so calls contend for them. */
+const HOT_POOL = 8;
 /**
  * How keys are chosen: "uniform" over `keyCount` keys, one "hot" key, or "control-plane": a handful
  * (`keyCount`) of popular objects, mostly read. Key shape does not matter beyond that: keys are
@@ -64,6 +79,9 @@ function zipfObject(objects: number): string {
 
 interface Env {
   readonly BENCH_DRIVERS: DurableObjectNamespace<BenchDriver>;
+  readonly READER: Service<Reader>;
+  readonly LEASED_SOURCE: DurableObjectNamespace<LeasedSource>;
+  readonly LEASED_RELAY: DurableObjectNamespace<LeasedRelay>;
   readonly SINGLE: DurableObjectNamespace<SingleObject>;
   readonly SPLIT: DurableObjectNamespace<SplitObject>;
   readonly LEGACY: DurableObjectNamespace<LegacySplitObject>;
@@ -274,6 +292,14 @@ async function seedRows(update: (keys: readonly string[], values: readonly strin
 /** The identical key/value interface, distributed over hash-prefix leaves split with snapshots. */
 export class SplitObject extends ShardedObject<Env, string> {
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 400, windowSeconds: 5, maxDepth: 12, keysPerCall: 25, copy: "native" };
+
+  /** `put`, all or nothing across shards (RFD0008): what "atomic-N" measures. */
+  protected override atomic: Record<string, AtomicMethod<string, undefined, [string, string][], never, number>> = {
+    put: {
+      check: (_current, keys, payloads) => ({ staged: keys.map((key, i) => [key, payloads![i] as string] as [string, string]) }),
+      apply: (_current, staged) => ({ writes: new Map(staged), result: staged.length }),
+    },
+  };
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, string>> {
     return this.env.SPLIT as DurableObjectNamespace<ShardedObject<Env, string>>;
   }
@@ -389,6 +415,14 @@ export class SplitBenchJob extends DurableObject<Env> {
   }
 }
 
+/** `n` distinct keys for one multi-key call: of `keyCount` keys, or of HOT_POOL for "hot". */
+function distinctKeys(config: MeasureConfig, n: number): string[] {
+  const pool = config.distribution === "hot" ? HOT_POOL : config.keyCount;
+  const picked = new Set<number>();
+  while (picked.size < Math.min(n, pool)) picked.add(Math.floor(Math.random() * pool));
+  return [...picked].map((i) => (config.distribution === "hot" ? `hot-${i}` : `key-${i}`));
+}
+
 /** The key of call `seq` of this driver. */
 function keyFor(config: MeasureConfig, seq: number): string {
   switch (config.distribution) {
@@ -491,6 +525,10 @@ export class BenchDriver extends DurableObject<Env> {
           }
         }
       }
+      return;
+    }
+    if (isReader(config.target)) {
+      if (config.driverIndex === 0) await this.env.READER.write(config.target, config.objectName, "hot-key", value);
       return;
     }
     if (config.operation !== "read" || config.distribution !== "uniform" && config.distribution !== "hot") return;
@@ -607,10 +645,24 @@ export class BenchDriver extends DurableObject<Env> {
       while (Date.now() < stopAt) {
         const seq = sequence++;
         const key = keyFor(config, seq);
-        const write = config.distribution === "control-plane" ? Math.random() < CONTROL_PLANE.writeShare : config.operation === "write";
+        const write = config.distribution === "control-plane" ? Math.random() < CONTROL_PLANE.writeShare : config.operation === "mixed" ? Math.random() < MIXED_WRITES : config.operation === "write";
         const before = performance.now();
         try {
-          if (write) {
+          if (keysPerCall(config.operation) > 1) {
+            const keys = distinctKeys(config, keysPerCall(config.operation));
+            const values = keys.map(() => "x".repeat(config.payloadBytes));
+            const client = sharded(shardedNamespace(this.env, config.target), config.objectName);
+            if (config.operation.startsWith("atomic-")) {
+              const outcome = await client.atomically(keys, "put", values);
+              if (!outcome.committed) throw new Error("atomic put refused");
+            } else await client.call(keys, "put", values);
+            bytes += config.payloadBytes * keys.length;
+          } else if (isReader(config.target)) {
+            if (write) {
+              await this.env.READER.write(config.target, config.objectName, "hot-key", "x".repeat(config.payloadBytes));
+              bytes += config.payloadBytes;
+            } else bytes += (await this.env.READER.read(config.target, config.objectName, "hot-key"))?.length ?? 0;
+          } else if (write) {
             await this.write(config.target, config.objectName, [key], ["x".repeat(config.payloadBytes)]);
             bytes += config.payloadBytes;
           } else {
@@ -667,7 +719,9 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   const keyCount = body.keyCount ?? 10_000;
   const payloadBytes = body.payloadBytes ?? 1024;
   if (!TARGETS.includes(target as Target)) throw new Error(`target must be one of ${TARGETS.join(", ")}`);
-  if (operation !== "read" && operation !== "write" && operation !== "list" && operation !== "create") throw new Error("operation must be read, write, list or create");
+  if (!OPERATIONS.includes(operation as Operation)) throw new Error(`operation must be one of ${OPERATIONS.join(", ")}`);
+  if (keysPerCall(operation as Operation) > 1 && target !== "presplit" && target !== "split") throw new Error("atomic-N and multi-N are for sharded targets");
+  if (isReader(target as Target) ? operation !== "read" && operation !== "mixed" : operation === "mixed") throw new Error("entrypoint targets take read or mixed, and only they take mixed");
   if (operation === "create" && !isRows(target as Target)) throw new Error("create is for table targets");
   if (operation === "list" && !isRows(target as Target)) throw new Error("list is for table targets");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
@@ -677,7 +731,7 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (!Number.isSafeInteger(payloadBytes) || (payloadBytes as number) < 16 || (payloadBytes as number) > 64 * 1024) throw new Error("payloadBytes must be from 16 to 65536");
   const objectName = body.objectName;
   if (typeof objectName !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(objectName)) throw new Error("objectName must be 1-80 safe characters");
-  return { target: target as Target, operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
+  return { target: target as Target, operation: operation as Operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
 }
 
 function percentile(histogram: readonly number[], p: number): number {
