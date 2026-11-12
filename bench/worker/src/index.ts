@@ -2,6 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { LeasedRelay, LeasedSource, readHot, writeHot, type ReaderTarget } from "./leased.ts";
+import { BEHAVIOUR_TARGETS, behaviourRead, behaviourWrite, isBehaviour, KvMachine, KvServer, probeBehaviours, probeRpc, type BehaviourTarget, type ProbeBehaviours, type ProbeRpc } from "./behaviours.ts";
+
+export { KvMachine, KvServer };
 
 export { LeasedRelay, LeasedSource };
 import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
@@ -12,8 +15,8 @@ import { splittable as legacySplittable, SplittableObject as LegacySplittableObj
 
 const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget | ReaderTarget;
-const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16", "reader-single", "reader-leased"];
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget | ReaderTarget | BehaviourTarget;
+const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16", "reader-single", "reader-leased", ...BEHAVIOUR_TARGETS];
 /** One hot key, read by readers in their isolates: of one object, or with leased reads. */
 const isReader = (t: Target): t is ReaderTarget => t === "reader-single" || t === "reader-leased";
 /** A ShardedTable that starts as this many shards and never splits by load: "table-1" is one object. */
@@ -103,6 +106,8 @@ interface Env {
   readonly INDEX_1: DurableObjectNamespace<Index1>;
   readonly INDEX_4: DurableObjectNamespace<Index4>;
   readonly INDEX_16: DurableObjectNamespace<Index16>;
+  readonly KV_SERVER: DurableObjectNamespace<KvServer>;
+  readonly KV_MACHINE: DurableObjectNamespace<KvMachine>;
 }
 
 // ---- Sharded tables: the same rows, indexes and queries on 1, 4, 16 and 64 shards ----
@@ -773,6 +778,7 @@ export class BenchDriver extends DurableObject<Env> {
   }
 
   private async write(target: Target, name: string, keys: readonly string[], values: readonly string[]): Promise<void> {
+    if (isBehaviour(target)) return behaviourWrite(this.env, target, name, keys, values);
     if (target === "single") {
       const stub = this.env.SINGLE.get(this.env.SINGLE.idFromName(name));
       await stub.put(keys, values);
@@ -783,6 +789,7 @@ export class BenchDriver extends DurableObject<Env> {
   }
 
   private async read(target: Target, name: string, key: string): Promise<string | null> {
+    if (isBehaviour(target)) return behaviourRead(this.env, target, name, key);
     if (target === "single") {
       const stub = this.env.SINGLE.get(this.env.SINGLE.idFromName(name));
       return (await stub.get([key], null))[0] ?? null;
@@ -808,6 +815,7 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (isReader(target as Target) ? operation !== "read" && operation !== "mixed" : operation === "mixed") throw new Error("entrypoint targets take read or mixed, and only they take mixed");
   if (operation === "create" && !isRows(target as Target)) throw new Error("create is for table targets");
   if (operation === "list" && !isRows(target as Target)) throw new Error("list is for table targets");
+  if (isBehaviour(target as string) && operation !== "read" && operation !== "write") throw new Error("behaviour targets take read or write");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
   if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > MAX_DRIVERS * CALLS_PER_DRIVER) throw new Error(`concurrency must be an integer from 1 to ${MAX_DRIVERS * CALLS_PER_DRIVER}`);
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");
@@ -1017,6 +1025,14 @@ async function handle(request: Request, env: Env): Promise<Response> {
       const asked = Date.now();
       const objects = await Promise.all(names.map(async (name) => ({ name, ...(await (stubOf(name) as unknown as { benchWhere(n: number): Promise<Where> }).benchWhere(burn)), answeredAt: Date.now() - asked })));
       return Response.json({ asked, objects });
+    }
+    // Behaviour events inside one object, against the same writes done plainly (RFD0009).
+    if (request.method === "POST" && path === "/probe-behaviours") {
+      return Response.json(await probeBehaviours(env, (await request.json()) as ProbeBehaviours));
+    }
+    // One-key puts end to end, one at a time, through each client (RFD0009).
+    if (request.method === "POST" && path === "/probe-rpc") {
+      return Response.json(await probeRpc(env, (await request.json()) as ProbeRpc));
     }
     if (request.method === "POST" && path === "/probe-table") {
       const body = (await request.json()) as ProbeTable;
