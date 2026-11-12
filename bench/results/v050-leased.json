@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
-  "suite": "bench-130b48879eab",
-  "generatedAt": "2026-11-12T13:03:15.555Z",
+  "suite": "bench-f7a46f7563e8",
+  "generatedAt": "2026-11-12T13:24:34.015Z",
   "provenance": {
-    "commit": "3ed0436f9874f2840a803afcad6201e029919b3d",
+    "commit": "12b1521668832e5be717031c1bac9fb98591d4ab",
     "dirty": true,
     "doKitVersion": "0.4.0",
-    "workerVersion": "eec48ace-4b7f-468e-8b32-5d95646572cc"
+    "workerVersion": "335749da-d6e3-4fca-8a7b-3f4ed22e5111"
   },
   "runtime": {
     "compatibilityDate": "2026-10-29",
@@ -43,23 +43,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-read-hot",
       "driverCount": 1,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 1402,
+      "successes": 1207,
       "errors": 0,
-      "elapsedMs": 10000,
-      "operationsPerSecond": 140.2,
-      "mebibytesPerSecond": 0.1369140625,
+      "elapsedMs": 10004,
+      "operationsPerSecond": 120.6517393042783,
+      "mebibytesPerSecond": 0.11782396416433427,
       "latencyMs": {
-        "p50": 7,
-        "p95": 9,
-        "p99": 11,
-        "max": 40
+        "p50": 8,
+        "p95": 10,
+        "p99": 13,
+        "max": 50
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -70,23 +71,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-read-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 3528,
+      "successes": 4742,
       "errors": 0,
-      "elapsedMs": 10137,
-      "operationsPerSecond": 348.0319621189701,
-      "mebibytesPerSecond": 0.33987496300680675,
+      "elapsedMs": 10131,
+      "operationsPerSecond": 468.0683052018557,
+      "mebibytesPerSecond": 0.4570979542986872,
       "latencyMs": {
-        "p50": 31,
-        "p95": 149,
-        "p99": 209,
-        "max": 404
+        "p50": 11,
+        "p95": 150,
+        "p99": 216,
+        "max": 480
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -97,23 +99,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-read-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 10625,
+      "successes": 9824,
       "errors": 0,
       "elapsedMs": 10321,
-      "operationsPerSecond": 1029.4545102218779,
-      "mebibytesPerSecond": 0.25575510488324776,
+      "operationsPerSecond": 951.8457513806802,
+      "mebibytesPerSecond": 0.23389812033717663,
       "latencyMs": {
-        "p50": 35,
-        "p95": 260,
-        "p99": 357,
-        "max": 474
+        "p50": 32,
+        "p95": 275,
+        "p99": 418,
+        "max": 643
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -124,23 +127,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-read-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 13630,
+      "successes": 13524,
       "errors": 0,
-      "elapsedMs": 10848,
-      "operationsPerSecond": 1256.4528023598818,
-      "mebibytesPerSecond": 0.07966978360066371,
+      "elapsedMs": 11315,
+      "operationsPerSecond": 1195.227574016792,
+      "mebibytesPerSecond": 0.0764679076447194,
       "latencyMs": {
-        "p50": 107,
-        "p95": 724,
-        "p99": 880,
-        "max": 1119
+        "p50": 103,
+        "p95": 786,
+        "p99": 1140,
+        "max": 1444
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -151,23 +155,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-read-hot",
       "driverCount": 64,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 15087,
+      "successes": 14395,
       "errors": 0,
-      "elapsedMs": 10718,
-      "operationsPerSecond": 1407.6320208994216,
-      "mebibytesPerSecond": 0.08819859115506624,
+      "elapsedMs": 10888,
+      "operationsPerSecond": 1322.097722263042,
+      "mebibytesPerSecond": 0.08314414378214548,
       "latencyMs": {
-        "p50": 677,
-        "p95": 1125,
-        "p99": 1360,
-        "max": 1922
+        "p50": 708,
+        "p95": 1215,
+        "p99": 1439,
+        "max": 1841
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -178,20 +183,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-read-hot",
       "driverCount": 1,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 9919,
+      "successes": 9825,
       "errors": 0,
       "elapsedMs": 10000,
-      "operationsPerSecond": 991.9,
-      "mebibytesPerSecond": 0.96865234375,
+      "operationsPerSecond": 982.5,
+      "mebibytesPerSecond": 0.95947265625,
       "latencyMs": {
         "p50": 1,
         "p95": 1,
         "p99": 1,
-        "max": 9
+        "max": 36
       },
       "topology": null,
       "leased": {
@@ -200,6 +205,7 @@
         "writesPerSecond": 0,
         "relays": 0
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -210,20 +216,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-read-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 139841,
+      "successes": 140750,
       "errors": 0,
       "elapsedMs": 10000,
-      "operationsPerSecond": 13984.1,
-      "mebibytesPerSecond": 13.65634765625,
+      "operationsPerSecond": 14075,
+      "mebibytesPerSecond": 13.7451171875,
       "latencyMs": {
         "p50": 1,
         "p95": 1,
         "p99": 1,
-        "max": 227
+        "max": 230
       },
       "topology": null,
       "leased": {
@@ -232,6 +238,7 @@
         "writesPerSecond": 0,
         "relays": 0
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -242,28 +249,29 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-read-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 2047,
+      "successes": 236572,
       "errors": 0,
-      "elapsedMs": 10344,
-      "operationsPerSecond": 197.892498066512,
-      "mebibytesPerSecond": 0.048526017498066516,
+      "elapsedMs": 10501,
+      "operationsPerSecond": 22528.521093229218,
+      "mebibytesPerSecond": 16.926494351728408,
       "latencyMs": {
-        "p50": 274,
-        "p95": 515,
-        "p99": 623,
-        "max": 1039
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 829
       },
       "topology": null,
       "leased": {
         "sourceDirectReadsPerSecond": 0,
-        "sourceRelayReadsPerSecond": 19,
+        "sourceRelayReadsPerSecond": 9,
         "writesPerSecond": 0,
         "relays": 2
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -274,28 +282,29 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-read-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 58868,
+      "successes": 464322,
       "errors": 0,
-      "elapsedMs": 10935,
-      "operationsPerSecond": 5383.44764517604,
-      "mebibytesPerSecond": 4.362068472793781,
+      "elapsedMs": 11188,
+      "operationsPerSecond": 41501.787629603146,
+      "mebibytesPerSecond": 29.06914425612263,
       "latencyMs": {
         "p50": 1,
-        "p95": 375,
-        "p99": 838,
-        "max": 1715
+        "p95": 1,
+        "p99": 1,
+        "max": 1615
       },
       "topology": null,
       "leased": {
         "sourceDirectReadsPerSecond": 0,
-        "sourceRelayReadsPerSecond": 33,
+        "sourceRelayReadsPerSecond": 13,
         "writesPerSecond": 0,
-        "relays": 5
+        "relays": 3
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -306,28 +315,29 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-read-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-read-hot",
       "driverCount": 64,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 289766,
+      "successes": 2043004,
       "errors": 0,
-      "elapsedMs": 11307,
-      "operationsPerSecond": 25627.133634032016,
-      "mebibytesPerSecond": 18.62818663217476,
+      "elapsedMs": 11624,
+      "operationsPerSecond": 175757.39848589126,
+      "mebibytesPerSecond": 102.20242399883861,
       "latencyMs": {
         "p50": 1,
-        "p95": 289,
-        "p99": 768,
-        "max": 1855
+        "p95": 1,
+        "p99": 1,
+        "max": 1907
       },
       "topology": null,
       "leased": {
-        "sourceDirectReadsPerSecond": 0,
-        "sourceRelayReadsPerSecond": 78,
+        "sourceDirectReadsPerSecond": 1,
+        "sourceRelayReadsPerSecond": 27,
         "writesPerSecond": 0,
-        "relays": 5
+        "relays": 7
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -338,23 +348,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-mixed-hot",
       "driverCount": 1,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 1064,
+      "successes": 1243,
       "errors": 0,
-      "elapsedMs": 10000,
-      "operationsPerSecond": 106.4,
-      "mebibytesPerSecond": 0.10390625,
+      "elapsedMs": 10006,
+      "operationsPerSecond": 124.2254647211673,
+      "mebibytesPerSecond": 0.12131393039176494,
       "latencyMs": {
-        "p50": 9,
-        "p95": 12,
-        "p99": 16,
-        "max": 54
+        "p50": 8,
+        "p95": 10,
+        "p99": 12,
+        "max": 28
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -365,23 +376,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-mixed-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 3843,
+      "successes": 5945,
       "errors": 0,
-      "elapsedMs": 10144,
-      "operationsPerSecond": 378.84463722397476,
-      "mebibytesPerSecond": 0.36996546603903785,
+      "elapsedMs": 10177,
+      "operationsPerSecond": 584.1603615996856,
+      "mebibytesPerSecond": 0.570469103124693,
       "latencyMs": {
-        "p50": 10,
-        "p95": 167,
-        "p99": 187,
-        "max": 322
+        "p50": 9,
+        "p95": 136,
+        "p99": 211,
+        "max": 436
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -392,23 +404,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-mixed-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 9532,
+      "successes": 18278,
       "errors": 0,
-      "elapsedMs": 10334,
-      "operationsPerSecond": 922.3921037352429,
-      "mebibytesPerSecond": 0.23275338083026903,
+      "elapsedMs": 10390,
+      "operationsPerSecond": 1759.191530317613,
+      "mebibytesPerSecond": 0.44156791385948024,
       "latencyMs": {
-        "p50": 27,
-        "p95": 296,
-        "p99": 399,
-        "max": 540
+        "p50": 11,
+        "p95": 212,
+        "p99": 367,
+        "max": 588
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -419,23 +432,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-mixed-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 12348,
+      "successes": 24664,
       "errors": 0,
-      "elapsedMs": 10848,
-      "operationsPerSecond": 1138.2743362831857,
-      "mebibytesPerSecond": 0.0740883976308997,
+      "elapsedMs": 11009,
+      "operationsPerSecond": 2240.348805522754,
+      "mebibytesPerSecond": 0.14166321305295668,
       "latencyMs": {
-        "p50": 116,
-        "p95": 845,
-        "p99": 992,
-        "max": 1327
+        "p50": 37,
+        "p95": 647,
+        "p99": 926,
+        "max": 1219
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -446,23 +460,24 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-single-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-single-mixed-hot",
       "driverCount": 64,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 15533,
+      "successes": 26448,
       "errors": 0,
-      "elapsedMs": 10956,
-      "operationsPerSecond": 1417.7619569185836,
-      "mebibytesPerSecond": 0.0905611080686382,
+      "elapsedMs": 10847,
+      "operationsPerSecond": 2438.277864847423,
+      "mebibytesPerSecond": 0.15215180464644604,
       "latencyMs": {
-        "p50": 617,
-        "p95": 1144,
-        "p99": 1413,
-        "max": 1842
+        "p50": 289,
+        "p95": 835,
+        "p99": 1063,
+        "max": 1383
       },
       "topology": null,
       "leased": null,
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -473,20 +488,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-mixed-hot",
       "driverCount": 1,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 1460,
+      "successes": 484,
       "errors": 0,
-      "elapsedMs": 10659,
-      "operationsPerSecond": 136.9734496669481,
-      "mebibytesPerSecond": 0.13376313444037902,
+      "elapsedMs": 10500,
+      "operationsPerSecond": 46.095238095238095,
+      "mebibytesPerSecond": 0.04501488095238095,
       "latencyMs": {
         "p50": 1,
         "p95": 1,
-        "p99": 41,
-        "max": 1122
+        "p99": 1097,
+        "max": 1150
       },
       "topology": null,
       "leased": {
@@ -495,6 +510,7 @@
         "writesPerSecond": 1,
         "relays": 0
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -505,20 +521,20 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-mixed-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 14178,
+      "successes": 12470,
       "errors": 0,
-      "elapsedMs": 10953,
-      "operationsPerSecond": 1294.4398794850727,
-      "mebibytesPerSecond": 1.2641014448096413,
+      "elapsedMs": 11070,
+      "operationsPerSecond": 1126.46793134598,
+      "mebibytesPerSecond": 1.1000663392050587,
       "latencyMs": {
         "p50": 1,
         "p95": 1,
-        "p99": 191,
-        "max": 1178
+        "p99": 805,
+        "max": 1243
       },
       "topology": null,
       "leased": {
@@ -527,6 +543,7 @@
         "writesPerSecond": 12,
         "relays": 0
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -537,28 +554,29 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-mixed-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 53411,
+      "successes": 54457,
       "errors": 0,
-      "elapsedMs": 10795,
-      "operationsPerSecond": 4947.753589624826,
-      "mebibytesPerSecond": 3.5628473830477074,
+      "elapsedMs": 11736,
+      "operationsPerSecond": 4640.167007498296,
+      "mebibytesPerSecond": 3.5132451697767553,
       "latencyMs": {
         "p50": 1,
         "p95": 1,
-        "p99": 737,
-        "max": 1185
+        "p99": 662,
+        "max": 3201
       },
       "topology": null,
       "leased": {
-        "sourceDirectReadsPerSecond": 54,
+        "sourceDirectReadsPerSecond": 51,
         "sourceRelayReadsPerSecond": 0,
-        "writesPerSecond": 53,
+        "writesPerSecond": 46,
         "relays": 0
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -569,28 +587,29 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-mixed-hot",
       "driverCount": 16,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 8358,
+      "successes": 5793,
       "errors": 0,
-      "elapsedMs": 13334,
-      "operationsPerSecond": 626.8186590670466,
-      "mebibytesPerSecond": 0.03639954721013949,
+      "elapsedMs": 11101,
+      "operationsPerSecond": 521.8448788397442,
+      "mebibytesPerSecond": 0.03272509233402396,
       "latencyMs": {
-        "p50": 152,
-        "p95": 885,
-        "p99": 1344,
-        "max": 3929
+        "p50": 347,
+        "p95": 1075,
+        "p99": 1364,
+        "max": 2138
       },
       "topology": null,
       "leased": {
         "sourceDirectReadsPerSecond": 0,
-        "sourceRelayReadsPerSecond": 88,
-        "writesPerSecond": 6,
-        "relays": 5
+        "sourceRelayReadsPerSecond": 70,
+        "writesPerSecond": 5,
+        "relays": 1
       },
+      "stalls": [],
       "errorSample": null
     },
     {
@@ -601,28 +620,29 @@
       "durationMs": 10000,
       "keyCount": 10000,
       "payloadBytes": 1024,
-      "objectName": "bench-130b48879eab-reader-leased-mixed-hot",
+      "objectName": "bench-f7a46f7563e8-reader-leased-mixed-hot",
       "driverCount": 64,
       "failedDrivers": 0,
       "errorSamples": [],
-      "successes": 22898,
+      "successes": 22178,
       "errors": 0,
-      "elapsedMs": 13699,
-      "operationsPerSecond": 1671.50886926053,
-      "mebibytesPerSecond": 0.10529110245273378,
+      "elapsedMs": 11246,
+      "operationsPerSecond": 1972.0789614085006,
+      "mebibytesPerSecond": 0.12434976880668681,
       "latencyMs": {
-        "p50": 349,
-        "p95": 1019,
-        "p99": 1354,
-        "max": 6783
+        "p50": 327,
+        "p95": 1161,
+        "p99": 1404,
+        "max": 2278
       },
       "topology": null,
       "leased": {
         "sourceDirectReadsPerSecond": 0,
-        "sourceRelayReadsPerSecond": 90,
-        "writesPerSecond": 16,
-        "relays": 5
+        "sourceRelayReadsPerSecond": 78,
+        "writesPerSecond": 21,
+        "relays": 3
       },
+      "stalls": [],
       "errorSample": null
     }
   ],

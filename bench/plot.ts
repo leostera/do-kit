@@ -322,6 +322,49 @@ if (indexedResults) {
   graphs["indexed-write-p50"] = chart({ title: "Updates: median latency", subtitle: sub("One-row puts of existing rows"), xLabel: "Concurrent in-flight writes", yLabel: "p50 latency (ms)", xTicks: levels, series: series("write", (p) => p.latencyMs.p50) });
 }
 
+// ---- Atomic calls across shards against plain multi-key calls, on 16 shards (bench/results/atomic.json) ----
+type LoosePoint = Omit<Point, "target" | "operation" | "distribution"> & { target: string; operation: string; distribution: string; leased?: { sourceDirectReadsPerSecond: number; sourceRelayReadsPerSecond: number; writesPerSecond: number; relays: number } | null };
+const looseResults = (file: string) => readFile(join(import.meta.dir, "results", file), "utf8").then((t) => JSON.parse(t) as { generatedAt: string; points: LoosePoint[] }).catch(() => null);
+const levelsOf = (points: readonly LoosePoint[]) => [...new Set(points.map((p) => p.concurrency))].sort((a, b) => a - b);
+const seriesOf = (points: readonly LoosePoint[], defs: readonly (readonly [string, string, string, string, string | undefined])[], value: (p: LoosePoint) => number): Series[] =>
+  defs
+    .filter(([target, operation, distribution]) => points.some((p) => p.target === target && p.operation === operation && p.distribution === distribution))
+    .map(([target, operation, distribution, label, dash], i) => ({
+      label,
+      color: ["#e4572e", "#667085", "#2e86ab", "#7a5af8"][i % 4]!,
+      ...(dash ? { dash } : {}),
+      points: points.filter((p) => p.target === target && p.operation === operation && p.distribution === distribution).map((p): [number, number] => [p.concurrency, value(p)]),
+    }));
+const atomic = await looseResults("atomic.json");
+if (atomic) {
+  const levels = levelsOf(atomic.points);
+  const defs = (distribution: string) =>
+    [
+      ["presplit", "atomic-2", distribution, "atomically, 2 keys", undefined],
+      ["presplit", "multi-2", distribution, "plain call, 2 keys (not all-or-nothing)", "10 8"],
+      ["presplit", "atomic-4", distribution, "atomically, 4 keys", undefined],
+      ["presplit", "multi-4", distribution, "plain call, 4 keys (not all-or-nothing)", "10 8"],
+    ] as const;
+  const sub = (what: string) => `Puts of 1 KiB to distinct keys on a sharded object of 16 shards; ${what}; 10 s per point, ${atomic.generatedAt.slice(0, 10)}`;
+  graphs["atomic-throughput"] = chart({ title: "Atomic calls across shards: calls per second", subtitle: sub("keys drawn from 10,000"), xLabel: "Concurrent in-flight calls", yLabel: "calls / s", xTicks: levels, series: seriesOf(atomic.points, defs("uniform"), (p) => p.operationsPerSecond) });
+  graphs["atomic-p50"] = chart({ title: "Atomic calls across shards: median latency", subtitle: sub("keys drawn from 10,000"), xLabel: "Concurrent in-flight calls", yLabel: "p50 latency (ms)", xTicks: levels, series: seriesOf(atomic.points, defs("uniform"), (p) => p.latencyMs.p50) });
+  graphs["atomic-hot-throughput"] = chart({ title: "Atomic calls on a few hot keys: calls per second", subtitle: sub("keys drawn from 8, so calls wait on each other's holds"), xLabel: "Concurrent in-flight calls", yLabel: "calls / s", xTicks: levels, series: seriesOf(atomic.points, defs("hot"), (p) => p.operationsPerSecond) });
+}
+
+// ---- Leased reads of one hot key against one Durable Object (bench/results/leased.json) ----
+const leasedRun = await looseResults("leased.json");
+if (leasedRun) {
+  const levels = levelsOf(leasedRun.points);
+  const defs = (operation: string) =>
+    [
+      ["reader-leased", operation, "hot", "leased reads: isolate sub-lease, relays, source", undefined],
+      ["reader-single", operation, "hot", "one Durable Object", undefined],
+    ] as const;
+  const sub = (what: string) => `One key of 1 KiB, read by drivers in five regions; ${what}; 10 s per point, ${leasedRun.generatedAt.slice(0, 10)}`;
+  graphs["leased-read-throughput"] = chart({ title: "One hot key: reads per second", subtitle: sub("reads only"), xLabel: "Concurrent in-flight reads", yLabel: "reads / s", xTicks: levels, series: seriesOf(leasedRun.points, defs("read"), (p) => p.operationsPerSecond) });
+  graphs["leased-mixed-throughput"] = chart({ title: "One hot key, written too: calls per second", subtitle: sub("1% of calls write it"), xLabel: "Concurrent in-flight calls", yLabel: "calls / s", xTicks: levels, series: seriesOf(leasedRun.points, defs("mixed"), (p) => p.operationsPerSecond) });
+}
+
 for (const [name, svg] of Object.entries(graphs)) await writeFile(join(outDir, `${name}.svg`), svg);
 console.log(`Wrote ${Object.keys(graphs).length} graphs to docs/bench/`);
 
