@@ -1,4 +1,4 @@
-// GenStatem (RFD0009): an object as a state machine. Orders, sessions, leases, provisioning: things
+// StateMachine (RFD0009): an object as a state machine. Orders, sessions, leases, provisioning: things
 // that move through states, where what an event means depends on the state, and where "if nothing
 // happens in 15 minutes, give up" is part of the logic. Written by hand on a Durable Object, that
 // is a status column, an if-ladder in every method, and timeouts multiplexed over the one alarm.
@@ -11,11 +11,11 @@
 import { Behaviour, type BehaviourEvent, type Step } from "./behaviour.js";
 import { cancelTimer, timer, type Effect, type EventKind, type From, type Metadata } from "./envelope.js";
 
-const STATE_TIMEOUT = "statem:state";
-const NAMED_TIMEOUT = "statem:timeout:";
+const STATE_TIMEOUT = "state-machine:state";
+const NAMED_TIMEOUT = "state-machine:timeout:";
 
 /** An action besides the effects every behaviour has. */
-export type StatemAction<E> =
+export type StateMachineAction<E> =
   | Effect<E>
   /** Delivers `event` as a timeout after `afterMs`, unless the state changes first. */
   | { readonly kind: "stateTimeout"; readonly afterMs: number; readonly event: E }
@@ -23,11 +23,11 @@ export type StatemAction<E> =
   | { readonly kind: "timeout"; readonly name: string; readonly afterMs: number; readonly event: E }
   | { readonly kind: "cancelTimeout"; readonly name: string };
 
-export type StatemTransition<St, D, E, R> =
-  | { readonly next?: St; readonly data: D; readonly reply?: R; readonly actions?: readonly StatemAction<E>[] }
+export type StateMachineTransition<St, D, E, R> =
+  | { readonly next?: St; readonly data: D; readonly reply?: R; readonly actions?: readonly StateMachineAction<E>[] }
   | { readonly postpone: true };
 
-export interface StatemContext {
+export interface StateMachineContext {
   /** "timeout" for state and named timeouts. */
   readonly kind: EventKind;
   /** Set for calls. Answer with `reply` in the transition, or later with `replyTo(from, value)`. */
@@ -35,7 +35,7 @@ export interface StatemContext {
   readonly metadata: Metadata;
 }
 
-export type StateHandler<St, D, E, R> = (event: E, data: D, context: StatemContext) => StatemTransition<St, D, E, R>;
+export type StateHandler<St, D, E, R> = (event: E, data: D, context: StateMachineContext) => StateMachineTransition<St, D, E, R>;
 
 export type StateHandlers<St extends string, D, E, R> = { readonly [K in St]: StateHandler<St, D, E, R> };
 
@@ -47,16 +47,16 @@ interface Stored<St, D> {
 export interface TransitionOptions<E, R> {
   /** The answer to this event's caller. */
   readonly reply?: R;
-  readonly actions?: readonly StatemAction<E>[];
+  readonly actions?: readonly StateMachineAction<E>[];
 }
 
 /** Go to `state` with `data`. */
-export function next<St, D, E = never, R = never>(state: St, data: D, options?: TransitionOptions<E, R>): StatemTransition<St, D, E, R> {
+export function next<St, D, E = never, R = never>(state: St, data: D, options?: TransitionOptions<E, R>): StateMachineTransition<St, D, E, R> {
   return { next: state, data, ...options };
 }
 
 /** Stay in this state, with `data`. */
-export function keep<D, E = never, R = never>(data: D, options?: TransitionOptions<E, R>): StatemTransition<never, D, E, R> {
+export function keep<D, E = never, R = never>(data: D, options?: TransitionOptions<E, R>): StateMachineTransition<never, D, E, R> {
   return { data, ...options };
 }
 
@@ -65,13 +65,13 @@ export function postpone(): { readonly postpone: true } {
   return { postpone: true };
 }
 
-export const stateTimeout = <E>(afterMs: number, event: E): StatemAction<E> => ({ kind: "stateTimeout", afterMs, event });
-export const namedTimeout = <E>(name: string, afterMs: number, event: E): StatemAction<E> => ({ kind: "timeout", name, afterMs, event });
-export const cancelTimeout = (name: string): StatemAction<never> => ({ kind: "cancelTimeout", name });
+export const stateTimeout = <E>(afterMs: number, event: E): StateMachineAction<E> => ({ kind: "stateTimeout", afterMs, event });
+export const namedTimeout = <E>(name: string, afterMs: number, event: E): StateMachineAction<E> => ({ kind: "timeout", name, afterMs, event });
+export const cancelTimeout = (name: string): StateMachineAction<never> => ({ kind: "cancelTimeout", name });
 
 /**
  * ```ts
- * export class Door extends GenStatem<Env, "locked" | "open", { code: string; entered: string }, DoorEvent, boolean> {
+ * export class Door extends StateMachine<Env, "locked" | "open", { code: string; entered: string }, DoorEvent, boolean> {
  *   press(digit: string) { return this.cast({ type: "button", digit }); }   // client API
  *
  *   protected init() { return { state: "locked", data: { code: "1234", entered: "" } } as const; }
@@ -82,7 +82,7 @@ export const cancelTimeout = (name: string): StatemAction<never> => ({ kind: "ca
  * }
  * ```
  */
-export abstract class GenStatem<Env, St extends string, D, E, R = unknown> extends Behaviour<Env, E, R, E> {
+export abstract class StateMachine<Env, St extends string, D, E, R = unknown> extends Behaviour<Env, E, R, E> {
   // Handlers live in `states`, an instance field, which RPC never exposes.
   protected static override readonly callbacks: readonly string[] = ["init", "migrate"];
 
@@ -121,7 +121,7 @@ export abstract class GenStatem<Env, St extends string, D, E, R = unknown> exten
 }
 
 /** The machine's actions as effects; a state change cancels the state timeout unless it sets one. */
-function effectsOf<E>(actions: readonly StatemAction<E>[] | undefined, changed: boolean): Effect<unknown>[] | undefined {
+function effectsOf<E>(actions: readonly StateMachineAction<E>[] | undefined, changed: boolean): Effect<unknown>[] | undefined {
   if (!actions && !changed) return undefined;
   const effects: Effect<unknown>[] = [];
   let setsStateTimeout = false;

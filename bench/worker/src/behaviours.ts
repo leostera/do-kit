@@ -4,20 +4,20 @@
 //   single              a plain Durable Object through a raw stub: the baseline
 //   single-client       the same object through Client, no options
 //   single-client-opts  the same, with a deadline, retries and an interceptor
-//   genserver           a GenServer doing the same SQL in its callbacks, through its client
-//   genserver-keyed     the same, with retries on: every call carries an idempotency key, kept
-//   genstatem           a one-state GenStatem doing the same SQL
-//   kvserver-plain      the GenServer's object through a raw stub, doing the SQL in plain methods:
-//                       with BENCH_SHARED_OBJECT, the same object as genserver, so placement is
+//   server           a Server doing the same SQL in its callbacks, through its client
+//   server-keyed     the same, with retries on: every call carries an idempotency key, kept
+//   state-machine           a one-state StateMachine doing the same SQL
+//   kvserver-plain      the Server's object through a raw stub, doing the SQL in plain methods:
+//                       with BENCH_SHARED_OBJECT, the same object as server, so placement is
 //                       the same and only the behaviour differs
 //
 // `/probe-behaviours` times what runs inside the object, without RPC: N events in one call.
 import { Client, type CallOptions } from "../../../src/client/index.ts";
-import { GenServer, GenStatem, keep, type CallResult, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { Server, StateMachine, keep, type CallResult, type StateHandlers } from "../../../src/behaviours/index.ts";
 import type { SingleObject } from "./index.ts";
 
-export type BehaviourTarget = "single-client" | "single-client-opts" | "genserver" | "genserver-keyed" | "genstatem" | "kvserver-plain";
-export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "genserver", "genserver-keyed", "genstatem", "kvserver-plain"];
+export type BehaviourTarget = "single-client" | "single-client-opts" | "server" | "server-keyed" | "state-machine" | "kvserver-plain";
+export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "server", "server-keyed", "state-machine", "kvserver-plain"];
 export const isBehaviour = (target: string): target is BehaviourTarget => (BEHAVIOUR_TARGETS as readonly string[]).includes(target);
 
 export interface BehavioursEnv {
@@ -53,7 +53,7 @@ function kv(sql: SqlStorage, call: KvCall): number | (string | null)[] {
 
 type Counter = { readonly n: number };
 
-export class KvServer extends GenServer<BehavioursEnv, Counter, KvCall | { readonly op: "inc" }, unknown> {
+export class KvServer extends Server<BehavioursEnv, Counter, KvCall | { readonly op: "inc" }, unknown> {
   // ---- client API ----
   put(keys: readonly string[], values: readonly string[]): Promise<number> {
     return this.call({ op: "put", keys, values }) as Promise<number>;
@@ -123,7 +123,7 @@ export class KvServer extends GenServer<BehavioursEnv, Counter, KvCall | { reado
   }
 }
 
-export class KvMachine extends GenStatem<BehavioursEnv, "serving", null, KvCall, unknown> {
+export class KvMachine extends StateMachine<BehavioursEnv, "serving", null, KvCall, unknown> {
   put(keys: readonly string[], values: readonly string[]): Promise<number> {
     return this.call({ op: "put", keys, values }) as Promise<number>;
   }
@@ -159,11 +159,11 @@ function clientOf(env: BehavioursEnv, target: BehaviourTarget, name: string): Pi
       const client = new Client(env.SINGLE, name, OPTIONS);
       return { put: (keys, values) => client.invoke("put", keys, values), get: (keys) => client.invoke("get", keys, null) };
     }
-    case "genserver":
+    case "server":
       return KvServer.client(env.KV_SERVER, name);
-    case "genserver-keyed":
+    case "server-keyed":
       return KvServer.client(env.KV_SERVER, name, { retry: { maxAttempts: 3 } });
-    case "genstatem":
+    case "state-machine":
       return KvMachine.client(env.KV_MACHINE, name);
     case "kvserver-plain": {
       const stub = env.KV_SERVER.getByName(name);
@@ -242,13 +242,13 @@ export interface ProbeRpc {
 }
 
 /**
- * Besides the load targets, two that attribute a difference: the GenServer's object called through
+ * Besides the load targets, two that attribute a difference: the Server's object called through
  * a raw stub, with a plain write (`kvserver-plain`: the object, without the behaviour) and with an
  * envelope (`kvserver-receive`: the behaviour, without its client), the same with an idempotency
  * key (`kvserver-receive-keyed`), and a client that sends a key without retrying
- * (`genserver-key-only`).
+ * (`server-key-only`).
  */
-type RpcTarget = "single" | BehaviourTarget | "kvserver-receive" | "kvserver-receive-keyed" | "genserver-key-only";
+type RpcTarget = "single" | BehaviourTarget | "kvserver-receive" | "kvserver-receive-keyed" | "server-key-only";
 
 /**
  * Times one-key puts end to end, one at a time, from the caller: what a call through each target
@@ -264,7 +264,7 @@ export async function probeRpc(env: BehavioursEnv, probe: ProbeRpc): Promise<{ c
     if (target === "kvserver-plain") return env.KV_SERVER.getByName(probe.objectName).plainPut(keys, [value]);
     if (target === "kvserver-receive-keyed") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] }, key: crypto.randomUUID() });
     // An idempotency key on every call, without retries: the object's side of a keyed call alone.
-    if (target === "genserver-key-only") return KvServer.client(env.KV_SERVER, probe.objectName, { idempotencyKey: crypto.randomUUID() }).put(keys, [value]);
+    if (target === "server-key-only") return KvServer.client(env.KV_SERVER, probe.objectName, { idempotencyKey: crypto.randomUUID() }).put(keys, [value]);
     if (target === "kvserver-receive") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] } });
     return behaviourWrite(env, target, probe.objectName, keys, [value]);
   };

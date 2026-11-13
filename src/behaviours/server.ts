@@ -1,4 +1,4 @@
-// GenServer (RFD0009): an object that owns some state and serves requests on it: answered ones
+// Server (RFD0009): an object that owns some state and serves requests on it: answered ones
 // (calls), fire-and-forget ones (casts), and its own timers (info). A subclass writes `init`,
 // `handleCall`, `handleCast` and `handleInfo` as pure transitions on its state, and its public
 // methods are its client API, run in the caller by `Class.client(ns, name)`. A call can also be
@@ -19,7 +19,7 @@ export interface ServerTransition<S, Info = never> {
 
 /**
  * ```ts
- * export class Channels extends GenServer<Env, { free: number[] }, "alloc", number | null, { free: number }> {
+ * export class Channels extends Server<Env, { free: number[] }, "alloc", number | null, { free: number }> {
  *   alloc() { return this.call("alloc"); }                    // client API, run in the caller
  *   free(channel: number) { return this.cast({ free: channel }); }
  *
@@ -40,7 +40,7 @@ export interface ServerTransition<S, Info = never> {
  * object to skip the write). Never change it in place. Keep big state in your own tables with
  * `this.sql`, written from callbacks, which run in the event's transaction.
  */
-export abstract class GenServer<Env, S, Call, Reply, Cast = never, Info = never> extends Behaviour<Env, Call, Reply, Cast> {
+export abstract class Server<Env, S, Call, Reply, Cast = never, Info = never> extends Behaviour<Env, Call, Reply, Cast> {
   protected static override readonly callbacks: readonly string[] = ["init", "migrate", "handleCall", "handleCast", "handleInfo"];
 
   /** The state a new object starts with. Runs once in the object's life, not once per wake. */

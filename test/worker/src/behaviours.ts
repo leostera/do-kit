@@ -1,9 +1,9 @@
-// Behaviours and Client in the test Worker (RFD0009): a channel pool (GenServer), a code lock
-// (GenStatem) that reports to an audit log (GenEvent), and a plain object for Client. The route
+// Behaviours and Client in the test Worker (RFD0009): a channel pool (Server), a code lock
+// (StateMachine) that reports to an audit log (Server), and a plain object for Client. The route
 // runs in the Worker, so the classes' client methods run here, as in any caller.
 import { DurableObject } from "cloudflare:workers";
 import { CallError, Client, type Attempt, type CallOptions } from "../../../src/client/index.ts";
-import { GenEvent, GenServer, GenStatem, keep, next, postpone, replyTo, send, stateTimeout, type CallResult, type EventHandler, type From, type Metadata, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { Server, StateMachine, keep, next, postpone, replyTo, send, stateTimeout, type CallResult, type From, type Metadata, type StateHandlers } from "../../../src/behaviours/index.ts";
 
 export interface BehavioursEnv {
   readonly CHANNELS: DurableObjectNamespace<Channels>;
@@ -18,7 +18,7 @@ type Pool = { readonly free: readonly number[]; readonly waiting: readonly From[
 type PoolCall = { readonly op: "alloc" } | { readonly op: "allocWait" } | { readonly op: "hang" } | { readonly op: "explode" } | { readonly op: "state" } | { readonly op: "rows" };
 type PoolCast = { readonly op: "free"; readonly channel: number };
 
-export class Channels extends GenServer<BehavioursEnv, Pool, PoolCall, unknown, PoolCast> {
+export class Channels extends Server<BehavioursEnv, Pool, PoolCall, unknown, PoolCast> {
   // ---- client API: runs in the caller ----
   alloc(): Promise<number | null> {
     return this.call({ op: "alloc" }) as Promise<number | null>;
@@ -93,7 +93,7 @@ type LockState = "locked" | "open";
 type LockData = { readonly code: string; readonly entered: string; readonly opened: number };
 type LockEvent = { readonly type: "press"; readonly digit: string } | { readonly type: "lock" } | { readonly type: "status" } | { readonly type: "setCode"; readonly code: string };
 
-export class CodeLock extends GenStatem<BehavioursEnv, LockState, LockData, LockEvent, unknown> {
+export class CodeLock extends StateMachine<BehavioursEnv, LockState, LockData, LockEvent, unknown> {
   // ---- client API ----
   press(digit: string): Promise<void> {
     return this.cast({ type: "press", digit });
@@ -125,7 +125,7 @@ export class CodeLock extends GenStatem<BehavioursEnv, LockState, LockData, Lock
           if (entered !== data.code) return keep({ ...data, entered });
           const opened = data.opened + 1;
           const name = this.ctx.id.name ?? "";
-          return next("open", { ...data, entered: "", opened }, { actions: [stateTimeout(Number(name.split(":")[1] ?? 10_000), { type: "lock" }), send("AUDITS", name, GenEvent.notification({ type: "opened", lock: name, n: opened }))] });
+          return next("open", { ...data, entered: "", opened }, { actions: [stateTimeout(Number(name.split(":")[1] ?? 10_000), { type: "lock" }), send("AUDITS", name, { type: "opened", lock: name, n: opened })] });
         }
         case "status":
           return keep(data, { reply: { state: "locked", opened: data.opened } });
@@ -159,41 +159,23 @@ export class CodeLock extends GenStatem<BehavioursEnv, LockState, LockData, Lock
   }
 }
 
-// ---- An audit log: an event manager ----
+// ---- An audit log: a server that keeps the last events cast to it ----
 
 type AuditEvent = { readonly type: string; readonly lock?: string; readonly n?: number };
 
-const counter: EventHandler<AuditEvent, number, unknown, "count", number> = {
-  init: () => 0,
-  handleEvent: (_event, n) => ({ state: n + 1 }),
-  handleCall: (_request, n) => ({ reply: n, state: n }),
-};
+export class Audit extends Server<BehavioursEnv, readonly AuditEvent[], "recent", readonly AuditEvent[], AuditEvent> {
+  recent(): Promise<readonly AuditEvent[]> {
+    return this.call("recent") as Promise<readonly AuditEvent[]>;
+  }
 
-const recent: EventHandler<AuditEvent, AuditEvent[], number, "list", AuditEvent[]> = {
-  init: () => [],
-  handleEvent: (event, events) => ({ state: [...events, event].slice(-10) }),
-  handleCall: (_request, events) => ({ reply: events, state: events }),
-};
-
-const fragile: EventHandler<AuditEvent, null> = {
-  init: () => null,
-  handleEvent: (event) => {
-    if (event.type === "boom") throw new Error("fragile handler");
-    return { state: null };
-  },
-};
-
-const once: EventHandler<AuditEvent, null> = {
-  init: () => null,
-  handleEvent: () => ({ remove: true }),
-};
-
-export class Audit extends GenEvent<BehavioursEnv, AuditEvent> {
-  protected readonly handlerTypes = { counter, recent, fragile, once };
-
-  /** Test only. */
-  async restart(): Promise<void> {
-    this.ctx.abort("test restart");
+  protected init(): readonly AuditEvent[] {
+    return [];
+  }
+  protected handleCall(_request: "recent", events: readonly AuditEvent[]): CallResult<readonly AuditEvent[], readonly AuditEvent[]> {
+    return { reply: events, state: events };
+  }
+  protected override handleCast(event: AuditEvent, events: readonly AuditEvent[]) {
+    return { state: [...events, event].slice(-10) };
   }
 }
 
@@ -311,16 +293,8 @@ export async function behavioursRoute(env: BehavioursEnv, request: BehavioursReq
     case "restartLock":
       return settle(() => env.LOCKS.getByName(name).restart());
 
-    case "addHandler":
-      return settle(() => audit.addHandler(String(args[0]), String(args[1])));
-    case "deleteHandler":
-      return settle(() => audit.deleteHandler(String(args[0])));
-    case "notify":
-      return settle(() => audit.notify(args[0] as AuditEvent));
-    case "callHandler":
-      return settle(() => audit.callHandler(String(args[0]), args[1]));
-    case "whichHandlers":
-      return settle(() => audit.whichHandlers());
+    case "auditRecent":
+      return settle(() => audit.recent());
 
     case "plain": {
       const plain = new Client(env.PLAINS, name, options);

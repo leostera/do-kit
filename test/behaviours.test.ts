@@ -15,7 +15,7 @@ const value = async (name: string, operation: string, args: unknown[] = [], opti
   return settled.value;
 };
 
-describe("GenServer", () => {
+describe("Server", () => {
   test("serves calls and casts on its state", async () => {
     const pool = unique("pool");
     expect(await value(pool, "alloc")).toBe(0);
@@ -104,7 +104,7 @@ describe("GenServer", () => {
   });
 });
 
-describe("GenStatem", () => {
+describe("StateMachine", () => {
   test("moves between states on events", async () => {
     const lock = unique("lock") + ":60000";
     expect(await value(lock, "lockStatus")).toEqual({ state: "locked", opened: 0 });
@@ -152,43 +152,12 @@ describe("GenStatem", () => {
   });
 });
 
-describe("GenEvent", () => {
-  test("every handler sees every event, each with its own state", async () => {
-    const audit = unique("audit");
-    await value(audit, "addHandler", ["total", "counter"]);
-    await value(audit, "addHandler", ["last", "recent"]);
-    await value(audit, "notify", [{ type: "a" }]);
-    await value(audit, "notify", [{ type: "b" }]);
-    expect(await value(audit, "callHandler", ["total", "count"])).toBe(2);
-    expect(await value(audit, "callHandler", ["last", "list"])).toEqual([{ type: "a" }, { type: "b" }]);
-  });
-
-  test("a handler that throws is removed, and the others still see the event", async () => {
-    const audit = unique("audit");
-    await value(audit, "addHandler", ["fragile", "fragile"]);
-    await value(audit, "addHandler", ["total", "counter"]);
-    await value(audit, "notify", [{ type: "boom" }]);
-    expect(await value(audit, "whichHandlers")).toEqual(["total"]);
-    expect(await value(audit, "callHandler", ["total", "count"])).toBe(1);
-  });
-
-  test("handlers can remove themselves, and be removed", async () => {
-    const audit = unique("audit");
-    await value(audit, "addHandler", ["once", "once"]);
-    await value(audit, "addHandler", ["total", "counter"]);
-    await value(audit, "notify", [{ type: "a" }]);
-    expect(await value(audit, "whichHandlers")).toEqual(["total"]);
-    expect(await value(audit, "deleteHandler", ["total"])).toBe(true);
-    expect(await value(audit, "deleteHandler", ["total"])).toBe(false);
-    expect(await op(audit, "addHandler", ["x", "nope"])).toMatchObject({ ok: false, code: "INVALID_ARGUMENT" });
-  });
-
-  test("an outbox message from a state machine reaches the event manager", async () => {
+describe("outbox", () => {
+  test("a message a state machine sends reaches a server", async () => {
     const name = unique("door") + ":60000";
-    await value(name, "addHandler", ["last", "recent"]);
     await value(name, "enter", ["1234"]);
     for (let i = 0; i < 50; i++) {
-      const events = await value(name, "callHandler", ["last", "list"]);
+      const events = await value(name, "auditRecent");
       if (events.length > 0) {
         expect(events).toEqual([{ type: "opened", lock: name, n: 1 }]);
         return;

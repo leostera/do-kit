@@ -19,7 +19,7 @@ Bun.plugin({
 });
 
 const { Client } = await import("../src/client/index.ts");
-const { GenServer } = await import("../src/behaviours/index.ts");
+const { Server } = await import("../src/behaviours/index.ts");
 
 type Put = (keys: readonly string[], values: readonly string[]) => Promise<unknown>;
 
@@ -31,7 +31,7 @@ const stub = {
 const fakeNamespace = { getByName: (_name: string) => stub };
 const namespace = fakeNamespace as unknown as DurableObjectNamespace<any>;
 
-class Kv extends GenServer<unknown, null, { op: "put"; keys: readonly string[]; values: readonly string[] }, number> {
+class Kv extends Server<unknown, null, { op: "put"; keys: readonly string[]; values: readonly string[] }, number> {
   put(keys: readonly string[], values: readonly string[]): Promise<number> {
     return this.call({ op: "put", keys, values });
   }
@@ -49,9 +49,9 @@ const CASES: Record<string, () => Put> = {
   "raw stub": () => (keys, values) => fakeNamespace.getByName("x").put(keys),
   "Client": () => (keys, values) => new Client(namespace, "x").invoke("put", keys, values),
   "Client, timeout + retries + interceptor": () => (keys, values) => new Client(namespace, "x", { timeoutMs: 30_000, retry: { maxAttempts: 3 }, interceptors: [interceptor] }).invoke("put", keys, values),
-  "GenServer client": () => (keys, values) => Kv.client(namespace, "x").put(keys, values),
-  "GenServer client, timeout": () => (keys, values) => Kv.client(namespace, "x", { timeoutMs: 30_000 }).put(keys, values),
-  "GenServer client, retries (idempotency key)": () => (keys, values) => Kv.client(namespace, "x", { retry: { maxAttempts: 3 } }).put(keys, values),
+  "Server client": () => (keys, values) => Kv.client(namespace, "x").put(keys, values),
+  "Server client, timeout": () => (keys, values) => Kv.client(namespace, "x", { timeoutMs: 30_000 }).put(keys, values),
+  "Server client, retries (idempotency key)": () => (keys, values) => Kv.client(namespace, "x", { retry: { maxAttempts: 3 } }).put(keys, values),
 };
 
 const CALLS = Number(process.env.BENCH_CALLS ?? 200_000);
