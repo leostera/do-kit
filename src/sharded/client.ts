@@ -117,6 +117,13 @@ export interface ShardedClientOptions {
    */
   readonly logWideHops?: number;
   /**
+   * Log a `sharded-shard-error` JSON line (console.error) for each call to a shard that throws:
+   * the object, the shard's bits and the error. A call over many shards fails with one shard's
+   * error, which does not say which shard: these tell one overloaded shard from many. Off by
+   * default.
+   */
+  readonly logShardErrors?: boolean;
+  /**
    * The object's `initialDepth`, if the caller knows it (the class's split policy, usually): the
    * first call from a new isolate goes straight to that depth instead of to the root, which every
    * new isolate's first call would otherwise reach at once. A wrong hint costs one "stale" answer;
@@ -180,6 +187,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private readonly notReadyWaitMs: number;
   private readonly stubOptions: StubOptions | null;
   private readonly logWideHops: number;
+  private readonly logShardErrors: boolean;
 
   private readonly presplitHint: number;
   private readonly routeOf: ((key: string) => string) | null;
@@ -189,6 +197,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     this.notReadyWaitMs = options.notReadyWaitMs ?? NOT_READY_WAIT_MS;
     this.stubOptions = options.stubOptions ?? null;
     this.logWideHops = options.logWideHops ?? 0;
+    this.logShardErrors = options.logShardErrors ?? false;
     this.presplitHint = options.presplitHint ?? 0;
     this.routeOf = options.routeOf ?? null;
     this.identity = objectId(namespace, nodeName(name, "")).text;
@@ -263,6 +272,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     } catch (error) {
       if (this.stubs.get(bits) === stub) this.stubs.delete(bits);
       if (kept && /different request/i.test(String(error))) return call(this.keep(bits));
+      if (this.logShardErrors) console.error(JSON.stringify({ event: "sharded-shard-error", object: this.name, bits, error: String(error).slice(0, 200) }));
       throw error;
     }
   }
@@ -570,6 +580,40 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       if (attempt >= 3) throw new Error(`sharded ${this.name}: scan did not settle`);
       this.forget();
     }
+  }
+
+  /**
+   * Calls `method(...args)` on the one shard `bits`, if it is still a shard: else answers the
+   * shards it is known to have split into, in order (one may since have split further: ask them).
+   * A walk over shards one at a time uses it, where `scan` would call every shard at once.
+   */
+  async scanShard<M extends ScanMethods<T>>(bits: string, method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<{ ok: Result<T[M]> } | { split: string[] }> {
+    await this.loadCache();
+    const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
+    for (let attempt = 0; ; attempt++) {
+      if (this.isSplit(bits)) return { split: this.leavesUnder(bits) };
+      const answer = (await this.onShard(bits, (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo) as Promise<unknown>)) as CallAnswer<Result<T[M]>>;
+      if ("ok" in answer) return { ok: answer.ok };
+      if ("moved" in answer) {
+        this.learn(answer.moved, answer.presplit);
+        // Moved, yet not known to be split below `bits`: this client's map is behind; the root says.
+        if (!this.isSplit(bits)) this.learn(bits, answer.presplit);
+      } else if ("stale" in answer) {
+        if (attempt >= 3) throw new Error(`sharded ${this.name}: shard ${bits} is not part of the object (was it wiped?)`);
+        this.forget();
+      } else await backoff.next();
+    }
+  }
+
+  /** The shards this client knows of, in order (by their bits): every key belongs to exactly one. */
+  async knownLeaves(): Promise<string[]> {
+    await this.loadCache();
+    return this.leavesUnder("");
+  }
+
+  private leavesUnder(bits: string): string[] {
+    if (!this.isSplit(bits)) return [bits];
+    return [...this.leavesUnder(`${bits}0`), ...this.leavesUnder(`${bits}1`)];
   }
 
   /**
