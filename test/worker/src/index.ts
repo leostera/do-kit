@@ -12,8 +12,12 @@ import { entryOf, globalIndexes } from "../../../src/indexed/entries.ts";
 import { storageReport, type StorageReport } from "./storage-report.ts";
 import { graphRoute, type GraphEnv, type GraphRequest } from "./workgraph.ts";
 export { GraphCoordinators, GraphResults, GraphRunners } from "./workgraph.ts";
+import { behavioursRoute, type BehavioursEnv, type BehavioursRequest } from "./behaviours.ts";
+export { Audit, Channels, CodeLock, Plain } from "./behaviours.ts";
+import { seatsRoute, type SeatsEnv, type SeatsRequest } from "./seats.ts";
+export { Seat } from "./seats.ts";
 
-interface Env extends GraphEnv {
+interface Env extends GraphEnv, BehavioursEnv, SeatsEnv {
   readonly COUNTERS: DurableObjectNamespace<Counters>;
   readonly AUTO_COUNTERS: DurableObjectNamespace<AutoCounters>;
   readonly PRESPLIT_COUNTERS: DurableObjectNamespace<PresplitCounters>;
@@ -902,6 +906,10 @@ export default {
           return Response.json(await (ns.get(ns.idFromName(shardObjectName(body.name, body.bits))) as unknown as { atomicTables(): Promise<unknown> }).atomicTables());
         case "/describe":
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).shardedDescribe());
+        case "/behaviours":
+          return Response.json(await behavioursRoute(env, body as unknown as BehavioursRequest));
+        case "/seats":
+          return Response.json(await seatsRoute(env, body as unknown as SeatsRequest));
         case "/workgraph":
           return Response.json(await graphRoute(env, body as unknown as GraphRequest));
         case "/indexed":

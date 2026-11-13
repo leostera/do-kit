@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { $ } from "bun";
 
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | "table-1" | "table-4" | "table-16" | "table-64" | "indexed-1" | "indexed-4" | "indexed-16" | "reader-single" | "reader-leased";
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | "table-1" | "table-4" | "table-16" | "table-64" | "indexed-1" | "indexed-4" | "indexed-16" | "reader-single" | "reader-leased" | "single-client" | "single-client-opts" | "state-machine" | "state-machine-keyed" | "state-machine-plain";
 type Operation = "read" | "write" | "list" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
 type Distribution = "uniform" | "hot" | "control-plane";
 
@@ -53,6 +53,8 @@ const warmup = process.env.BENCH_WARMUP !== "0";
 const payloadBytes = Number(process.env.BENCH_PAYLOAD_BYTES ?? 1024);
 const durationMs = Number(process.env.BENCH_DURATION_MS ?? 10_000);
 const keyCount = Number(process.env.BENCH_KEY_COUNT ?? 10_000);
+/** Every write a value no write stored before (BENCH_UNIQUE_VALUES=1): see uniqueValues in the Worker. */
+const uniqueValues = process.env.BENCH_UNIQUE_VALUES === "1";
 const suites = new Set((process.env.BENCH_SUITES ?? "load,split").split(","));
 const splitSizesMiB = (process.env.BENCH_SPLIT_MIB ?? "1,16,128,1024").split(",").map(Number);
 const splitRowBytes = Number(process.env.BENCH_SPLIT_ROW_BYTES ?? 1024);
@@ -101,7 +103,7 @@ async function measure(config: {
     let response: Response;
     let text: string;
     try {
-      response = await fetch(`${baseUrl}/measure`, { method: "POST", headers, body: JSON.stringify({ ...config, durationMs, keyCount, payloadBytes }), timeout: false, signal } as RequestInit);
+      response = await fetch(`${baseUrl}/measure`, { method: "POST", headers, body: JSON.stringify({ ...config, durationMs, keyCount, payloadBytes, uniqueValues }), timeout: false, signal } as RequestInit);
       text = await response.text();
     } catch (error) {
       console.error(JSON.stringify({ failed: config, error: String(error) }));
@@ -135,7 +137,7 @@ const results = {
   suite,
   generatedAt: new Date().toISOString(),
   provenance,
-  runtime: { compatibilityDate: "2026-10-29", payloadBytes, keyCount, durationMs, concurrencyLevels, splitSizesMiB, splitRowBytes },
+  runtime: { compatibilityDate: "2026-10-29", payloadBytes, keyCount, durationMs, concurrencyLevels, splitSizesMiB, splitRowBytes, uniqueValues },
   notes: [
     "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
     "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
@@ -160,7 +162,9 @@ console.log(`Saved ${points.length} points in ${resultsDir}`);
 if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ?? "write,read").split(",") as Operation[]) {
   for (const distribution of (process.env.BENCH_DISTRIBUTIONS ?? "uniform,hot").split(",") as Distribution[]) {
     for (const target of (process.env.BENCH_TARGETS ?? "single,split,presplit,legacy").split(",") as Target[]) {
-      const objectName = `${suite}-${target}-${operation}-${distribution}`;
+      // With BENCH_SHARED_OBJECT=1, every target of a namespace measures one object (state-machine
+      // and state-machine-plain: the same placement, with and without the behaviour).
+      const objectName = process.env.BENCH_SHARED_OBJECT === "1" ? `${suite}-shared-${operation}-${distribution}` : `${suite}-${target}-${operation}-${distribution}`;
       for (const concurrency of concurrencyLevels) {
         let point: Point;
         try {

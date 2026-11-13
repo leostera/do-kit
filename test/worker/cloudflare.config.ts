@@ -35,6 +35,11 @@ export default defineConfig(() => ({
       GRAPH_COORDINATORS: bindings.durableObject({ worker: NAME, exportName: "GraphCoordinators" }),
       GRAPH_RUNNERS: bindings.durableObject({ worker: NAME, exportName: "GraphRunners" }),
       GRAPH_RESULTS: bindings.durableObject({ worker: NAME, exportName: "GraphResults" }),
+      CHANNELS: bindings.durableObject({ worker: NAME, exportName: "Channels" }),
+      LOCKS: bindings.durableObject({ worker: NAME, exportName: "CodeLock" }),
+      AUDITS: bindings.durableObject({ worker: NAME, exportName: "Audit" }),
+      PLAINS: bindings.durableObject({ worker: NAME, exportName: "Plain" }),
+      SEATS: bindings.durableObject({ worker: NAME, exportName: "Seat" }),
     },
     exports: {
       Counters: exports.durableObject({ storage: "sqlite" }),
@@ -53,6 +58,11 @@ export default defineConfig(() => ({
       GraphCoordinators: exports.durableObject({ storage: "sqlite" }),
       GraphRunners: exports.durableObject({ storage: "sqlite" }),
       GraphResults: exports.durableObject({ storage: "sqlite" }),
+      Channels: exports.durableObject({ storage: "sqlite" }),
+      CodeLock: exports.durableObject({ storage: "sqlite" }),
+      Audit: exports.durableObject({ storage: "sqlite" }),
+      Plain: exports.durableObject({ storage: "sqlite" }),
+      Seat: exports.durableObject({ storage: "sqlite" }),
     },
   },
 }));

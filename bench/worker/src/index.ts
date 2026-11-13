@@ -2,6 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { LeasedRelay, LeasedSource, readHot, writeHot, type ReaderTarget } from "./leased.ts";
+import { BEHAVIOUR_TARGETS, behaviourRead, behaviourWrite, isBehaviour, KvMachine, SeatMachine, probeBehaviours, probeRpc, type BehaviourTarget, type ProbeBehaviours, type ProbeRpc } from "./behaviours.ts";
+
+export { KvMachine, SeatMachine };
 
 export { LeasedRelay, LeasedSource };
 import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
@@ -12,8 +15,8 @@ import { splittable as legacySplittable, SplittableObject as LegacySplittableObj
 
 const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget | ReaderTarget;
-const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16", "reader-single", "reader-leased"];
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget | ReaderTarget | BehaviourTarget;
+const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16", "reader-single", "reader-leased", ...BEHAVIOUR_TARGETS];
 /** One hot key, read by readers in their isolates: of one object, or with leased reads. */
 const isReader = (t: Target): t is ReaderTarget => t === "reader-single" || t === "reader-leased";
 /** A ShardedTable that starts as this many shards and never splits by load: "table-1" is one object. */
@@ -103,6 +106,8 @@ interface Env {
   readonly INDEX_1: DurableObjectNamespace<Index1>;
   readonly INDEX_4: DurableObjectNamespace<Index4>;
   readonly INDEX_16: DurableObjectNamespace<Index16>;
+  readonly KV_MACHINE: DurableObjectNamespace<KvMachine>;
+  readonly SEAT_MACHINE: DurableObjectNamespace<SeatMachine>;
 }
 
 // ---- Sharded tables: the same rows, indexes and queries on 1, 4, 16 and 64 shards ----
@@ -241,6 +246,12 @@ interface MeasureConfig {
   readonly objectName: string;
   readonly keyCount: number;
   readonly payloadBytes: number;
+  /**
+   * Every write a value no write stored before. Off, every write stores the same bytes, and a write
+   * over a key that holds them changes no page: the object commits nothing durable, and the write
+   * costs what a read does.
+   */
+  readonly uniqueValues?: boolean;
   readonly driverIndex: number;
   readonly driverCount: number;
   readonly concurrency: number;
@@ -745,7 +756,7 @@ export class BenchDriver extends DurableObject<Env> {
                 bytes += config.payloadBytes;
               } else bytes += (await readHot(this.env, config.target, config.objectName, "hot-key"))?.length ?? 0;
             } else if (write) {
-              await this.write(config.target, config.objectName, [key], ["x".repeat(config.payloadBytes)]);
+              await this.write(config.target, config.objectName, [key], [config.uniqueValues ? uniqueValue(config, seq) : "x".repeat(config.payloadBytes)]);
               bytes += config.payloadBytes;
             } else {
               const value = await this.read(config.target, config.objectName, key);
@@ -773,6 +784,7 @@ export class BenchDriver extends DurableObject<Env> {
   }
 
   private async write(target: Target, name: string, keys: readonly string[], values: readonly string[]): Promise<void> {
+    if (isBehaviour(target)) return behaviourWrite(this.env, target, name, keys, values);
     if (target === "single") {
       const stub = this.env.SINGLE.get(this.env.SINGLE.idFromName(name));
       await stub.put(keys, values);
@@ -783,6 +795,7 @@ export class BenchDriver extends DurableObject<Env> {
   }
 
   private async read(target: Target, name: string, key: string): Promise<string | null> {
+    if (isBehaviour(target)) return behaviourRead(this.env, target, name, key);
     if (target === "single") {
       const stub = this.env.SINGLE.get(this.env.SINGLE.idFromName(name));
       return (await stub.get([key], null))[0] ?? null;
@@ -808,6 +821,7 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (isReader(target as Target) ? operation !== "read" && operation !== "mixed" : operation === "mixed") throw new Error("entrypoint targets take read or mixed, and only they take mixed");
   if (operation === "create" && !isRows(target as Target)) throw new Error("create is for table targets");
   if (operation === "list" && !isRows(target as Target)) throw new Error("list is for table targets");
+  if (isBehaviour(target as string) && operation !== "read" && operation !== "write") throw new Error("behaviour targets take read or write");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
   if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > MAX_DRIVERS * CALLS_PER_DRIVER) throw new Error(`concurrency must be an integer from 1 to ${MAX_DRIVERS * CALLS_PER_DRIVER}`);
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");
@@ -815,7 +829,14 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (!Number.isSafeInteger(payloadBytes) || (payloadBytes as number) < 16 || (payloadBytes as number) > 64 * 1024) throw new Error("payloadBytes must be from 16 to 65536");
   const objectName = body.objectName;
   if (typeof objectName !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(objectName)) throw new Error("objectName must be 1-80 safe characters");
-  return { target: target as Target, operation: operation as Operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
+  const uniqueValues = body.uniqueValues === true;
+  return { target: target as Target, operation: operation as Operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName, uniqueValues };
+}
+
+/** A value of `payloadBytes` that no other write of this measurement stores: its start, driver and call. */
+function uniqueValue(config: MeasureConfig, seq: number): string {
+  const tag = `${config.startAt}:${config.driverIndex}:${seq}:`;
+  return tag + "x".repeat(Math.max(0, config.payloadBytes - tag.length));
 }
 
 function percentile(histogram: readonly number[], p: number): number {
@@ -1017,6 +1038,14 @@ async function handle(request: Request, env: Env): Promise<Response> {
       const asked = Date.now();
       const objects = await Promise.all(names.map(async (name) => ({ name, ...(await (stubOf(name) as unknown as { benchWhere(n: number): Promise<Where> }).benchWhere(burn)), answeredAt: Date.now() - asked })));
       return Response.json({ asked, objects });
+    }
+    // Behaviour events inside one object, against the same writes done plainly (RFD0009).
+    if (request.method === "POST" && path === "/probe-behaviours") {
+      return Response.json(await probeBehaviours(env, (await request.json()) as ProbeBehaviours));
+    }
+    // One-key puts end to end, one at a time, through each client (RFD0009).
+    if (request.method === "POST" && path === "/probe-rpc") {
+      return Response.json(await probeRpc(env, (await request.json()) as ProbeRpc));
     }
     if (request.method === "POST" && path === "/probe-table") {
       const body = (await request.json()) as ProbeTable;
