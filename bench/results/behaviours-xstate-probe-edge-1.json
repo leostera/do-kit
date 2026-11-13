@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 1,
+  "kind": "behaviours-probe",
+  "generatedAt": "2026-11-13T12:36:06.612Z",
+  "provenance": {
+    "commit": "8254e892ecc7ddaf8fc17024561d4f96a4d0f99f",
+    "dirty": false,
+    "target": "deployed (Cloudflare edge)",
+    "workerVersion": "9f551f79-c254-4f93-a7e8-673c9e03d5b7"
+  },
+  "config": {
+    "events": {
+      "n": 20000,
+      "rounds": 11
+    },
+    "rpc": {
+      "calls": 200,
+      "rounds": 11,
+      "targets": [
+        "single",
+        "state-machine",
+        "xstate"
+      ]
+    }
+  },
+  "notes": [
+    "events: one call to the object runs N events; the caller times it (the object's clock does not move while it computes), less an empty call. Each timed call follows an untimed empty one, so it doesn't pay to flush the writes of the call before.",
+    "events kinds: plain-put/plain-inc do the writes in a transaction each, as a plain object would; events-* run them as behaviour events (this.call); receive-put runs them as envelopes with a deadline; receive-put-keyed adds an idempotency key, kept per call.",
+    "rpc: sequential one-key puts of 1 KiB values from the Worker; targets alternate within a round, in a rotating order. Medians are over rounds.",
+    "Every put stores a value no write stored before: a write of bytes a key already holds changes no page, commits nothing durable, and costs what a read does."
+  ],
+  "events": {
+    "n": 20000,
+    "rounds": 11,
+    "microsPerEvent": {
+      "plain-put": [
+        51.05,
+        48.95,
+        25.15,
+        26.55,
+        29.15,
+        24.85,
+        25.4,
+        31.5,
+        28.4,
+        47.9,
+        26.95
+      ],
+      "events-put": [
+        26.05,
+        27.35,
+        26.5,
+        28.65,
+        36.2,
+        26.55,
+        51.2,
+        31.2,
+        31.05,
+        53.25,
+        27.1
+      ],
+      "xstate-put": [
+        126.05,
+        163,
+        131.5,
+        132,
+        136.35,
+        172.2,
+        172,
+        134.3,
+        125.4,
+        136.55,
+        120.5
+      ],
+      "receive-put": [
+        28.05,
+        27.75,
+        56.2,
+        25.8,
+        26.35,
+        27.7,
+        27.3,
+        31.45,
+        27.8,
+        28.15,
+        40
+      ],
+      "receive-put-keyed": [
+        52.1,
+        83.65,
+        47.35,
+        82.45,
+        52.4,
+        82.9,
+        49.35,
+        54.5,
+        51.7,
+        52,
+        53.65
+      ],
+      "plain-inc": [
+        13.6,
+        13.3,
+        12.85,
+        13.4,
+        12.8,
+        23.2,
+        12.55,
+        14.2,
+        12.85,
+        13.45,
+        23.4
+      ],
+      "events-inc": [
+        17.3,
+        15.05,
+        15.15,
+        21.75,
+        14.8,
+        28.7,
+        14.95,
+        30.55,
+        17.15,
+        15.35,
+        15.55
+      ],
+      "xstate-inc": [
+        34.4,
+        31.95,
+        33.65,
+        72.9,
+        78.25,
+        30.4,
+        33.95,
+        33.6,
+        33.4,
+        31,
+        31.3
+      ],
+      "seat-plain": [
+        80.4,
+        74.55,
+        133.8,
+        69.35,
+        70.8,
+        73.55,
+        66.5,
+        122.3,
+        75.45,
+        74.75,
+        72.5
+      ],
+      "seat-machine": [
+        38.95,
+        38.3,
+        37.05,
+        39.15,
+        38.4,
+        69.2,
+        57.15,
+        50.7,
+        58.7,
+        56.8,
+        53.3
+      ],
+      "seat-xstate": [
+        51,
+        83.45,
+        53.5,
+        54.25,
+        91.35,
+        48.85,
+        51.65,
+        50.5,
+        68.6,
+        45.45,
+        47.05
+      ]
+    },
+    "emptyCallMs": [
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      3,
+      4
+    ]
+  },
+  "rpc": {
+    "calls": 200,
+    "rounds": 11,
+    "microsPerCall": {
+      "single": [
+        26550,
+        20300,
+        20050,
+        21170,
+        21745,
+        21480,
+        20375,
+        19975,
+        22645,
+        23235,
+        21080
+      ],
+      "state-machine": [
+        16935,
+        16020,
+        16245,
+        17490,
+        15870,
+        16225,
+        16045,
+        16625,
+        17110,
+        16905,
+        17215
+      ],
+      "xstate": [
+        18180,
+        16740,
+        16105,
+        16885,
+        16050,
+        16160,
+        16125,
+        16350,
+        16420,
+        17065,
+        16830
+      ]
+    }
+  }
+}
