@@ -154,6 +154,12 @@ const kvMachine = (sql: () => SqlStorage) =>
 export class KvXState extends DurableXState<BehavioursEnv, ReturnType<typeof kvMachine>> {
   protected readonly machine = kvMachine(() => this.sql);
 
+  constructor(ctx: DurableObjectState, env: BehavioursEnv) {
+    super(ctx, env);
+    // KvMachine creates its table in init(); an XState machine's initial state runs no SQL.
+    ctx.storage.sql.exec(CREATE);
+  }
+
   put(keys: readonly string[], values: readonly string[]): Promise<number> {
     return this.call({ type: "put", op: "put", keys, values }) as Promise<number>;
   }
@@ -166,7 +172,6 @@ export class KvXState extends DurableXState<BehavioursEnv, ReturnType<typeof kvM
   }
   /** `n` events through the machine, as calls from a client would run. */
   async probeEvents(n: number, mode: "put" | "inc"): Promise<number> {
-    this.sql.exec(CREATE);
     for (let i = 0; i < n; i++) await this.call(mode === "put" ? { type: "put", op: "put", keys: [`key-${i % 1000}`], values: [freshValue()] } : { type: "inc", op: "inc" });
     return n;
   }
