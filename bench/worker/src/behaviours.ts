@@ -7,14 +7,17 @@
 //   genserver           a GenServer doing the same SQL in its callbacks, through its client
 //   genserver-keyed     the same, with retries on: every call carries an idempotency key, kept
 //   genstatem           a one-state GenStatem doing the same SQL
+//   kvserver-plain      the GenServer's object through a raw stub, doing the SQL in plain methods:
+//                       with BENCH_SHARED_OBJECT, the same object as genserver, so placement is
+//                       the same and only the behaviour differs
 //
 // `/probe-behaviours` times what runs inside the object, without RPC: N events in one call.
 import { Client, type CallOptions } from "../../../src/client/index.ts";
 import { GenServer, GenStatem, keep, type CallResult, type StateHandlers } from "../../../src/behaviours/index.ts";
 import type { SingleObject } from "./index.ts";
 
-export type BehaviourTarget = "single-client" | "single-client-opts" | "genserver" | "genserver-keyed" | "genstatem";
-export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "genserver", "genserver-keyed", "genstatem"];
+export type BehaviourTarget = "single-client" | "single-client-opts" | "genserver" | "genserver-keyed" | "genstatem" | "kvserver-plain";
+export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "genserver", "genserver-keyed", "genstatem", "kvserver-plain"];
 export const isBehaviour = (target: string): target is BehaviourTarget => (BEHAVIOUR_TARGETS as readonly string[]).includes(target);
 
 export interface BehavioursEnv {
@@ -70,6 +73,17 @@ export class KvServer extends GenServer<BehavioursEnv, Counter, KvCall | { reado
     if (call.op === "inc") return { reply: state.n + 1, state: { n: state.n + 1 } };
     // put and get keep the state as it is: nothing but their own SQL is written.
     return { reply: kv(this.sql, call), state };
+  }
+
+  // ---- the same work without the behaviour, through a raw stub ----
+
+  async plainPut(keys: readonly string[], values: readonly string[]): Promise<number> {
+    this.sql.exec(CREATE);
+    return this.ctx.storage.transactionSync(() => kv(this.sql, { op: "put", keys, values }) as number);
+  }
+  async plainGet(keys: readonly string[], _payloads: null): Promise<(string | null)[]> {
+    this.sql.exec(CREATE);
+    return kv(this.sql, { op: "get", keys }) as (string | null)[];
   }
 
   // ---- probes, through a raw stub: inside the object, no RPC ----
@@ -151,6 +165,10 @@ function clientOf(env: BehavioursEnv, target: BehaviourTarget, name: string): Pi
       return KvServer.client(env.KV_SERVER, name, { retry: { maxAttempts: 3 } });
     case "genstatem":
       return KvMachine.client(env.KV_MACHINE, name);
+    case "kvserver-plain": {
+      const stub = env.KV_SERVER.getByName(name);
+      return { put: (keys, values) => stub.plainPut(keys, values), get: (keys) => stub.plainGet(keys, null) };
+    }
   }
 }
 
@@ -230,7 +248,7 @@ export interface ProbeRpc {
  * key (`kvserver-receive-keyed`), and a client that sends a key without retrying
  * (`genserver-key-only`).
  */
-type RpcTarget = "single" | BehaviourTarget | "kvserver-plain" | "kvserver-receive" | "kvserver-receive-keyed" | "genserver-key-only";
+type RpcTarget = "single" | BehaviourTarget | "kvserver-receive" | "kvserver-receive-keyed" | "genserver-key-only";
 
 /**
  * Times one-key puts end to end, one at a time, from the caller: what a call through each target
@@ -243,7 +261,7 @@ export async function probeRpc(env: BehavioursEnv, probe: ProbeRpc): Promise<{ c
     const keys = [`key-${i % 1000}`];
     const value = freshValue();
     if (target === "single") return env.SINGLE.getByName(probe.objectName).put(keys, [value]);
-    if (target === "kvserver-plain") return env.KV_SERVER.getByName(probe.objectName).probePlain(1, "put");
+    if (target === "kvserver-plain") return env.KV_SERVER.getByName(probe.objectName).plainPut(keys, [value]);
     if (target === "kvserver-receive-keyed") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] }, key: crypto.randomUUID() });
     // An idempotency key on every call, without retries: the object's side of a keyed call alone.
     if (target === "genserver-key-only") return KvServer.client(env.KV_SERVER, probe.objectName, { idempotencyKey: crypto.randomUUID() }).put(keys, [value]);
