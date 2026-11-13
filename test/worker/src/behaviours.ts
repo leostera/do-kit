@@ -1,9 +1,9 @@
-// Behaviours and Client in the test Worker (RFD0009): a channel pool (Server), a code lock
-// (StateMachine) that reports to an audit log (Server), and a plain object for Client. The route
+// Behaviours and Client in the test Worker (RFD0009): a channel pool (StatefulServer), a code lock
+// (StateMachine) that reports to an audit log (StatefulServer), and a plain object for Client. The route
 // runs in the Worker, so the classes' client methods run here, as in any caller.
 import { DurableObject } from "cloudflare:workers";
 import { CallError, Client, type Attempt, type CallOptions } from "../../../src/client/index.ts";
-import { Server, StateMachine, keep, next, postpone, replyTo, send, stateTimeout, type CallResult, type From, type Metadata, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { StatefulServer, StateMachine, keep, next, postpone, replyTo, send, stateTimeout, type CallResult, type From, type Metadata, type StateHandlers } from "../../../src/behaviours/index.ts";
 
 export interface BehavioursEnv {
   readonly CHANNELS: DurableObjectNamespace<Channels>;
@@ -18,7 +18,7 @@ type Pool = { readonly free: readonly number[]; readonly waiting: readonly From[
 type PoolCall = { readonly op: "alloc" } | { readonly op: "allocWait" } | { readonly op: "hang" } | { readonly op: "explode" } | { readonly op: "state" } | { readonly op: "rows" };
 type PoolCast = { readonly op: "free"; readonly channel: number };
 
-export class Channels extends Server<BehavioursEnv, Pool, PoolCall, unknown, PoolCast> {
+export class Channels extends StatefulServer<BehavioursEnv, Pool, PoolCall, unknown, PoolCast> {
   // ---- client API: runs in the caller ----
   alloc(): Promise<number | null> {
     return this.call({ op: "alloc" }) as Promise<number | null>;
@@ -163,7 +163,7 @@ export class CodeLock extends StateMachine<BehavioursEnv, LockState, LockData, L
 
 type AuditEvent = { readonly type: string; readonly lock?: string; readonly n?: number };
 
-export class Audit extends Server<BehavioursEnv, readonly AuditEvent[], "recent", readonly AuditEvent[], AuditEvent> {
+export class Audit extends StatefulServer<BehavioursEnv, readonly AuditEvent[], "recent", readonly AuditEvent[], AuditEvent> {
   recent(): Promise<readonly AuditEvent[]> {
     return this.call("recent") as Promise<readonly AuditEvent[]>;
   }

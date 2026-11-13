@@ -1,23 +1,23 @@
 // What Client and behaviours cost (RFD0009), on the same one-object key/value work as the
 // `single` target: the same table, the same SQL, the same 1 KiB values.
 //
-//   single              a plain Durable Object through a raw stub: the baseline
-//   single-client       the same object through Client, no options
-//   single-client-opts  the same, with a deadline, retries and an interceptor
-//   server           a Server doing the same SQL in its callbacks, through its client
-//   server-keyed     the same, with retries on: every call carries an idempotency key, kept
-//   state-machine           a one-state StateMachine doing the same SQL
-//   kvserver-plain      the Server's object through a raw stub, doing the SQL in plain methods:
-//                       with BENCH_SHARED_OBJECT, the same object as server, so placement is
-//                       the same and only the behaviour differs
+//   single                 a plain Durable Object through a raw stub: the baseline
+//   single-client          the same object through Client, no options
+//   single-client-opts     the same, with a deadline, retries and an interceptor
+//   stateful-server        a StatefulServer doing the same SQL in its callbacks, through its client
+//   stateful-server-keyed  the same, with retries on: every call carries an idempotency key, kept
+//   state-machine          a one-state StateMachine doing the same SQL
+//   kvserver-plain         the StatefulServer's object through a raw stub, doing the SQL in plain
+//                          methods: with BENCH_SHARED_OBJECT, the same object as stateful-server,
+//                          so placement is the same and only the behaviour differs
 //
 // `/probe-behaviours` times what runs inside the object, without RPC: N events in one call.
 import { Client, type CallOptions } from "../../../src/client/index.ts";
-import { Server, StateMachine, keep, type CallResult, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { StatefulServer, StateMachine, keep, type CallResult, type StateHandlers } from "../../../src/behaviours/index.ts";
 import type { SingleObject } from "./index.ts";
 
-export type BehaviourTarget = "single-client" | "single-client-opts" | "server" | "server-keyed" | "state-machine" | "kvserver-plain";
-export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "server", "server-keyed", "state-machine", "kvserver-plain"];
+export type BehaviourTarget = "single-client" | "single-client-opts" | "stateful-server" | "stateful-server-keyed" | "state-machine" | "kvserver-plain";
+export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "stateful-server", "stateful-server-keyed", "state-machine", "kvserver-plain"];
 export const isBehaviour = (target: string): target is BehaviourTarget => (BEHAVIOUR_TARGETS as readonly string[]).includes(target);
 
 export interface BehavioursEnv {
@@ -53,7 +53,7 @@ function kv(sql: SqlStorage, call: KvCall): number | (string | null)[] {
 
 type Counter = { readonly n: number };
 
-export class KvServer extends Server<BehavioursEnv, Counter, KvCall | { readonly op: "inc" }, unknown> {
+export class KvServer extends StatefulServer<BehavioursEnv, Counter, KvCall | { readonly op: "inc" }, unknown> {
   // ---- client API ----
   put(keys: readonly string[], values: readonly string[]): Promise<number> {
     return this.call({ op: "put", keys, values }) as Promise<number>;
@@ -159,9 +159,9 @@ function clientOf(env: BehavioursEnv, target: BehaviourTarget, name: string): Pi
       const client = new Client(env.SINGLE, name, OPTIONS);
       return { put: (keys, values) => client.invoke("put", keys, values), get: (keys) => client.invoke("get", keys, null) };
     }
-    case "server":
+    case "stateful-server":
       return KvServer.client(env.KV_SERVER, name);
-    case "server-keyed":
+    case "stateful-server-keyed":
       return KvServer.client(env.KV_SERVER, name, { retry: { maxAttempts: 3 } });
     case "state-machine":
       return KvMachine.client(env.KV_MACHINE, name);
@@ -242,13 +242,13 @@ export interface ProbeRpc {
 }
 
 /**
- * Besides the load targets, two that attribute a difference: the Server's object called through
+ * Besides the load targets, two that attribute a difference: the StatefulServer's object called through
  * a raw stub, with a plain write (`kvserver-plain`: the object, without the behaviour) and with an
  * envelope (`kvserver-receive`: the behaviour, without its client), the same with an idempotency
  * key (`kvserver-receive-keyed`), and a client that sends a key without retrying
- * (`server-key-only`).
+ * (`stateful-server-key-only`).
  */
-type RpcTarget = "single" | BehaviourTarget | "kvserver-receive" | "kvserver-receive-keyed" | "server-key-only";
+type RpcTarget = "single" | BehaviourTarget | "kvserver-receive" | "kvserver-receive-keyed" | "stateful-server-key-only";
 
 /**
  * Times one-key puts end to end, one at a time, from the caller: what a call through each target
@@ -264,7 +264,7 @@ export async function probeRpc(env: BehavioursEnv, probe: ProbeRpc): Promise<{ c
     if (target === "kvserver-plain") return env.KV_SERVER.getByName(probe.objectName).plainPut(keys, [value]);
     if (target === "kvserver-receive-keyed") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] }, key: crypto.randomUUID() });
     // An idempotency key on every call, without retries: the object's side of a keyed call alone.
-    if (target === "server-key-only") return KvServer.client(env.KV_SERVER, probe.objectName, { idempotencyKey: crypto.randomUUID() }).put(keys, [value]);
+    if (target === "stateful-server-key-only") return KvServer.client(env.KV_SERVER, probe.objectName, { idempotencyKey: crypto.randomUUID() }).put(keys, [value]);
     if (target === "kvserver-receive") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] } });
     return behaviourWrite(env, target, probe.objectName, keys, [value]);
   };

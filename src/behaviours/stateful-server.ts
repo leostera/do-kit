@@ -1,4 +1,4 @@
-// Server (RFD0009): an object that owns some state and serves requests on it: answered ones
+// StatefulServer (RFD0009): an object that owns some state and serves requests on it: answered ones
 // (calls), fire-and-forget ones (casts), and its own timers (info). A subclass writes `init`,
 // `handleCall`, `handleCast` and `handleInfo` as pure transitions on its state, and its public
 // methods are its client API, run in the caller by `Class.client(ns, name)`. A call can also be
@@ -12,14 +12,14 @@ export type CallResult<S, Reply, Info = never> =
   | { readonly reply: Reply; readonly state: S; readonly effects?: readonly Effect<Info>[] }
   | { readonly noreply: true; readonly state: S; readonly effects?: readonly Effect<Info>[] };
 
-export interface ServerTransition<S, Info = never> {
+export interface StatefulServerTransition<S, Info = never> {
   readonly state: S;
   readonly effects?: readonly Effect<Info>[];
 }
 
 /**
  * ```ts
- * export class Channels extends Server<Env, { free: number[] }, "alloc", number | null, { free: number }> {
+ * export class Channels extends StatefulServer<Env, { free: number[] }, "alloc", number | null, { free: number }> {
  *   alloc() { return this.call("alloc"); }                    // client API, run in the caller
  *   free(channel: number) { return this.cast({ free: channel }); }
  *
@@ -40,7 +40,7 @@ export interface ServerTransition<S, Info = never> {
  * object to skip the write). Never change it in place. Keep big state in your own tables with
  * `this.sql`, written from callbacks, which run in the event's transaction.
  */
-export abstract class Server<Env, S, Call, Reply, Cast = never, Info = never> extends Behaviour<Env, Call, Reply, Cast> {
+export abstract class StatefulServer<Env, S, Call, Reply, Cast = never, Info = never> extends Behaviour<Env, Call, Reply, Cast> {
   protected static override readonly callbacks: readonly string[] = ["init", "migrate", "handleCall", "handleCast", "handleInfo"];
 
   /** The state a new object starts with. Runs once in the object's life, not once per wake. */
@@ -53,12 +53,12 @@ export abstract class Server<Env, S, Call, Reply, Cast = never, Info = never> ex
 
   protected abstract handleCall(request: Call, state: S, from: From, metadata: Metadata): CallResult<S, Reply, Info>;
 
-  protected handleCast(_message: Cast, _state: S, _metadata: Metadata): ServerTransition<S, Info> {
+  protected handleCast(_message: Cast, _state: S, _metadata: Metadata): StatefulServerTransition<S, Info> {
     throw new CallError("INVALID_ARGUMENT", `${this.constructor.name} takes no casts`);
   }
 
   /** Timers' messages. */
-  protected handleInfo(_message: Info, state: S): ServerTransition<S, Info> {
+  protected handleInfo(_message: Info, state: S): StatefulServerTransition<S, Info> {
     return { state };
   }
 

@@ -23,15 +23,15 @@ const RPC_ROWS: [string, string][] = [
   ["single", "plain object, raw stub"],
   ["single-client", "plain object, Client"],
   ["single-client-opts", "plain object, Client with a deadline, retries, an interceptor"],
-  ["kvserver-plain", "Server's object, raw stub, plain write"],
-  ["kvserver-receive", "Server's object, raw stub, envelope"],
-  ["server", "Server client"],
-  ["server-keyed", "Server client with retries (idempotency key)"],
+  ["kvserver-plain", "StatefulServer's object, raw stub, plain write"],
+  ["kvserver-receive", "StatefulServer's object, raw stub, envelope"],
+  ["stateful-server", "StatefulServer client"],
+  ["stateful-server-keyed", "StatefulServer client with retries (idempotency key)"],
   ["state-machine", "StateMachine client"],
 ];
 
 /** Results recorded before the classes were renamed name their targets the old way. */
-const RENAMED: Record<string, string> = { genserver: "server", "genserver-keyed": "server-keyed", genstatem: "state-machine" };
+const RENAMED: Record<string, string> = { genserver: "stateful-server", "genserver-keyed": "stateful-server-keyed", genstatem: "state-machine" };
 const renamed = <T>(byTarget: Record<string, T>): Record<string, T> =>
   Object.fromEntries(Object.entries(byTarget).map(([target, v]) => [RENAMED[target] ?? target, v]));
 
@@ -86,5 +86,5 @@ const client = load<{ nanosPerCall: Record<string, number[]> }>("behaviours-clie
 if (client) {
   console.log("\nFrom behaviours-client-bun.json:\n");
   console.log("| In the caller, per call, no network | median |\n|---|---|");
-  for (const [name, xs] of Object.entries(client.nanosPerCall)) console.log(`| ${name.replace(/^GenServer\b/, "Server")} | ${Math.round(median(xs))} ns |`);
+  for (const [name, xs] of Object.entries(client.nanosPerCall)) console.log(`| ${name.replace(/^GenServer\b/, "StatefulServer")} | ${Math.round(median(xs))} ns |`);
 }

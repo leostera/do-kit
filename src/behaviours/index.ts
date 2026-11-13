@@ -4,6 +4,6 @@
 // client: `Class.client(ns, name, options)` runs its public methods in the caller and sends only
 // messages.
 export { Behaviour, type BehaviourClient } from "./behaviour.js";
-export { Server, type CallResult, type ServerTransition } from "./server.js";
+export { StatefulServer, type CallResult, type StatefulServerTransition } from "./stateful-server.js";
 export { StateMachine, cancelTimeout, keep, namedTimeout, next, postpone, stateTimeout, type StateHandler, type StateHandlers, type StateMachineAction, type StateMachineContext, type StateMachineTransition, type TransitionOptions } from "./state-machine.js";
 export { cancelTimer, replyTo, send, timer, type Effect, type Envelope, type EventKind, type From, type Metadata, type Outcome } from "./envelope.js";

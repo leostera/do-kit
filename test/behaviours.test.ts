@@ -15,7 +15,7 @@ const value = async (name: string, operation: string, args: unknown[] = [], opti
   return settled.value;
 };
 
-describe("Server", () => {
+describe("StatefulServer", () => {
   test("serves calls and casts on its state", async () => {
     const pool = unique("pool");
     expect(await value(pool, "alloc")).toBe(0);
