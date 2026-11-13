@@ -84,7 +84,9 @@ export abstract class WorkGraphRunner<Env = unknown> extends DurableObject<Env> 
 
   /** Asks again now: a chunk may be ready, or this runner's alarm retries ran out. */
   async graphWake(): Promise<void> {
-    if (this.stopping) return;
+    // A step in hand asks the coordinator again, and sets the alarm, when it ends: a write now
+    // would wait for confirmation while that step's chunk holds the thread.
+    if (this.stopping || this.inflight) return;
     const state = await this.ctx.storage.get<RunnerState>("state");
     if (!state || state.stopped) return;
     const at = await this.ctx.storage.getAlarm();
@@ -142,6 +144,9 @@ export abstract class WorkGraphRunner<Env = unknown> extends DurableObject<Env> 
       if (chunks > 0 && Date.now() - started + (answer.cost ?? Number.POSITIVE_INFINITY) > this.invocationMs) return void (await this.ctx.storage.setAlarm(Date.now()));
       // (Tests: a runner lost holding its lease. It keeps its state, as a lost object would, until stopped.)
       if ((await this.chunkStarting(state.run, state.index, answer.chunk, answer.attempt)) === "abandon") return void (await this.ctx.storage.put<RunnerState>("state", { ...state, stopped: true }));
+      // A chunk may hold the thread for as long as its units compute: no write of this object's may
+      // wait for confirmation meanwhile, or the runtime resets the object (its storage timed out).
+      await this.ctx.storage.sync();
       const report = await this.runChunk(state, answer.chunk, answer.attempt, decodeBody(answer.body), answer.fresh === true);
       this.live();
       // Small chunks go on in this invocation: the report goes with the next lease, with no alarm

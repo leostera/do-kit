@@ -1,7 +1,9 @@
 // Work graphs in the test Worker (RFD0005): a coordinator, a runner with the fixture's tasks, and a
 // results store. Runs named with "evict" throw after computing each chunk once (as an eviction
 // would, before the results are written); in runs named with "lose", runner 0 abandons the first
-// chunk it leases and never runs again.
+// chunk it leases and never runs again. Every runner keeps a log of its storage writes, syncs and
+// units computed (`ops`); in runs named with "slow", each unit takes 600 ms, so a chunk outlasts a
+// short wakeAfterMs and the coordinator wakes its runner while it computes.
 import { encodeBody } from "../../../src/workgraph/body.ts";
 import { planWorkGraph } from "../../../src/workgraph/plan.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, shardObjectName } from "../../../src/sharded/index.ts";
@@ -34,9 +36,44 @@ export class GraphCoordinators extends WorkGraphCoordinator<GraphEnv> {
   }
 }
 
+/** The storage calls a runner's log records: the writes, and sync. */
+const WRITES = ["put", "delete", "deleteAll", "setAlarm", "deleteAlarm"] as const;
+
 export class GraphRunners extends WorkGraphRunner<GraphEnv> {
+  /** This instance's storage writes, syncs and units computed, in order. */
+  private readonly ops: string[] = [];
+  private run: string | null = null;
+  constructor(ctx: DurableObjectState, env: GraphEnv) {
+    super(ctx, env);
+    const storage = ctx.storage as unknown as Record<string, (...args: unknown[]) => unknown>;
+    for (const name of [...WRITES, "sync"]) {
+      const original = storage[name]!.bind(storage);
+      storage[name] = (...args: unknown[]) => {
+        this.ops.push(name);
+        return original(...args);
+      };
+    }
+  }
   protected tasks() {
-    return TASKS;
+    const slow = this.run?.includes("slow") ?? false;
+    return Object.fromEntries(
+      Object.entries(TASKS).map(([name, task]) => [
+        name,
+        {
+          ...task,
+          compute: async (...args: Parameters<(typeof task)["compute"]>) => {
+            this.ops.push("compute");
+            if (slow) await new Promise((resolve) => setTimeout(resolve, 600));
+            const out = await (task.compute as (...a: unknown[]) => unknown)(...args);
+            this.ops.push("computed");
+            return out;
+          },
+        },
+      ]),
+    ) as typeof TASKS;
+  }
+  async opLog(): Promise<string[]> {
+    return this.ops;
   }
   protected coordinators() {
     return this.env.GRAPH_COORDINATORS;
@@ -52,6 +89,7 @@ export class GraphRunners extends WorkGraphRunner<GraphEnv> {
     this.ctx.abort("test restart");
   }
   protected override async chunkStarting(run: string, index: number): Promise<"run" | "abandon"> {
+    this.run = run;
     // "each": every chunk in an alarm invocation of its own, its report stored between them.
     this.invocationMs = run.includes("each") ? 0 : 5_000;
     // "poison": every runner dies holding its lease, as on a chunk that needs more CPU than an invocation has.
@@ -91,7 +129,7 @@ export class GraphResults extends WorkGraphResults<GraphEnv> {
 const RESULT_SHARDS = ["", "01", "10", "11"];
 
 export interface GraphRequest {
-  op: "start" | "status" | "results" | "delete" | "storage" | "restart";
+  op: "start" | "status" | "results" | "delete" | "storage" | "restart" | "ops";
   run: string;
   /** A shared results store; without it, the run's own. */
   results?: string;
@@ -124,6 +162,7 @@ export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unk
     await Promise.allSettled(stubs.map((stub) => stub.restart()));
     return null;
   }
+  if (body.op === "ops") return Promise.all(Array.from({ length: body.runners ?? 4 }, (_, i) => env.GRAPH_RUNNERS.get(env.GRAPH_RUNNERS.idFromName(runnerName(body.run, i))).opLog()));
   if (body.op === "storage") {
     // Everything the run may have touched: its coordinator, each runner, each results shard.
     const coordinator = await env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).storage();

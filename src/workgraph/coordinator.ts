@@ -239,7 +239,12 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     for (let i = 0; i < options.runners; i++) this.sql.exec("INSERT OR REPLACE INTO graph_runners (runner, seen_at, waiting) VALUES (?, ?, 0)", i, now);
     await this.ctx.storage.setAlarm(now + (this.meta!.cleanup ? 0 : started.tickMs));
     // A runner this call fails to start is started by the alarm, like one that went quiet.
-    if (this.meta!.state === "running") await Promise.allSettled(Array.from({ length: options.runners }, (_, i) => this.runner(i).graphRun(name, i, results)));
+    // A start that fails (the first call to a new object sometimes does) is made again by the alarm,
+    // at its next tick: the runner has not called yet.
+    if (this.meta!.state === "running") {
+      const starts = await Promise.allSettled(Array.from({ length: options.runners }, (_, i) => this.runner(i).graphRun(name, i, results)));
+      starts.forEach((s, runner) => s.status === "rejected" && console.error(JSON.stringify({ event: "graph-runner-start-failed", run: name, runner, error: String(s.reason) })));
+    }
     return this.status();
   }
 
@@ -437,7 +442,10 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     }
     const lapsed = this.sql.exec<{ id: number; attempts: number }>("UPDATE graph_chunks SET state = 'ready', runner = NULL, lease_until = NULL WHERE state = 'leased' AND lease_until < ? RETURNING id, attempts", now).toArray();
     const expired = lapsed.length;
-    const quiet = this.sql.exec<{ runner: number }>("SELECT runner FROM graph_runners WHERE seen_at < ? AND runner < ?", now - m.wakeAfterMs, m.runners).toArray();
+    // Quiet: a runner that has not called for wakeAfterMs, or one that has never called (its
+    // `seen_at` is still the start's) a tick after the start, as one whose start failed.
+    const neverCalled = m.startedAt !== null && now - m.startedAt >= m.tickMs ? m.startedAt : -1;
+    const quiet = this.sql.exec<{ runner: number }>("SELECT runner FROM graph_runners WHERE (seen_at < ? OR seen_at <= ?) AND runner < ?", now - m.wakeAfterMs, neverCalled, m.runners).toArray();
     this.save({ ...m, expired: m.expired + expired, woken: m.woken + quiet.length });
     // A chunk nobody ever reports on would be leased until the deadline, at an invocation's CPU each time.
     const stuck = lapsed.find((c) => c.attempts >= (m.maxLeases ?? 5));

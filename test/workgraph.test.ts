@@ -295,6 +295,56 @@ test("runners the start never reached are started by the coordinator's alarm", a
   await expectResults(run, shape, results, { chunkMs: 30 });
 }, 60_000);
 
+test("a runner whose start failed is started at the coordinator's next tick, not once it has been quiet for wakeAfterMs", async () => {
+  const run = `nostart-tick-${unique()}`;
+  const shape: Shape = { trees: 4, size: 3, chainy: 0.3, joins: 0, seed: 8 };
+  const results = `nostart-tick-results-${unique()}`;
+  const started = Date.now();
+  await post("/workgraph", { op: "start", run, shape, results, runners: 1, chunkMs: 30, tickMs: 300, wakeAfterMs: 60_000 });
+  const status = await finished(run, 15_000);
+  expect(status.state).toBe("done");
+  expect(Date.now() - started).toBeLessThan(15_000);
+  await expectResults(run, shape, results, { chunkMs: 30 });
+}, 30_000);
+
+/** Whether a log has a write after its last sync, at each point a unit starts computing. */
+function computesWithUnsyncedWrites(ops: readonly string[]): number {
+  let unsynced = false;
+  let found = 0;
+  for (const op of ops) {
+    if (op === "sync") unsynced = false;
+    else if (op === "compute") found += unsynced ? 1 : 0;
+    else if (op !== "computed") unsynced = true;
+  }
+  return found;
+}
+
+test("a runner computes no unit while a write of its own waits for confirmation", async () => {
+  // Every chunk in an invocation of its own: each starts by deleting the report stored before it.
+  const run = `each-ops-${unique()}`;
+  const shape: Shape = { trees: 6, size: 4, chainy: 0.3, joins: 0, seed: 9 };
+  await start(run, shape, { runners: 2, chunkMs: 20 });
+  expect((await finished(run)).state).toBe("done");
+  const logs = await post<string[][]>("/workgraph", { op: "ops", run, runners: 2 });
+  expect(logs.flat().filter((op) => op === "compute").length).toBeGreaterThan(0);
+  expect(logs.map(computesWithUnsyncedWrites)).toEqual([0, 0]);
+}, 60_000);
+
+test("a runner woken while it computes writes nothing until its chunk is done", async () => {
+  // Units of 600 ms in chunks of several: the coordinator finds the runner quiet, and wakes it, mid-chunk.
+  const run = `slow-ops-${unique()}`;
+  const shape: Shape = { trees: 2, size: 4, chainy: 0.3, joins: 0, seed: 10 };
+  await start(run, shape, { runners: 1, chunkMs: 1_000_000, tickMs: 200, wakeAfterMs: 300 });
+  const status = await finished(run);
+  expect(status.state).toBe("done");
+  expect(status.woken).toBeGreaterThan(0);
+  const [log] = await post<string[][]>("/workgraph", { op: "ops", run, runners: 1 });
+  // Between a chunk's first unit and its last, only units.
+  const first = log!.indexOf("compute");
+  const last = log!.lastIndexOf("computed");
+  expect(log!.slice(first, last + 1).filter((op) => op !== "compute" && op !== "computed")).toEqual([]);
+}, 60_000);
+
 test("a chunk whose runners never report fails the run, instead of being leased until the deadline", async () => {
   const run = `poison-${unique()}`;
   const shape: Shape = { trees: 1, size: 3, chainy: 1, joins: 0, seed: 1 };

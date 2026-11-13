@@ -4,7 +4,7 @@
 - Status: Draft (built)
 - Author: `leostera`
 - Start Date: `2026-11-10`
-- Updated: `2026-11-12`
+- Updated: `2026-11-13`
 - Discussion PR: none
 - Tracking Issue: none
 
@@ -385,8 +385,9 @@ Failing:
 
 The alarm, every 5 s until the run ends:
 - **Expiry.** A lease that ran out goes back to `ready`.
-- **Wake.** A runner that has not called for 30 s is started again if its start never reached it,
-  and woken otherwise. A runner's own alarm is retried at most 6 times by the platform, so a
+- **Wake.** A runner that has never called is started again at the first tick after the start: its
+  start never reached it (the first call to a new object sometimes fails). A runner that has not
+  called for 30 s is woken. A runner's own alarm is retried at most 6 times by the platform, so a
   runner whose retries ran out would otherwise stay asleep. When chunks become ready, as many
   waiting runners are woken as there are chunks to take; the others poll every 2 s.
 - **Deadline.** A run past its deadline fails. A run submitted and never started fails a day after
@@ -687,6 +688,11 @@ budget.
   tombstone with the final counts, rather than the caller waiting on a call that returns it before
   the wipe. A tombstone needs no caller connected, and that is what a poll from another request
   needs. It has no alarm but the one that expires it, and holds no chunks.
+- A runner commits its writes (`storage.sync()`) before it computes a chunk, and ignores a wake
+  while it has a step in hand. A chunk holds the object's thread while its units compute, and a
+  write still waiting for confirmation then outlives the runtime's storage timeout, which resets
+  the object: the chunk is lost, and its lease runs out before another runner takes it. On the
+  edge, 64 runners on 30 s chunks saw about 100 such resets a run, and half the runners sat idle.
 - `graphStatus()` reports `busyMs`, the runners' time on the chunks done, so a run measures its own
   work: `busyMs / elapsedMs` is how many runners were busy on average.
 
