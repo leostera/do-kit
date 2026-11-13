@@ -263,68 +263,74 @@ Interceptors are the hook for tracing and logs. Outbox failures and dropped time
 
 ### Overhead, measured
 
-On the Cloudflare edge, a `DurableStateMachine` costs what plain methods doing the same SQL on the
-same object cost, at every load measured: the behaviour adds about 1 µs of work per event, and its
-client under 1 µs per call, against calls of 5 to 40 ms. An idempotency key is the exception: it
-writes one more row, so a keyed read waits for a durable commit. The tables below are printed by
-`bun bench/behaviours-tables.ts`.
+A caller can't see the layer: through a `DurableStateMachine`, one put end to end costs what it
+costs through plain methods on the same object, and under load the machine's throughput stays
+within the plain methods' range at every level measured, up to 256 calls in flight. Inside the
+object, an XState event adds about 20 µs of work (deciding the transition, and wrapping the event)
+over a plain transaction, and about 80 µs to a seat grabbed and released (a state change and a
+timer every event). An idempotency key writes one more row, so a keyed read waits for a durable
+commit. The tables below are printed by `bun bench/behaviours-tables.ts`; each cell is the median
+of three runs' medians with the range of the three, because the edge's hosts varied run to run
+more than any run varied within itself (plain puts took 104 µs in one run and 26 µs in another).
 
-Inside one object, 20,000 one-key 1 KiB puts or counter increments per call, 11 rounds
-(`bench/results/behaviours-probe-edge.json`, Worker version `4b985fbf`):
+Inside one object, 20,000 events per call, 11 rounds per run, kinds alternating within a round
+(`bench/results/behaviours-probe-edge-{1,2,3}.json`, Worker version `2ec7535b`):
 
-| Inside one object, per event | best | median |
-|---|---|---|
-| put, plain transaction | 22.1 µs | 23.3 µs |
-| put, behaviour event | 22.4 µs | 23.8 µs |
-| put, envelope with a deadline | 22.4 µs | 24.0 µs |
-| put, envelope with an idempotency key (kept) | 35.5 µs | 42.6 µs |
-| counter in SQL, plain | 10.4 µs | 11.7 µs |
-| counter in the behaviour's JSON state | 14.3 µs | 14.8 µs |
+| Inside one object, per event | median of runs (range) |
+|---|---|
+| put, plain transaction | 27.4 µs (25.6 µs–104.6 µs) |
+| put, state machine event | 45.1 µs (40.4 µs–155.7 µs) |
+| put, envelope with a deadline | 44.0 µs (40.8 µs–150.3 µs) |
+| put, envelope with an idempotency key (kept) | 84.2 µs (70.0 µs–248.3 µs) |
+| counter in SQL, plain | 13.6 µs (12.4 µs–15.8 µs) |
+| counter in the machine's context | 32.3 µs (30.1 µs–37.3 µs) |
+| seat grabbed and released, by hand | 63.7 µs (34.5 µs–81.0 µs) |
+| seat grabbed and released, state machine | 145.3 µs (76.3 µs–167.0 µs) |
 
-The same Worker version, 200 sequential puts from the Worker per round, 11 rounds, targets
-alternating within a round:
+The same runs, 200 sequential puts from the Worker per round, targets alternating within a round:
 
-| One put end to end, one at a time | best | median |
-|---|---|---|
-| plain object, raw stub | 16.05 ms | 17.26 ms |
-| plain object, Client | 16.39 ms | 17.00 ms |
-| plain object, Client with a deadline, retries, an interceptor | 16.38 ms | 16.86 ms |
-| state machine's object, raw stub, plain write | 16.25 ms | 16.77 ms |
-| state machine's object, raw stub, envelope | 16.49 ms | 16.73 ms |
-| DurableStateMachine client | 16.21 ms | 16.75 ms |
-| DurableStateMachine client with retries (idempotency key) | 16.41 ms | 16.87 ms |
+| One put end to end, one at a time | median of runs (range) |
+|---|---|
+| plain object, raw stub | 16.3 ms (16.0 ms–21.4 ms) |
+| plain object, Client | 16.3 ms (15.9 ms–21.5 ms) |
+| plain object, Client with a deadline, retries, an interceptor | 16.5 ms (15.6 ms–21.2 ms) |
+| state machine's object, raw stub, plain write | 17.8 ms (17.6 ms–18.2 ms) |
+| state machine's object, raw stub, envelope | 17.8 ms (17.4 ms–18.3 ms) |
+| DurableStateMachine client | 17.8 ms (17.3 ms–18.1 ms) |
+| DurableStateMachine client with retries (idempotency key) | 17.9 ms (17.4 ms–18.2 ms) |
 
 Under load, one object called by up to 256 calls in flight, through plain methods and as a state
 machine, on that same object, so placement is the same and only the behaviour differs
-(`bench/results/behaviours-load-edge.json`, the same Worker version; calls/s, p50 / p99):
+(`bench/results/behaviours-load-edge-{1,2,3}.json`, the same Worker version; 10 s per point after
+an unmeasured warm-up):
 
 Writes:
 
 | Target | 1 in flight | 16 in flight | 64 in flight | 256 in flight |
 |---|---|---|---|---|
-| state-machine-plain | 25/s, 40 / 58 ms | 150/s, 95 / 285 ms | 511/s, 73 / 430 ms | 1,204/s, 102 / 976 ms |
-| state-machine | 25/s, 41 / 55 ms | 158/s, 80 / 212 ms | 594/s, 96 / 220 ms | 1,351/s, 126 / 525 ms |
-| state-machine-keyed | 25/s, 41 / 50 ms | 154/s, 95 / 214 ms | 551/s, 99 / 302 ms | 1,105/s, 177 / 776 ms |
+| state-machine-plain | 45 (31–48)/s, 22 / 38 ms | 180 (120–214)/s, 73 / 246 ms | 518 (408–625)/s, 87 / 434 ms | 770 (687–776)/s, 203 / 1027 ms |
+| state-machine | 41 (23–47)/s, 24 / 40 ms | 177 (175–219)/s, 73 / 215 ms | 554 (529–584)/s, 100 / 274 ms | 757 (676–1,290)/s, 278 / 846 ms |
+| state-machine-keyed | 42 (32–42)/s, 23 / 47 ms | 185 (178–212)/s, 69 / 211 ms | 619 (513–690)/s, 86 / 255 ms | 668 (638–1,159)/s, 326 / 855 ms |
 
 Reads:
 
 | Target | 1 in flight | 16 in flight | 64 in flight | 256 in flight |
 |---|---|---|---|---|
-| state-machine-plain | 206/s, 6 / 8 ms | 768/s, 6 / 161 ms | 1,844/s, 10 / 334 ms | 2,165/s, 45 / 806 ms |
-| state-machine | 243/s, 5 / 9 ms | 756/s, 6 / 156 ms | 1,929/s, 11 / 195 ms | 2,324/s, 50 / 538 ms |
-| state-machine-keyed | 44/s, 24 / 31 ms | 239/s, 45 / 216 ms | 710/s, 61 / 275 ms | 905/s, 227 / 820 ms |
+| state-machine-plain | 115 (113–130)/s, 9 / 17 ms | 365 (274–387)/s, 27 / 216 ms | 739 (730–1,086)/s, 50 / 400 ms | 1,171 (1,000–1,387)/s, 135 / 986 ms |
+| state-machine | 129 (88–135)/s, 8 / 27 ms | 367 (269–391)/s, 29 / 211 ms | 797 (738–1,070)/s, 56 / 229 ms | 1,086 (813–1,288)/s, 182 / 705 ms |
+| state-machine-keyed | 30 (25–32)/s, 33 / 50 ms | 158 (136–188)/s, 73 / 269 ms | 370 (331–481)/s, 162 / 390 ms | 397 (387–546)/s, 562 / 1193 ms |
 
 In the caller, with no network, Bun, 200,000 calls per round, 9 rounds
 (`bench/results/behaviours-client-bun.json`):
 
 | In the caller, per call, no network | median |
 |---|---|
-| raw stub | 37 ns |
-| Client | 196 ns |
-| Client, timeout + retries + interceptor | 641 ns |
-| DurableStateMachine client | 239 ns |
-| DurableStateMachine client, timeout | 880 ns |
-| DurableStateMachine client, retries (idempotency key) | 457 ns |
+| raw stub | 29 ns |
+| Client | 199 ns |
+| Client, timeout + retries + interceptor | 579 ns |
+| DurableStateMachine client | 273 ns |
+| DurableStateMachine client, timeout | 585 ns |
+| DurableStateMachine client, retries (idempotency key) | 365 ns |
 
 Three things to know when reading these numbers:
 
@@ -333,8 +339,8 @@ Three things to know when reading these numbers:
   every benchmark write here stores a value no write stored before (`BENCH_UNIQUE_VALUES`).
 - **An idempotency key turns any call into a write.** Its answer is kept in `behaviour_replies` in
   the call's transaction. A keyed write costs nothing extra (the write commits anyway), but a keyed
-  read waits for a durable commit: 24 ms against 5 ms, and under half the throughput under load.
-  Callers should send keys on calls that change state, and retry reads without one.
+  read waits for a durable commit: 33 ms against 8 ms, and about a third of the throughput under
+  load. Callers should send keys on calls that change state, and retry reads without one.
 - **The context is JSON**, written whole after every event that changes it, and grows with it;
   actions can keep big data in tables.
 
