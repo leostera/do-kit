@@ -5,7 +5,7 @@
 //   @leostera/do-kit/workgraph  Work graphs: incremental, parallel execution of a graph of pure units.
 //   @leostera/do-kit/leased   ReadLeases, RelayReads, RelayPlan: one object's hot keys, read through relays.
 //   @leostera/do-kit/client   Client: calls to any object with deadlines, retries and interceptors.
-//   @leostera/do-kit/behaviours  DurableStateMachine: an object as a state machine, with durable timeouts.
+//   @leostera/do-kit/behaviours  DurableStateMachine: an XState machine as a Durable Object that survives eviction.
 export * from "./sharded/index.js";
 export * from "./table/index.js";
 export * from "./indexed/index.js";

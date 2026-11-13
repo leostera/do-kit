@@ -4,7 +4,7 @@
 - Status: Draft (built)
 - Author: `leostera`
 - Start Date: `2026-11-12`
-- Updated: `2026-11-12`
+- Updated: `2026-11-13`
 - Discussion PR: none
 - Tracking Issue: none
 
@@ -16,10 +16,11 @@ Two layers that sit beside the sharding layers rather than on them:
   a deadline, retries with backoff on transient failures only, cancellation, metadata,
   interceptors around every attempt, and errors with a status code. Options are set on a client
   and narrowed per call with `.with({ ... })`.
-- **`DurableStateMachine`** (`@leostera/do-kit/behaviours`) is a base class for an object that is a
-  state machine, with durable timeouts per state and postponed events. A subclass writes synchronous callbacks that turn an
-  event and the state into a new state and a list of effects; the base class runs one event at a
-  time and commits state, timers, outbox and kept answers in one transaction. The class is also its
+- **`DurableStateMachine`** (`@leostera/do-kit/behaviours`) runs an [XState](https://stately.ai/docs/xstate)
+  machine as a Durable Object. XState decides each transition with its pure `transition()`, which
+  returns the next snapshot and the actions to run without running them; the base class runs one
+  event at a time and commits the snapshot, the machine's SQL, its timers (XState's delayed
+  transitions), its messages to other objects and its answer in one transaction. The class is also its
   own client: `Class.client(ns, name, options)` runs the class's public methods in the caller, and
   sends only the messages they make.
 
@@ -48,21 +49,23 @@ None of this needs sharding, so it belongs beside the sharding layers, usable by
 ## Goals
 
 - **One event at a time** per object, with no lock and no `blockConcurrencyWhile`.
-- **All or nothing per event:** a callback's state change, its own SQL writes, its timers, its
+- **All or nothing per event:** a transition's snapshot, its own SQL writes, its timers, its
   outbox messages and its answer commit together, or none of them do.
 - **Durable timers and outbox**, multiplexed over the one alarm.
 - **The class is the client:** typed client methods, written once, run in the caller.
 - **Calls with a deadline, retries that are safe, typed errors**, from any caller to any object.
-- **Minimal overhead:** a behaviour event costs about a microsecond inside the object, and a client
-  call well under one; nothing is paid for an option that isn't used.
+- **Overhead a caller can't see:** microseconds inside the object against calls of milliseconds;
+  nothing is paid for an option that isn't used.
 
 ## Non-goals
 
 - **Supervision across objects** (restart a child, escalate to a parent). The runtime already
   restarts every object on its next event; what would remain is health checking, which needs
   failure notifications between objects that the platform doesn't give. Future work.
-- **Async callbacks.** A callback that awaits would interleave. I/O is an effect, and its result
-  comes back as an event.
+- **Async actions, and XState's in-memory actors.** Actions run synchronously inside the
+  transaction; one that awaited would interleave. Invoked actors, spawned children, `sendTo` and
+  `emit` live in XState's in-memory system, which an evicted object loses, so they are refused at
+  the transition that asks for them. I/O is a message out and an event back.
 - **Answers that survive the object resetting.** A deferred answer reaches a caller still waiting
   in the same instance of the object; a caller of an instance that reset gets an error.
 - **An event manager** (one object fanning events out to handlers added at run time). Handlers in
@@ -109,26 +112,52 @@ A failed call throws a `CallError` with a `code`:
 ### DurableStateMachine
 
 ```ts
-export class Door extends DurableStateMachine<Env, "locked" | "open", Data, DoorEvent> {
-  press(digit: string) { return this.cast({ type: "press", digit }); }
+import { assign, setup } from "xstate";
+import { DurableStateMachine, durableActions, reply, sendToObject } from "@leostera/do-kit/behaviours";
 
-  protected init() { return { state: "locked", data: { code: "1234", entered: "" } } as const; }
-  protected readonly states = {
-    locked: (event, data) => {
-      if (event.type !== "press") return keep(data);
-      const entered = (data.entered + event.digit).slice(-4);
-      if (entered !== data.code) return keep({ ...data, entered });
-      // Open for 10 s; the timeout is cancelled if the state changes first.
-      return next("open", { ...data, entered: "" }, { actions: [stateTimeout(10_000, { type: "lock" })] });
+const door = setup({
+  types: { context: {} as { code: string; entered: string }, events: {} as DoorEvent },
+  actions: { ...durableActions },
+  guards: { opens: ({ context, event }) => (context.entered + event.digit).slice(-4) === context.code },
+}).createMachine({
+  context: { code: "1234", entered: "" },
+  initial: "locked",
+  states: {
+    locked: {
+      on: {
+        press: [
+          { guard: "opens", target: "open", actions: [assign({ entered: "" }), sendToObject("AUDIT", "doors", () => ({ type: "opened" }))] },
+          { actions: assign({ entered: ({ context, event }) => (context.entered + event.digit).slice(-4) }) },
+        ],
+        status: { actions: reply(() => "locked") },
+      },
     },
-    open: (event, data) => (event.type === "lock" ? next("locked", data) : postpone()),
-  };
+    // Open for 10 s: a timer on the alarm, cancelled if the state changes first.
+    open: { after: { 10_000: "locked" }, on: { lock: "locked", status: { actions: reply(() => "open") } } },
+  },
+});
+
+export class Door extends DurableStateMachine<Env, typeof door> {
+  protected readonly machine = door;
+  // Client API: public, and run in the caller.
+  press(digit: string) { return this.cast({ type: "press", digit }); }
+  status() { return this.call({ type: "status" }) as Promise<"locked" | "open">; }
 }
+
+const front = Door.client(env.DOORS, "front", { timeoutMs: 200 });
+await front.press("1");   // `press` runs here; one RPC carries { type: "press", digit: "1" }
 ```
 
-`postpone()` keeps the event and runs it again after the next state change, oldest first: presses
-while the door is open wait until it locks. A postponed call keeps its caller waiting, and is
-answered when the state lets it run.
+The machine is plain XState, designed and tested as XState is. What the object adds:
+
+- `reply(fn)` answers the event's caller; `replyTo(to, fn)` answers an earlier one, kept from
+  `callOf(event).from`, which also carries the caller's metadata.
+- `sendToObject(binding, name, fn)` sends an event to another object through the outbox.
+- `after` transitions are timers on the alarm; leaving the state cancels them.
+- An event the current state takes no transition for waits, and runs again after the next state
+  change, oldest first (`postponeUnhandled`, on by default); `postpone()` does the same from a
+  guarded transition. A postponed call keeps its caller waiting, and is answered when the state
+  lets it run.
 
 ## Reference-level explanation
 
@@ -138,9 +167,11 @@ answered when the state lets it run.
   any Worker or object, against any class.
 - `src/behaviours/behaviour.ts`: the shared base (`Behaviour`): the `receive` RPC method, the event
   loop, the transaction, timers, outbox, kept answers, postponed events, and `Class.client`.
-- `durable-state-machine.ts`: maps the state handlers onto the base's one internal
-  `behaviourStep(event, state) → Step`. The base is kept separate so another shape can sit on it
-  without touching the event loop.
+- `durable-state-machine.ts`: runs XState's `transition()` as the base's one internal
+  `behaviourStep(event, state) → Step`, and turns its actions into the base's effects:
+  `xstate.raise` with a `delay` becomes a timer named by its id, `xstate.cancel` cancels it, and
+  the durable actions become answers, outbox rows and postponed events. Other actions run inside
+  the transaction. The base is kept separate so the event loop doesn't depend on XState.
 
 ### Data model and interfaces
 
@@ -149,13 +180,16 @@ Every client call is one RPC, `receive(envelope)`, where an envelope is
 `{ ok: true, value } | { ok: false, code, message }`. Failures are values so their codes survive
 RPC.
 
-Tables, created on first use: `behaviour_state` (one row: version and state as JSON),
+Tables, created on first use: `behaviour_state` (one row: version and XState's persisted snapshot
+as JSON),
 `behaviour_timers` (name, due, message), `behaviour_outbox`, `behaviour_replies` (answers kept by
 idempotency key, pruned after `idempotencyTtlMs`, 10 minutes by default) and
 `behaviour_postponed`.
 
-State is written only when a callback returns a new state object. Callbacks may also write their
-own tables through `this.sql`: they run inside the event's transaction.
+The snapshot is written only when XState returns a new one: a transition that only runs actions
+(answers, sends, SQL) keeps it. Actions may write their own tables through `this.sql`, given to a
+machine built per object (`machine = build(() => this.sql)`): they run inside the event's
+transaction. A new object's initial state is committed with the timers entering it sets.
 
 ### Lifecycle and failure semantics
 
@@ -163,22 +197,22 @@ One event:
 
 1. `receive` refuses an envelope whose deadline has passed, unhandled (`DEADLINE_EXCEEDED`).
 2. With a key: a kept answer is returned as is; a call with the same key still running is joined.
-3. In one `transactionSync`: the callback runs, then its state, effects (timers, outbox rows, kept
-   answers) are written. If the callback throws, the transaction rolls back, the in-memory state is
-   reloaded from storage (the callback may have changed it in place), and the caller gets the
-   error's code (`INTERNAL` for anything not a `CallError`).
+3. In one `transactionSync`: XState's transition and the actions that run here, then the
+   snapshot and the effects (timers, outbox rows, kept answers) are written. If anything throws,
+   the transaction rolls back, the in-memory snapshot is reloaded from storage, and the caller gets
+   the error's code (`INTERNAL` for anything not a `CallError`).
 4. After the commit: deferred answers are delivered, the alarm is set for the earliest timer, and
    the outbox drains in the background (`waitUntil`). Output gates hold the answer until the commit
    is durable.
 5. If a state machine changed state, postponed events run again, each in its own transaction: one
    that throws is dropped and fails its caller, without undoing the others.
 
-Timers fire from the alarm as `info` events (timeouts, for a state machine). A timer whose callback
-throws is dropped, not retried forever. The outbox sends each message as a cast with the key
+Timers fire from the alarm as the delayed event XState asked for. A timer whose transition throws
+is dropped, not retried forever. The outbox sends each message as a cast with the key
 `<object id>/<row id>`, so a message sent twice (the object reset after sending, before deleting
 the row) is handled once by its receiver. A failed send is retried from the alarm after a second.
 
-A deferred answer (`noreply`, or a postponed call) is a resolver held in memory: if the object
+A deferred answer (a call no action answered, or a postponed call) is a resolver held in memory: if the object
 resets first, the caller's RPC fails. A `From` kept in state across a restart names an earlier
 instance and matches no new caller.
 
@@ -190,14 +224,15 @@ that ran gets its first answer.
 
 ### Invariants
 
-- At most one callback runs at a time per object, and it runs inside a transaction.
-- A callback's state, SQL writes, timers, outbox rows and kept answer commit together or not at all.
+- At most one transition runs at a time per object, and it runs inside a transaction.
+- A transition's snapshot, SQL writes, timers, outbox rows and kept answer commit together or not
+  at all.
 - An answer leaves the object only after its event committed (output gates).
 - A message in the outbox is delivered at least once and handled at most once per receiver key.
 - A call with an idempotency key runs at most once within `idempotencyTtlMs`.
-- A raw stub can't run a callback: callbacks on the prototype are wrapped to refuse unless an event
-  is running. (RPC reaches every prototype method, `protected` or not; instance fields, such as a
-  state machine's `states`, are never exposed.)
+- A raw stub can't run a callback: `migrate`, on the prototype, is wrapped to refuse unless an
+  event is running. (RPC reaches every prototype method, `protected` or not; instance fields, such
+  as the `machine`, are never exposed.)
 
 ### Compatibility and migration
 
@@ -207,18 +242,22 @@ implement `migrate(fromVersion, stored)` when the state's shape changes. The bas
 
 ### Security, privacy, and observability
 
-Metadata travels in the envelope and reaches callbacks; it is not authenticated by the layer.
+Metadata travels in the envelope and reaches actions through `callOf(event)`; it is not
+authenticated by the layer.
 Interceptors are the hook for tracing and logs. Outbox failures and dropped timers are logged with
 `console.error`.
 
 ### Rollout and validation
 
-- `test/behaviours.test.ts` runs every behaviour on objects under cf dev (or deployed): calls,
-  casts, client methods running in the caller, metadata, restarts, rollback (rows, state, a state
-  changed in place), deferred answers, deadlines on both sides, idempotency (repeated and
-  concurrent), a caller of an object that reset, raw-stub access to callbacks, state timeouts
-  across restarts and their cancellation, postponed events and calls, and an outbox message
-  from one state machine reaching another.
+- `test/behaviours.test.ts` runs XState machines on objects under cf dev (or deployed): calls,
+  casts, client methods running in the caller, metadata, restarts, rollback (rows and context),
+  deferred answers, deadlines on both sides, idempotency (repeated and concurrent), a caller of an
+  object that reset, raw-stub access to callbacks, delayed transitions across restarts and their
+  cancellation, postponed events and calls, and an outbox message from one machine reaching
+  another.
+- `test/seats.test.ts` runs a seat hold: a delayed transition fired from the alarm after a
+  restart, its cancellation, an event waiting for a state that takes it, an action that throws,
+  and an outbox message.
 - `test/client.test.ts` covers the Client's retries, overload, stub reuse, deadlines, interceptors and
   option merging against a scripted namespace.
 
@@ -296,19 +335,24 @@ Three things to know when reading these numbers:
   the call's transaction. A keyed write costs nothing extra (the write commits anyway), but a keyed
   read waits for a durable commit: 24 ms against 5 ms, and under half the throughput under load.
   Callers should send keys on calls that change state, and retry reads without one.
-- **JSON data** costs about 3 µs over a SQL counter for small data, and grows with it; handlers can
-  keep big data in tables.
+- **The context is JSON**, written whole after every event that changes it, and grows with it;
+  actions can keep big data in tables.
 
 ## Drawbacks
 
-- **Synchronous callbacks are a constraint.** Anything that needs I/O mid-transition becomes two
-  steps: an effect out, an event back.
+- **Synchronous actions are a constraint.** Anything that needs I/O mid-transition becomes two
+  steps: a message out, an event back.
+- **XState costs CPU.** Deciding one event takes it 6 to 9 µs where a hand-written decision takes
+  0.05 to 0.2 µs (see below). A caller doesn't see it; one object sustaining over about a thousand
+  events a second, or handling tens of thousands in one call, does.
+- **XState is a dependency**, and the layer leans on its pure `transition()` and on the shape of
+  its actions (`xstate.raise` with `delay` and `id`, `xstate.cancel` with `sendId`).
 - **JSON state is written whole** after every event that changes it. Fine for small state; big
   state belongs in tables.
 - **Deferred answers don't survive resets.** A long wait between objects should be a message back,
   not a held call.
-- **Every prototype method is RPC-reachable.** The callback guard covers the base classes'
-  callbacks; a subclass's own helper methods are as exposed as on any Durable Object.
+- **Every prototype method is RPC-reachable.** The guard covers `migrate`; a subclass's own helper
+  methods are as exposed as on any Durable Object.
 
 ## Rationale and alternatives
 
@@ -316,8 +360,37 @@ Three things to know when reading these numbers:
 
 Synchronous transitions plus effects is the smallest design that gets all four motivations at
 once: serial events without a lock, rollback by the transaction, effects that can't be lost, and
-timers as data. Putting the client on the same class keeps the protocol in one place: client
-methods and callbacks change together, and the types check them together.
+timers as data. XState's pure `transition()` is exactly that shape, so the transitions are
+XState's and the durability is this layer's. Putting the client on the same class keeps the
+protocol in one place: client methods and the machine change together.
+
+### Why XState, and not our own handlers
+
+The first version had its own handler API: one function per state returning `next(state, data)`,
+`keep(data)` or `postpone()`, with `stateTimeout` and named timeouts. It was dropped for XState:
+
+- XState is the richer language (nested and parallel states, guards, history, entry and exit
+  actions), with an editor, a visualizer and model-based tests, and people already know it.
+- The cost is CPU only. Deciding one event, with no storage or RPC, measured in Bun
+  (`bench/results/xstate-step-bun.json`, at commit `b522906`, where the handlers still existed):
+
+  | Workload | handlers | XState |
+  |---|---|---|
+  | key/value put, state unchanged | 51 ns | 5,940 ns |
+  | counter in the state | 150 ns | 6,933 ns |
+  | seat grabbed and released (state change and timer) | 169 ns | 8,802 ns |
+
+  On the edge, inside one object, XState added 1 to 106 µs per event over the handlers, in three
+  runs whose own baselines varied twofold (`bench/results/behaviours-xstate-probe-edge-{1,2,3}.json`,
+  commit `8254e89`); a put end to end cost the same through both, 15 to 22 ms.
+- So it matters at one object near its limit: about 1,000 events a second sustained on one object
+  (where a 0.1 ms decision on a ~0.8 ms request lowers its ceiling by up to about a tenth), or
+  tens of thousands of events in one call. Spreading over objects removes it.
+
+XState's own runtime inside a Durable Object doesn't work: delayed transitions are `setTimeout`,
+and invoked promises live in memory, so an evicted object forgets both; its snapshot, SQL and
+messages commit separately unless every app wires them into one transaction; and it has no
+answers to callers, idempotency or deadlines.
 
 ### Simpler or narrower approach
 
@@ -341,6 +414,7 @@ Each app keeps writing its own status columns, alarm multiplexers, retry loops a
 
 ## Prior art
 
+- XState and Stately: the machines, the pure `transition()`, delayed transitions.
 - Erlang/OTP's behaviours: the split between generic code and callbacks, calls, casts, deferred
   replies, state machines with state timeouts and postponed events. The failure
   model is different: a restarted process loses its state, a reset object keeps it, so here the
@@ -352,13 +426,14 @@ Each app keeps writing its own status columns, alarm multiplexers, retry loops a
 
 ### Before acceptance
 
-- Run the edge benchmark, and decide whether any measured overhead needs work.
 - Should `cast` return before handling (enqueue and answer), rather than after the commit?
+- Should `postponeUnhandled` stay on by default? On, a misspelled event waits forever.
 
 ### During implementation
 
-- An `onEnter` callback for state machines.
 - Bounding the in-memory postponed retry rounds, now 64, by configuration.
+- Invoked promises made durable: run after the commit, with a row so they run again after a
+  reset, and their `done`/`error` events fed back.
 
 ### Out of scope
 
