@@ -149,6 +149,17 @@ export abstract class Behaviour<Env = unknown, Call = unknown, Reply = unknown, 
   protected abstract behaviourMigrate(fromVersion: number, stored: unknown): unknown;
   /** @internal One event's transition. Synchronous: it runs inside the transaction. */
   protected abstract behaviourStep(event: BehaviourEvent, state: unknown): Step;
+  /**
+   * @internal The state as stored, as JSON. Identity by default; a state that is a live object
+   * (with methods, or links to its definition) stores a plain form of itself.
+   */
+  protected behaviourEncode(state: unknown): unknown {
+    return state;
+  }
+  /** @internal The live state from its stored form: the inverse of `behaviourEncode`. */
+  protected behaviourDecode(stored: unknown): unknown {
+    return stored;
+  }
 
   /** The SQLite database, for callbacks that keep more than fits in their state. Write only from a callback: it runs in the event's transaction. */
   protected get sql(): SqlStorage {
@@ -240,14 +251,14 @@ export abstract class Behaviour<Env = unknown, Call = unknown, Reply = unknown, 
   /** The stored state, upgraded if older; a new object's initial state, stored. */
   #loadState(): unknown {
     const row = this.sql.exec<{ version: number; state: string }>("SELECT version, state FROM behaviour_state WHERE k = 0").toArray()[0];
-    if (row && row.version === this.version) return JSON.parse(row.state);
+    if (row && row.version === this.version) return this.behaviourDecode(JSON.parse(row.state));
     const state = this.#inStep(() => (row ? this.behaviourMigrate(row.version, JSON.parse(row.state)) : this.behaviourInit()));
     this.#saveState(state);
     return state;
   }
 
   #saveState(state: unknown): void {
-    this.sql.exec("INSERT INTO behaviour_state (k, version, state) VALUES (0, ?, ?) ON CONFLICT (k) DO UPDATE SET version = excluded.version, state = excluded.state", this.version, JSON.stringify(state));
+    this.sql.exec("INSERT INTO behaviour_state (k, version, state) VALUES (0, ?, ?) ON CONFLICT (k) DO UPDATE SET version = excluded.version, state = excluded.state", this.version, JSON.stringify(this.behaviourEncode(state)));
   }
 
   /** Runs one new event, and answers its caller now, or later if the callback deferred it. */

@@ -39,6 +39,7 @@ export default defineConfig(() => ({
       LOCKS: bindings.durableObject({ worker: NAME, exportName: "CodeLock" }),
       AUDITS: bindings.durableObject({ worker: NAME, exportName: "Audit" }),
       PLAINS: bindings.durableObject({ worker: NAME, exportName: "Plain" }),
+      SEATS: bindings.durableObject({ worker: NAME, exportName: "Seat" }),
     },
     exports: {
       Counters: exports.durableObject({ storage: "sqlite" }),
@@ -61,6 +62,7 @@ export default defineConfig(() => ({
       CodeLock: exports.durableObject({ storage: "sqlite" }),
       Audit: exports.durableObject({ storage: "sqlite" }),
       Plain: exports.durableObject({ storage: "sqlite" }),
+      Seat: exports.durableObject({ storage: "sqlite" }),
     },
   },
 }));
