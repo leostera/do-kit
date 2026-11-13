@@ -338,6 +338,10 @@ In the caller, with no network, Bun, 200,000 calls per round, 9 rounds
 | DurableStateMachine client, timeout | 585 ns |
 | DurableStateMachine client, retries (idempotency key) | 365 ns |
 
+The results files name the commit they ran at as it was before this branch was rebased onto
+`main`; the same commits are now `aab9d21` (was `50c5185`), `e5f8889` (`b522906`), `611b116`
+(`8254e89`), `47ccbe9` (`e75c488`) and `62deeb4` (`36b2093`).
+
 Three things to know when reading these numbers:
 
 - **A write is a durable write only if it changes bytes.** A put of the value a key already holds
@@ -384,7 +388,7 @@ The first version had its own handler API: one function per state returning `nex
 - XState is the richer language (nested and parallel states, guards, history, entry and exit
   actions), with an editor, a visualizer and model-based tests, and people already know it.
 - The cost is CPU only. Deciding one event, with no storage or RPC, measured in Bun
-  (`bench/results/xstate-step-bun.json`, at commit `b522906`, where the handlers still existed):
+  (`bench/results/xstate-step-bun.json`, at commit `e5f8889`, where the handlers still existed):
 
   | Workload | handlers | XState |
   |---|---|---|
@@ -394,7 +398,7 @@ The first version had its own handler API: one function per state returning `nex
 
   On the edge, inside one object, XState added 1 to 106 µs per event over the handlers, in three
   runs whose own baselines varied twofold (`bench/results/behaviours-xstate-probe-edge-{1,2,3}.json`,
-  commit `8254e89`); a put end to end cost the same through both, 15 to 22 ms.
+  commit `611b116`); a put end to end cost the same through both, 15 to 22 ms.
 - So it matters at one object near its limit: about 1,000 events a second sustained on one object
   (where a 0.1 ms decision on a ~0.8 ms request lowers its ceiling by up to about a tenth), or
   tens of thousands of events in one call. Spreading over objects removes it.
