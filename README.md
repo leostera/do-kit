@@ -214,7 +214,7 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 ```
 
 - **Writes** (`put`, `patch`, `delete`, and batches) are conditional on a version per row: `ifVersion: 0` means "only if absent". Each is one transaction with its index entries, fenced against splits. A key never has the same version twice: a row written again after a delete starts above the versions of the rows its shard deleted, so a write conditional on a version read before the delete fails. That costs a delete one more row written.
-- **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring case).
+- **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring case). `order: "shard"` walks the table shard by shard instead, one shard a page, listing every row that existed when the walk began once, through splits ([RFD0009](docs/rfds/RFD0009-walks-in-shard-order.md)).
 - **Counts** are kept per hash prefix with every write, so `count()` is cheap and exact at any depth up to 16. Declare `counts` groups to also count rows per value of a column: `countBy("byCancelled")` returns `[{ value: false, count: 812 }, { value: true, count: 40 }]`, just as cheaply. A listing takes `withCount: true` (or a group's name) and returns `total` (and `counts`) from the same calls to the shards, so a page with its total costs one fan-out, not two. Counts don't take `where`: counting arbitrary conditions would read every row of every shard.
 - **Schema changes:** add columns and indexes in the schema; each shard applies them the first time it runs the new code.
 - Custom transactional methods use `getRow`, `putRow`, `patchRow` and `deleteRow` inside `transact`.
@@ -229,11 +229,14 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 |---|---|---|---|---|
 | **Writes** | 1,604/s, median 515 ms, 9,089 failed | 1,633/s | 6,230/s | **8,117/s, median 61 ms** |
 | **Reads by key** | 2,136/s, median 446 ms, 1,327 failed | 3,330/s | 8,846/s | **10,241/s, median 39 ms*** |
-| **List pages** (50 rows), 64 in flight | 874/s, median 36 ms | 469/s | 297/s | 156/s, median 302 ms |
+| **List pages** (50 rows), query order, 256 in flight | 484/s, median 496 ms | 450/s | 400/s | 262/s, median 844 ms |
+| **Walk pages** (50 rows), shard order, 2,048 in flight | 450/s, 4,778 failed | 3,452/s | **10,979/s, median 158 ms** | 8,804/s |
 
 \* Measured in a later run than the others in its row.
 
-**Listings do not scale with shards.** Every page asks every shard for its share, so each shard serves every page: listing throughput stays below what one object serves, and a page waits for its slowest shard. At 256 and more in flight, 16 and 64 shards refuse most pages ("overloaded"), because every shard sees every page. A page also costs up to 3 × shards subrequests in the caller's invocation (one per shard per round; most pages take one round), and a Worker invocation may make only so many. Keep list-heavy tables to a few shards, or list by partition through an `IndexedTable`, which reads one index shard per page.
+**Listings in query order do not scale with shards; walks in shard order do.** A page in the query's order asks every shard for its share, so each shard serves every page: throughput stays below what one object serves, and from 1,024 in flight 16 and 64 shards refuse most pages ("overloaded"). Keep tables listed that way to a few shards, or list by partition through an `IndexedTable`, which reads one index shard per page. To read a whole table, walk it with `order: "shard"`: rows come in the query's order within each shard, shard after shard, one shard a page, each walk from a random shard. That scales with shards: 10,979 pages/s on 16 shards at 2,048 in flight, with no failures.
+
+![Table walks in shard order vs concurrency](docs/bench/table-walk-throughput.svg)
 
 ![Table listings vs concurrency](docs/bench/table-list-throughput.svg)
 

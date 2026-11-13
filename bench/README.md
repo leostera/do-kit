@@ -84,12 +84,12 @@ bun bench/workgraph/plot.ts
 
 ## Probing
 
-When a result looks wrong, `bench/probe.ts` asks the deployed Workers why, before any guess goes into the code: which isolate and colo each shard, driver or runner runs in (`placement`, `runner-placement`), one `/measure` point with a chosen driver count (`measure`), each work graph runner's timeline of alarms, wakes and chunks (`timeline`), and the Worker's error events from Workers Observability (`errors`). The errors are where a runtime that resets objects shows up: retries hide it from the results.
+When a result looks wrong, `bench/probe.ts` asks the deployed Workers why, before any guess goes into the code: which isolate and colo each shard, driver or runner runs in (`placement`, `runner-placement`), one `/measure` point with a chosen driver count (`measure`), each work graph runner's timeline of alarms, wakes and chunks (`timeline`), and, with `bench/errors.sh`, the Worker's error events from Workers Observability. The errors are where a runtime that resets objects shows up: retries hide it from the results.
 
 ```sh
 bun bench/probe.ts placement '{"target":"table-16","objectName":"t"}'
 bun bench/probe.ts measure '{"target":"table-16","operation":"list","concurrency":256,"durationSeconds":15,"drivers":16}'
-bun bench/probe.ts errors '{"service":"do-kit-workgraph-bench","minutes":30}'
+bench/errors.sh do-kit-workgraph-bench 30
 ```
 
 ## Tearing down

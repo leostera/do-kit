@@ -16,11 +16,9 @@
 //   timeline {run, runners, out?}   (on the work graph bench Worker)
 //       Polls each runner's timeline (alarms, wakes, chunks started and computed) every 10 s until
 //       the run ends, keeping each runner's longest: a done run wipes its runners.
-//   errors {service, minutes?}
-//       The Worker's error events of the last minutes, by message, from Workers Observability (with
-//       CLOUDFLARE_ACCOUNT_ID and the cf CLI's credentials). A runtime that resets objects, or
-//       calls that fail and are retried, show here and nowhere in the results.
-import { $ } from "bun";
+//
+// A Worker's error events: bench/errors.sh.
+export {};
 
 const [command, arg] = process.argv.slice(2);
 const body = arg ? (JSON.parse(arg) as Record<string, unknown>) : {};
@@ -71,40 +69,6 @@ async function timeline(): Promise<void> {
   console.log(`wrote ${out}`);
 }
 
-async function errors(): Promise<void> {
-  const to = Date.now();
-  const from = to - Number(body.minutes ?? 30) * 60_000;
-  const query = {
-    queryId: "adhoc",
-    timeframe: { from, to },
-    view: "events",
-    limit: 1000,
-    parameters: {
-      filters: [
-        { key: "$metadata.service", operation: "eq", type: "string", value: body.service },
-        { key: "$metadata.level", operation: "eq", type: "string", value: "error" },
-      ],
-    },
-  };
-  const raw = await $`cf observability telemetry query --body ${JSON.stringify(query)}`.quiet().text();
-  const parsed = JSON.parse(raw) as { result?: { events: { events: Event[] } }; events?: { events: Event[] } };
-  const events = (parsed.result ?? parsed).events!.events;
-  const counts = new Map<string, number>();
-  for (const e of events) {
-    const what = e.$metadata.message ?? JSON.stringify(e.source).slice(0, 200);
-    const key = `${e.$workers.scriptVersion?.id.slice(0, 8) ?? "?"} ${e.$workers.entrypoint ?? ""} ${e.$workers.eventType}: ${what}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  for (const [key, n] of [...counts].sort((a, b) => b[1] - a[1])) console.log(`${n}\t${key}`);
-  console.log(`${events.length} error events`);
-}
-
-interface Event {
-  source: unknown;
-  $metadata: { message?: string };
-  $workers: { entrypoint?: string; eventType: string; scriptVersion?: { id: string } };
-}
-
 switch (command) {
   case "placement": {
     const { asked, objects } = await post<{ asked: number; objects: Placed[] }>("/placement", body);
@@ -125,9 +89,6 @@ switch (command) {
   case "timeline":
     await timeline();
     break;
-  case "errors":
-    await errors();
-    break;
   default:
-    throw new Error("usage: bun bench/probe.ts placement|runner-placement|measure|timeline|errors '<json>'");
+    throw new Error("usage: bun bench/probe.ts placement|runner-placement|measure|timeline '<json>'");
 }

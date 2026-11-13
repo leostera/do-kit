@@ -36,14 +36,15 @@ const MAX_DRIVERS = 8192;
 /** Calls each driver keeps in flight: one driver completes only about 90 calls/s, however many it keeps. */
 const CALLS_PER_DRIVER = 16;
 /** "list": one page of 50 rows, newest first, each worker walking its own cursor (tables only). */
+/** "walk": the same, in shard order (`order: "shard"`): one shard a page. */
 /** "create": a new row each time, only if absent (`ifVersion: 0`); tables only. */
 /**
  * "atomic-N": one `atomically` put of N distinct keys (sharded targets); "multi-N": the same put as
  * one plain `call`, which is not all-or-nothing, for comparison. "mixed": reads, and MIXED_WRITES of
  * the calls write (entrypoint targets).
  */
-type Operation = "read" | "write" | "list" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
-const OPERATIONS: readonly Operation[] = ["read", "write", "list", "create", "atomic-2", "atomic-4", "multi-2", "multi-4", "mixed"];
+type Operation = "read" | "write" | "list" | "walk" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
+const OPERATIONS: readonly Operation[] = ["read", "write", "list", "walk", "create", "atomic-2", "atomic-4", "multi-2", "multi-4", "mixed"];
 const keysPerCall = (op: Operation): number => (op.startsWith("atomic-") || op.startsWith("multi-") ? Number(op.slice(op.indexOf("-") + 1)) : 1);
 const MIXED_WRITES = 0.01;
 /** Keys a "hot" multi-key call picks from: a few, so calls contend for them. */
@@ -231,7 +232,7 @@ function rowsClient(env: Env, target: TableTarget | IndexedTarget, name: string)
 
 function tableClient(env: Env, target: TableTarget, name: string): TableClient<BenchRow> {
   const ns = { "table-1": env.TABLE_1, "table-4": env.TABLE_4, "table-16": env.TABLE_16, "table-64": env.TABLE_64 }[target];
-  return table(ns as never, name, benchRows);
+  return table(ns as never, name, benchRows, { logShardErrors: true });
 }
 
 interface MeasureConfig {
@@ -703,7 +704,7 @@ export class BenchDriver extends DurableObject<Env> {
             } else {
               const page: Awaited<ReturnType<typeof t.list>> = indexed
                 ? await indexed.list({ index: "byTeam", partition: [team], direction: "desc", limit: 50, cursor })
-                : await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor });
+                : await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor, ...(config.operation === "walk" ? { order: "shard" as const } : {}) });
               cursor = page.cursor;
               bytes += page.rows.length * config.payloadBytes;
             }
@@ -808,6 +809,7 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (isReader(target as Target) ? operation !== "read" && operation !== "mixed" : operation === "mixed") throw new Error("entrypoint targets take read or mixed, and only they take mixed");
   if (operation === "create" && !isRows(target as Target)) throw new Error("create is for table targets");
   if (operation === "list" && !isRows(target as Target)) throw new Error("list is for table targets");
+  if (operation === "walk" && !isTable(target as Target)) throw new Error("walk is for sharded table targets");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
   if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > MAX_DRIVERS * CALLS_PER_DRIVER) throw new Error(`concurrency must be an integer from 1 to ${MAX_DRIVERS * CALLS_PER_DRIVER}`);
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");

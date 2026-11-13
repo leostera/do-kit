@@ -270,7 +270,7 @@ if (controlTargets.length > 1) {
 
 // ---- ShardedTable: the same table on 1, 4, 16 and 64 shards (bench/results/table.json) ----
 const tableFile = join(import.meta.dir, "results", "table.json");
-const tableResults = await readFile(tableFile, "utf8").then((t) => JSON.parse(t) as { points: (Omit<Point, "target" | "operation"> & { target: string; operation: "read" | "write" | "list" })[] }).catch(() => null);
+const tableResults = await readFile(tableFile, "utf8").then((t) => JSON.parse(t) as { points: (Omit<Point, "target" | "operation"> & { target: string; operation: "read" | "write" | "list" | "walk" })[] }).catch(() => null);
 if (tableResults) {
   const SHARDS = [
     ["table-1", "1 shard: one Durable Object", "#667085"],
@@ -288,6 +288,7 @@ if (tableResults) {
   const tSub = (what: string) => `ShardedTable, 10,000 rows of 1 KiB, two indexes. ${what}, 10 s per point`;
   graphs["table-list-throughput"] = chart({ title: "Table listings: pages per second", subtitle: tSub("One page of 50 rows newest first, each caller walking its own cursor"), xLabel: "Concurrent in-flight pages", yLabel: "pages / s", xTicks: tLevels, series: tSeries("list", (p) => p.operationsPerSecond) });
   graphs["table-list-p99"] = chart({ title: "Table listings: p99 latency", subtitle: tSub("One page of 50 rows newest first"), xLabel: "Concurrent in-flight pages", yLabel: "p99 latency (ms)", xTicks: tLevels, series: tSeries("list", (p) => p.latencyMs.p99) });
+  graphs["table-walk-throughput"] = chart({ title: "Table walks in shard order: pages per second", subtitle: tSub('Pages of 50 newest first within each shard (order: "shard")'), xLabel: "Concurrent in-flight pages", yLabel: "pages / s", xTicks: tLevels, series: tSeries("walk", (p) => p.operationsPerSecond) });
   graphs["table-write-throughput"] = chart({ title: "Table writes: rows per second", subtitle: tSub("One-row puts that update both indexes"), xLabel: "Concurrent in-flight writes", yLabel: "writes / s", xTicks: tLevels, series: tSeries("write", (p) => p.operationsPerSecond) });
   graphs["table-read-throughput"] = chart({ title: "Table reads: rows per second", subtitle: tSub("One-row gets by primary key"), xLabel: "Concurrent in-flight reads", yLabel: "reads / s", xTicks: tLevels, series: tSeries("read", (p) => p.operationsPerSecond) });
 }

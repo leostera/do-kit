@@ -222,16 +222,30 @@ The 64-shard reads are from a later run than the rest ([raw data](../bench/resul
 
 ![Table listing p99](bench/table-list-p99.svg)
 
-| List pages | 1 shard | 4 shards | 16 shards | 64 shards |
+Listings were measured again on 2026-11-13, in query order and in shard order from one deploy ([raw data](../bench/results/v050-table-list.json)):
+
+![Table walks in shard order](bench/table-walk-throughput.svg)
+
+| Query order (`list`) | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
-| 1 in flight | 200/s, p50 6 ms | 92/s, p50 11 ms | 66/s, p50 15 ms | 21/s, p50 40 ms |
-| 64 | 874/s, p50 36 ms | 469/s, p50 105 ms | 297/s, p50 208 ms | 156/s, p50 302 ms |
-| 256 | 906/s, p50 295 ms | 582/s, p50 407 ms | 100/s, p50 5 ms, 55,922 failed | 169/s, p50 1,201 ms |
-| 1,024 | 857/s, p50 924 ms, 4,100 failed | 571/s, p50 1,723 ms, 46 failed | 125/s, p50 4 ms, 56,550 failed | 50/s, p50 18 ms, 51,512 failed |
+| 1 in flight | 136/s, p50 8 ms | 17/s, p50 56 ms | 38/s, p50 24 ms | 10/s, p50 74 ms |
+| 64 | 409/s, p50 136 ms | 338/s, p50 173 ms | 244/s, p50 264 ms | 185/s, p50 288 ms |
+| 256 | 484/s, p50 496 ms | 450/s, p50 536 ms | 400/s, p50 625 ms | 262/s, p50 844 ms |
+| 1,024 | 505/s, p50 1,990 ms | 583/s, p50 1,762 ms | 166/s, p50 6 ms, 9,395 failed | 143/s, p50 18 ms, 34,584 failed |
+| 2,048 | 463/s, p50 3,802 ms, 2,175 failed | 88/s, p50 6 ms, 152,277 failed | 77/s, p50 6 ms, 182,098 failed | 86/s, p50 22 ms, 94,481 failed |
+
+| Shard order (`order: "shard"`) | 1 shard | 4 shards | 16 shards | 64 shards |
+|---|---|---|---|---|
+| 1 in flight | 61/s, p50 17 ms | 217/s, p50 6 ms | 176/s, p50 6 ms | 13/s, p50 58 ms |
+| 64 | 403/s, p50 140 ms | 1,211/s, p50 16 ms | 1,704/s, p50 8 ms | 424/s, p50 97 ms |
+| 256 | 436/s, p50 571 ms | 2,218/s, p50 90 ms | 4,379/s, p50 22 ms | 1,481/s, p50 147 ms |
+| 1,024 | 515/s, p50 1,932 ms | 3,136/s, p50 330 ms | 9,294/s, p50 72 ms | 7,680/s, p50 85 ms |
+| 2,048 | 450/s, p50 2,827 ms, 4,778 failed | 3,452/s, p50 561 ms | 10,979/s, p50 158 ms | 8,804/s, p50 149 ms |
 
 - **Writes and reads scale with shards** once one object is the bottleneck, from about 256 in flight. Below that, one object is as fast or faster: a sharded call is a routed call.
-- **Listings do not.** A page asks every shard for its share of the page (twice limit / shards, plus two), so each shard serves every page. Throughput stays below one object's (874–906 pages/s here, from 64 in flight), and a page waits for its slowest shard, so latency grows with the number of shards. At high load, more shards refuse more pages ("overloaded"), because every one of them sees every page: 16 shards refused most of them from 256 in flight, 64 shards at 1,024.
-- **A page costs up to 3 × shards subrequests** in the caller's invocation: one per shard per round, and up to three rounds when the first comes up short (most take one). A Worker invocation may make only so many subrequests, so a request that lists a 64-shard table more than a few dozen times runs out. The benchmark's drivers run a whole point in one invocation and lift the limit.
+- **Listings in query order do not.** A page asks every shard for its share (twice limit / shards, plus two), so each shard serves every page: throughput stays at or below one object's (400–580 pages/s in this run), and a page waits for its slowest shard. From 1,024 in flight, the shards of a 16- or 64-shard table refuse most pages ("overloaded"); the error log names every shard, not one hot one. A page also costs up to 3 × shards subrequests in the caller's invocation, and a Worker invocation may make only so many.
+- **Walks in shard order do.** `list({ order: "shard" })` lists rows in the query's order within each shard, shard after shard, and asks one shard a page. Each walk starts at a random shard and wraps around, so walks begun together spread over the shards. 16 shards served 10,979 pages/s at 2,048 in flight with p50 158 ms and no failures, against 77/s and 182,098 refusals in query order. A walk costs about a shard's share of the calls, so it is the way to read a whole table: exports, backfills, scans.
+- **At one in flight**, latency is mostly where the caller and each shard are: a shard in another colo adds tens of milliseconds, whichever order.
 - Two fixes went in while measuring: pages first scanned rows instead of seeking (10,000 rows listed at a third of the speed of 2,000), and every shard returned a full page (16 shards moved 800 rows to list 50).
 - An index stored by sort order (range-partitioned) would let a page touch one or two index shards. That is the next layer.
 
