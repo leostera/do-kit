@@ -16,9 +16,8 @@ Two layers that sit beside the sharding layers rather than on them:
   a deadline, retries with backoff on transient failures only, cancellation, metadata,
   interceptors around every attempt, and errors with a status code. Options are set on a client
   and narrowed per call with `.with({ ... })`.
-- **Behaviours** (`@leostera/do-kit/behaviours`) are base classes for the shapes most objects take:
-  `StatefulServer` (an object serving requests on its state) and `StateMachine` (a state machine
-  with durable timeouts and postponed events). A subclass writes synchronous callbacks that turn an
+- **`DurableStateMachine`** (`@leostera/do-kit/behaviours`) is a base class for an object that is a
+  state machine, with durable timeouts per state and postponed events. A subclass writes synchronous callbacks that turn an
   event and the state into a new state and a list of effects; the base class runs one event at a
   time and commits state, timers, outbox and kept answers in one transaction. The class is also its
   own client: `Class.client(ns, name, options)` runs the class's public methods in the caller, and
@@ -68,8 +67,13 @@ None of this needs sharding, so it belongs beside the sharding layers, usable by
   in the same instance of the object; a caller of an instance that reset gets an error.
 - **An event manager** (one object fanning events out to handlers added at run time). Handlers in
   one object share its isolate and its transaction, so they isolate exceptions and nothing else; a
-  `StatefulServer` that keeps a list is the same thing, and fan-out across objects is `send` effects
-  to each. Prototyped, then dropped to keep two classes.
+  state machine that keeps a list is the same thing, and fan-out across objects is `send` effects
+  to each. Prototyped, then dropped.
+- **A server of requests** (calls, casts and timer messages on a state, with no states to move
+  between). Prototyped as `StatefulServer`, then dropped: over a plain Durable Object it adds a
+  message protocol and loses native RPC's types, while what it gave (one event at a time, rollback,
+  durable timers, an outbox, idempotency) a one-state `DurableStateMachine` gives too. An object
+  with nothing to time out or postpone is a plain Durable Object called through `Client`.
 - **Cancelling work on the object** when a caller gives up. The deadline travels with the call, and
   the object drops calls that arrive after it; one already running finishes.
 
@@ -102,40 +106,10 @@ A failed call throws a `CallError` with a `code`:
 | `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `NOT_FOUND` | the object's code refused the call | no |
 | `ABORTED`, `INTERNAL`, `UNKNOWN` | the object reset, has a bug, or threw something unlabelled | no |
 
-### StatefulServer
+### DurableStateMachine
 
 ```ts
-export class Channels extends StatefulServer<Env, Pool, PoolCall, number | null, PoolCast> {
-  // Client API: public, and run in the caller.
-  alloc() { return this.call({ op: "alloc" }); }
-  free(channel: number) {
-    if (!Number.isInteger(channel)) return Promise.reject(new CallError("INVALID_ARGUMENT", "not a channel"));
-    return this.cast({ op: "free", channel });
-  }
-
-  // Callbacks: synchronous transitions.
-  protected init() { return { free: [0, 1, 2], waiting: [] }; }
-  protected handleCall(request: PoolCall, state: Pool, from: From) {
-    const [channel, ...free] = state.free;
-    if (channel !== undefined) return { reply: channel, state: { ...state, free } };
-    return { noreply: true, state: { ...state, waiting: [...state.waiting, from] } }; // answer later
-  }
-  protected override handleCast(message: PoolCast, state: Pool) {
-    const [waiter, ...waiting] = state.waiting;
-    if (waiter) return { state: { ...state, waiting }, effects: [replyTo(waiter, message.channel)] };
-    return { state: { ...state, free: [...state.free, message.channel] } };
-  }
-}
-
-const pool = Channels.client(env.CHANNELS, "pool", { timeoutMs: 200 });
-await pool.alloc();       // `alloc` runs here; one RPC carries { op: "alloc" }
-await pool.free(-1);      // refused here: no RPC at all
-```
-
-### StateMachine
-
-```ts
-export class Door extends StateMachine<Env, "locked" | "open", Data, DoorEvent> {
+export class Door extends DurableStateMachine<Env, "locked" | "open", Data, DoorEvent> {
   press(digit: string) { return this.cast({ type: "press", digit }); }
 
   protected init() { return { state: "locked", data: { code: "1234", entered: "" } } as const; }
@@ -164,8 +138,9 @@ answered when the state lets it run.
   any Worker or object, against any class.
 - `src/behaviours/behaviour.ts`: the shared base (`Behaviour`): the `receive` RPC method, the event
   loop, the transaction, timers, outbox, kept answers, postponed events, and `Class.client`.
-- `stateful-server.ts`, `state-machine.ts`: each maps its callbacks onto one internal
-  `behaviourStep(event, state) → Step`.
+- `durable-state-machine.ts`: maps the state handlers onto the base's one internal
+  `behaviourStep(event, state) → Step`. The base is kept separate so another shape can sit on it
+  without touching the event loop.
 
 ### Data model and interfaces
 
@@ -243,7 +218,7 @@ Interceptors are the hook for tracing and logs. Outbox failures and dropped time
   changed in place), deferred answers, deadlines on both sides, idempotency (repeated and
   concurrent), a caller of an object that reset, raw-stub access to callbacks, state timeouts
   across restarts and their cancellation, postponed events and calls, and an outbox message
-  from a state machine reaching a server.
+  from one state machine reaching another.
 - `test/client.test.ts` covers the Client's retries, overload, stub reuse, deadlines, interceptors and
   option merging against a scripted namespace.
 
@@ -278,7 +253,7 @@ alternating within a round:
 | StatefulServer's object, raw stub, envelope | 16.41 ms | 16.64 ms |
 | StatefulServer client | 16.38 ms | 16.80 ms |
 | StatefulServer client with retries (idempotency key) | 16.50 ms | 16.95 ms |
-| StateMachine client | 13.96 ms | 14.12 ms |
+| DurableStateMachine client | 13.96 ms | 14.12 ms |
 
 The StatefulServer's object is 2.5 ms slower than the plain one whether it is called as a
 StatefulServer or through plain methods: that is where the object was placed, not the behaviour.

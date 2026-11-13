@@ -4,25 +4,24 @@
 //   single                 a plain Durable Object through a raw stub: the baseline
 //   single-client          the same object through Client, no options
 //   single-client-opts     the same, with a deadline, retries and an interceptor
-//   stateful-server        a StatefulServer doing the same SQL in its callbacks, through its client
-//   stateful-server-keyed  the same, with retries on: every call carries an idempotency key, kept
-//   state-machine          a one-state StateMachine doing the same SQL
-//   kvserver-plain         the StatefulServer's object through a raw stub, doing the SQL in plain
-//                          methods: with BENCH_SHARED_OBJECT, the same object as stateful-server,
-//                          so placement is the same and only the behaviour differs
+//   state-machine          a one-state DurableStateMachine doing the same SQL in its handler, through
+//                          its client
+//   state-machine-keyed    the same, with retries on: every call carries an idempotency key, kept
+//   state-machine-plain    the DurableStateMachine's object through a raw stub, doing the SQL in plain
+//                          methods: with BENCH_SHARED_OBJECT, the same object as state-machine, so
+//                          placement is the same and only the behaviour differs
 //
 // `/probe-behaviours` times what runs inside the object, without RPC: N events in one call.
 import { Client, type CallOptions } from "../../../src/client/index.ts";
-import { StatefulServer, StateMachine, keep, type CallResult, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { DurableStateMachine, keep, type StateHandlers } from "../../../src/behaviours/index.ts";
 import type { SingleObject } from "./index.ts";
 
-export type BehaviourTarget = "single-client" | "single-client-opts" | "stateful-server" | "stateful-server-keyed" | "state-machine" | "kvserver-plain";
-export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "stateful-server", "stateful-server-keyed", "state-machine", "kvserver-plain"];
+export type BehaviourTarget = "single-client" | "single-client-opts" | "state-machine" | "state-machine-keyed" | "state-machine-plain";
+export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "state-machine", "state-machine-keyed", "state-machine-plain"];
 export const isBehaviour = (target: string): target is BehaviourTarget => (BEHAVIOUR_TARGETS as readonly string[]).includes(target);
 
 export interface BehavioursEnv {
   readonly SINGLE: DurableObjectNamespace<SingleObject>;
-  readonly KV_SERVER: DurableObjectNamespace<KvServer>;
   readonly KV_MACHINE: DurableObjectNamespace<KvMachine>;
 }
 
@@ -52,8 +51,9 @@ function kv(sql: SqlStorage, call: KvCall): number | (string | null)[] {
 }
 
 type Counter = { readonly n: number };
+type KvEvent = KvCall | { readonly op: "inc" };
 
-export class KvServer extends StatefulServer<BehavioursEnv, Counter, KvCall | { readonly op: "inc" }, unknown> {
+export class KvMachine extends DurableStateMachine<BehavioursEnv, "serving", Counter, KvEvent, unknown> {
   // ---- client API ----
   put(keys: readonly string[], values: readonly string[]): Promise<number> {
     return this.call({ op: "put", keys, values }) as Promise<number>;
@@ -63,17 +63,16 @@ export class KvServer extends StatefulServer<BehavioursEnv, Counter, KvCall | { 
   }
 
   // ---- callbacks ----
-  protected init(): Counter {
+  protected init() {
     this.sql.exec(CREATE);
-    return { n: 0 };
+    return { state: "serving" as const, data: { n: 0 } };
   }
 
-  protected handleCall(call: KvCall | { readonly op: "inc" }, state: Counter): CallResult<Counter, unknown> {
-    // "inc" keeps its counter in the state, which is stored as JSON after every event.
-    if (call.op === "inc") return { reply: state.n + 1, state: { n: state.n + 1 } };
-    // put and get keep the state as it is: nothing but their own SQL is written.
-    return { reply: kv(this.sql, call), state };
-  }
+  protected readonly states: StateHandlers<"serving", Counter, KvEvent, unknown> = {
+    // "inc" keeps its counter in the data, which is stored as JSON after every event that changes
+    // it; put and get keep the data as it is, so nothing but their own SQL is written.
+    serving: (event, data) => (event.op === "inc" ? keep({ n: data.n + 1 }, { reply: data.n + 1 }) : keep(data, { reply: kv(this.sql, event) })),
+  };
 
   // ---- the same work without the behaviour, through a raw stub ----
 
@@ -115,30 +114,11 @@ export class KvServer extends StatefulServer<BehavioursEnv, Counter, KvCall | { 
       if (mode === "put") {
         const value = freshValue();
         this.ctx.storage.transactionSync(() => this.sql.exec(UPSERT, `key-${i % 1000}`, value));
-      }
-      else this.ctx.storage.transactionSync(() => this.sql.exec("INSERT INTO bench_counter (k, n) VALUES (0, 1) ON CONFLICT (k) DO UPDATE SET n = n + 1"));
+      } else this.ctx.storage.transactionSync(() => this.sql.exec("INSERT INTO bench_counter (k, n) VALUES (0, 1) ON CONFLICT (k) DO UPDATE SET n = n + 1"));
       await Promise.resolve(); // as `await this.call` yields once per event
     }
     return n;
   }
-}
-
-export class KvMachine extends StateMachine<BehavioursEnv, "serving", null, KvCall, unknown> {
-  put(keys: readonly string[], values: readonly string[]): Promise<number> {
-    return this.call({ op: "put", keys, values }) as Promise<number>;
-  }
-  get(keys: readonly string[], _payloads: null): Promise<(string | null)[]> {
-    return this.call({ op: "get", keys }) as Promise<(string | null)[]>;
-  }
-
-  protected init() {
-    this.sql.exec(CREATE);
-    return { state: "serving" as const, data: null };
-  }
-
-  protected readonly states: StateHandlers<"serving", null, KvCall, unknown> = {
-    serving: (call, data) => keep(data, { reply: kv(this.sql, call) }),
-  };
 }
 
 /** A deadline, retries and an interceptor: every option's path, with none of them firing. */
@@ -159,14 +139,12 @@ function clientOf(env: BehavioursEnv, target: BehaviourTarget, name: string): Pi
       const client = new Client(env.SINGLE, name, OPTIONS);
       return { put: (keys, values) => client.invoke("put", keys, values), get: (keys) => client.invoke("get", keys, null) };
     }
-    case "stateful-server":
-      return KvServer.client(env.KV_SERVER, name);
-    case "stateful-server-keyed":
-      return KvServer.client(env.KV_SERVER, name, { retry: { maxAttempts: 3 } });
     case "state-machine":
       return KvMachine.client(env.KV_MACHINE, name);
-    case "kvserver-plain": {
-      const stub = env.KV_SERVER.getByName(name);
+    case "state-machine-keyed":
+      return KvMachine.client(env.KV_MACHINE, name, { retry: { maxAttempts: 3 } });
+    case "state-machine-plain": {
+      const stub = env.KV_MACHINE.getByName(name);
       return { put: (keys, values) => stub.plainPut(keys, values), get: (keys) => stub.plainGet(keys, null) };
     }
   }
@@ -206,7 +184,7 @@ export interface ProbeResult {
  * (other load on the machine, a runtime warming up) touches them all alike.
  */
 export async function probeBehaviours(env: BehavioursEnv, probe: ProbeBehaviours): Promise<ProbeResult> {
-  const stub = env.KV_SERVER.getByName(probe.objectName);
+  const stub = env.KV_MACHINE.getByName(probe.objectName);
   const kinds = [
     ["plain-put", () => stub.probePlain(probe.n, "put")],
     ["events-put", () => stub.probeEvents(probe.n, "put")],
@@ -242,13 +220,11 @@ export interface ProbeRpc {
 }
 
 /**
- * Besides the load targets, two that attribute a difference: the StatefulServer's object called through
- * a raw stub, with a plain write (`kvserver-plain`: the object, without the behaviour) and with an
- * envelope (`kvserver-receive`: the behaviour, without its client), the same with an idempotency
- * key (`kvserver-receive-keyed`), and a client that sends a key without retrying
- * (`stateful-server-key-only`).
+ * Besides the load targets, two that attribute a difference: the DurableStateMachine's object called
+ * through a raw stub with an envelope (`state-machine-receive`: the behaviour, without its client),
+ * and the same with an idempotency key (`state-machine-receive-keyed`).
  */
-type RpcTarget = "single" | BehaviourTarget | "kvserver-receive" | "kvserver-receive-keyed" | "stateful-server-key-only";
+type RpcTarget = "single" | BehaviourTarget | "state-machine-receive" | "state-machine-receive-keyed";
 
 /**
  * Times one-key puts end to end, one at a time, from the caller: what a call through each target
@@ -261,11 +237,8 @@ export async function probeRpc(env: BehavioursEnv, probe: ProbeRpc): Promise<{ c
     const keys = [`key-${i % 1000}`];
     const value = freshValue();
     if (target === "single") return env.SINGLE.getByName(probe.objectName).put(keys, [value]);
-    if (target === "kvserver-plain") return env.KV_SERVER.getByName(probe.objectName).plainPut(keys, [value]);
-    if (target === "kvserver-receive-keyed") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] }, key: crypto.randomUUID() });
-    // An idempotency key on every call, without retries: the object's side of a keyed call alone.
-    if (target === "stateful-server-key-only") return KvServer.client(env.KV_SERVER, probe.objectName, { idempotencyKey: crypto.randomUUID() }).put(keys, [value]);
-    if (target === "kvserver-receive") return env.KV_SERVER.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] } });
+    if (target === "state-machine-receive-keyed") return env.KV_MACHINE.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] }, key: crypto.randomUUID() });
+    if (target === "state-machine-receive") return env.KV_MACHINE.getByName(probe.objectName).receive({ kind: "call", message: { op: "put", keys, values: [value] } });
     return behaviourWrite(env, target, probe.objectName, keys, [value]);
   };
   for (const target of targets) for (let i = 0; i < 20; i++) await put(target, i); // warm

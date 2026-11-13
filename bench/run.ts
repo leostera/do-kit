@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { $ } from "bun";
 
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | "table-1" | "table-4" | "table-16" | "table-64" | "indexed-1" | "indexed-4" | "indexed-16" | "reader-single" | "reader-leased" | "single-client" | "single-client-opts" | "stateful-server" | "stateful-server-keyed" | "state-machine" | "kvserver-plain";
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | "table-1" | "table-4" | "table-16" | "table-64" | "indexed-1" | "indexed-4" | "indexed-16" | "reader-single" | "reader-leased" | "single-client" | "single-client-opts" | "state-machine" | "state-machine-keyed" | "state-machine-plain";
 type Operation = "read" | "write" | "list" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
 type Distribution = "uniform" | "hot" | "control-plane";
 
@@ -162,8 +162,8 @@ console.log(`Saved ${points.length} points in ${resultsDir}`);
 if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ?? "write,read").split(",") as Operation[]) {
   for (const distribution of (process.env.BENCH_DISTRIBUTIONS ?? "uniform,hot").split(",") as Distribution[]) {
     for (const target of (process.env.BENCH_TARGETS ?? "single,split,presplit,legacy").split(",") as Target[]) {
-      // With BENCH_SHARED_OBJECT=1, every target of a namespace measures one object (server and
-      // kvserver-plain: the same placement, with and without the behaviour).
+      // With BENCH_SHARED_OBJECT=1, every target of a namespace measures one object (state-machine
+      // and state-machine-plain: the same placement, with and without the behaviour).
       const objectName = process.env.BENCH_SHARED_OBJECT === "1" ? `${suite}-shared-${operation}-${distribution}` : `${suite}-${target}-${operation}-${distribution}`;
       for (const concurrency of concurrencyLevels) {
         let point: Point;

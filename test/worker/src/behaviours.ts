@@ -1,9 +1,10 @@
-// Behaviours and Client in the test Worker (RFD0009): a channel pool (StatefulServer), a code lock
-// (StateMachine) that reports to an audit log (StatefulServer), and a plain object for Client. The route
+// Behaviours and Client in the test Worker (RFD0009): a channel pool (a one-state DurableStateMachine, for
+// what every behaviour does), a code lock that reports to an audit log, and a plain object for
+// Client. The route
 // runs in the Worker, so the classes' client methods run here, as in any caller.
 import { DurableObject } from "cloudflare:workers";
 import { CallError, Client, type Attempt, type CallOptions } from "../../../src/client/index.ts";
-import { StatefulServer, StateMachine, keep, next, postpone, replyTo, send, stateTimeout, type CallResult, type From, type Metadata, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { DurableStateMachine, keep, next, postpone, replyTo, send, stateTimeout, type From, type Metadata, type StateHandlers } from "../../../src/behaviours/index.ts";
 
 export interface BehavioursEnv {
   readonly CHANNELS: DurableObjectNamespace<Channels>;
@@ -15,10 +16,9 @@ export interface BehavioursEnv {
 // ---- A channel pool ----
 
 type Pool = { readonly free: readonly number[]; readonly waiting: readonly From[]; readonly lastCaller: string | null };
-type PoolCall = { readonly op: "alloc" } | { readonly op: "allocWait" } | { readonly op: "hang" } | { readonly op: "explode" } | { readonly op: "state" } | { readonly op: "rows" };
-type PoolCast = { readonly op: "free"; readonly channel: number };
+type PoolEvent = { readonly op: "alloc" } | { readonly op: "allocWait" } | { readonly op: "hang" } | { readonly op: "explode" } | { readonly op: "state" } | { readonly op: "rows" } | { readonly op: "free"; readonly channel: number };
 
-export class Channels extends StatefulServer<BehavioursEnv, Pool, PoolCall, unknown, PoolCast> {
+export class Channels extends DurableStateMachine<BehavioursEnv, "serving", Pool, PoolEvent, unknown> {
   // ---- client API: runs in the caller ----
   alloc(): Promise<number | null> {
     return this.call({ op: "alloc" }) as Promise<number | null>;
@@ -35,7 +35,7 @@ export class Channels extends StatefulServer<BehavioursEnv, Pool, PoolCall, unkn
   hang(): Promise<never> {
     return this.call({ op: "hang" }) as Promise<never>;
   }
-  /** Writes a row and changes the state, then throws. */
+  /** Writes a row and changes the data, then throws. */
   explode(): Promise<never> {
     return this.call({ op: "explode" }) as Promise<never>;
   }
@@ -47,39 +47,40 @@ export class Channels extends StatefulServer<BehavioursEnv, Pool, PoolCall, unkn
   }
 
   // ---- callbacks ----
-  protected init(): Pool {
+  protected init() {
     this.sql.exec("CREATE TABLE IF NOT EXISTS pool_log (n INTEGER)");
-    return { free: [0, 1, 2], waiting: [], lastCaller: null };
+    return { state: "serving" as const, data: { free: [0, 1, 2], waiting: [], lastCaller: null } };
   }
 
-  protected handleCall(request: PoolCall, state: Pool, from: From, metadata: Metadata): CallResult<Pool, unknown> {
-    const lastCaller = metadata.caller ?? state.lastCaller;
-    switch (request.op) {
-      case "alloc":
-      case "allocWait": {
-        const [channel, ...free] = state.free;
-        if (channel !== undefined) return { reply: channel, state: { ...state, free, lastCaller } };
-        if (request.op === "alloc") return { reply: null, state };
-        return { noreply: true, state: { ...state, waiting: [...state.waiting, from] } };
+  protected readonly states: StateHandlers<"serving", Pool, PoolEvent, unknown> = {
+    serving: (event, pool, { from, metadata }) => {
+      const lastCaller = metadata.caller ?? pool.lastCaller;
+      switch (event.op) {
+        case "alloc":
+        case "allocWait": {
+          const [channel, ...free] = pool.free;
+          if (channel !== undefined) return keep({ ...pool, free, lastCaller }, { reply: channel });
+          if (event.op === "alloc") return keep(pool, { reply: null });
+          return keep({ ...pool, waiting: [...pool.waiting, from!] }); // answered by a later free
+        }
+        case "hang":
+          return keep(pool);
+        case "explode":
+          this.sql.exec("INSERT INTO pool_log (n) VALUES (1)");
+          (pool as unknown as { free: number[] }).free = []; // changed in place, then throws: neither may stick
+          throw new Error("explode");
+        case "state":
+          return keep(pool, { reply: pool });
+        case "rows":
+          return keep(pool, { reply: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM pool_log").one().n });
+        case "free": {
+          const [waiter, ...waiting] = pool.waiting;
+          if (waiter) return keep({ ...pool, waiting }, { actions: [replyTo(waiter, event.channel)] });
+          return keep({ ...pool, free: [...pool.free, event.channel] });
+        }
       }
-      case "hang":
-        return { noreply: true, state };
-      case "explode":
-        this.sql.exec("INSERT INTO pool_log (n) VALUES (1)");
-        (state as unknown as { free: number[] }).free = []; // changed in place, then throws: neither may stick
-        throw new Error("explode");
-      case "state":
-        return { reply: state, state };
-      case "rows":
-        return { reply: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM pool_log").one().n, state };
-    }
-  }
-
-  protected override handleCast(message: PoolCast, state: Pool) {
-    const [waiter, ...waiting] = state.waiting;
-    if (waiter) return { state: { ...state, waiting }, effects: [replyTo(waiter, message.channel)] };
-    return { state: { ...state, free: [...state.free, message.channel] } };
-  }
+    },
+  };
 
   /** Test only, through a raw stub: ends this instance. */
   async restart(): Promise<void> {
@@ -93,7 +94,7 @@ type LockState = "locked" | "open";
 type LockData = { readonly code: string; readonly entered: string; readonly opened: number };
 type LockEvent = { readonly type: "press"; readonly digit: string } | { readonly type: "lock" } | { readonly type: "status" } | { readonly type: "setCode"; readonly code: string };
 
-export class CodeLock extends StateMachine<BehavioursEnv, LockState, LockData, LockEvent, unknown> {
+export class CodeLock extends DurableStateMachine<BehavioursEnv, LockState, LockData, LockEvent, unknown> {
   // ---- client API ----
   press(digit: string): Promise<void> {
     return this.cast({ type: "press", digit });
@@ -159,24 +160,23 @@ export class CodeLock extends StateMachine<BehavioursEnv, LockState, LockData, L
   }
 }
 
-// ---- An audit log: a server that keeps the last events cast to it ----
+// ---- An audit log: the last events cast to it ----
 
 type AuditEvent = { readonly type: string; readonly lock?: string; readonly n?: number };
+type AuditMessage = AuditEvent | { readonly type: "recent?" };
 
-export class Audit extends StatefulServer<BehavioursEnv, readonly AuditEvent[], "recent", readonly AuditEvent[], AuditEvent> {
+export class Audit extends DurableStateMachine<BehavioursEnv, "recording", readonly AuditEvent[], AuditMessage, readonly AuditEvent[]> {
   recent(): Promise<readonly AuditEvent[]> {
-    return this.call("recent") as Promise<readonly AuditEvent[]>;
+    return this.call({ type: "recent?" }) as Promise<readonly AuditEvent[]>;
   }
 
-  protected init(): readonly AuditEvent[] {
-    return [];
+  protected init() {
+    return { state: "recording" as const, data: [] as readonly AuditEvent[] };
   }
-  protected handleCall(_request: "recent", events: readonly AuditEvent[]): CallResult<readonly AuditEvent[], readonly AuditEvent[]> {
-    return { reply: events, state: events };
-  }
-  protected override handleCast(event: AuditEvent, events: readonly AuditEvent[]) {
-    return { state: [...events, event].slice(-10) };
-  }
+
+  protected readonly states: StateHandlers<"recording", readonly AuditEvent[], AuditMessage, readonly AuditEvent[]> = {
+    recording: (event, events) => (event.type === "recent?" ? keep(events, { reply: events }) : keep([...events, event].slice(-10))),
+  };
 }
 
 // ---- A plain object, for Client ----
@@ -265,10 +265,9 @@ export async function behavioursRoute(env: BehavioursEnv, request: BehavioursReq
     case "reachCallback": {
       // Can a caller reach a protected callback through a raw stub?
       const stub = env.CHANNELS.getByName(name) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
-      const handleCall = await settle(() => stub.handleCall!({ op: "alloc" }, { free: [9], waiting: [], lastCaller: null }, { id: "x" }, {}));
-      const lockStub = env.LOCKS.getByName(name) as unknown as Record<string, unknown>;
-      const states = await settle(async () => typeof (await (lockStub.states as Promise<unknown>)));
-      return { handleCall, states };
+      const init = await settle(() => stub.init!());
+      const states = await settle(async () => typeof (await (stub.states as unknown as Promise<unknown>)));
+      return { init, states };
     }
 
     case "enter":

@@ -1,4 +1,4 @@
-// StateMachine (RFD0009): an object as a state machine. Orders, sessions, leases, provisioning: things
+// DurableStateMachine (RFD0009): an object as a state machine. Orders, sessions, leases, provisioning: things
 // that move through states, where what an event means depends on the state, and where "if nothing
 // happens in 15 minutes, give up" is part of the logic. Written by hand on a Durable Object, that
 // is a status column, an if-ladder in every method, and timeouts multiplexed over the one alarm.
@@ -71,7 +71,7 @@ export const cancelTimeout = (name: string): StateMachineAction<never> => ({ kin
 
 /**
  * ```ts
- * export class Door extends StateMachine<Env, "locked" | "open", { code: string; entered: string }, DoorEvent, boolean> {
+ * export class Door extends DurableStateMachine<Env, "locked" | "open", { code: string; entered: string }, DoorEvent, boolean> {
  *   press(digit: string) { return this.cast({ type: "button", digit }); }   // client API
  *
  *   protected init() { return { state: "locked", data: { code: "1234", entered: "" } } as const; }
@@ -82,7 +82,7 @@ export const cancelTimeout = (name: string): StateMachineAction<never> => ({ kin
  * }
  * ```
  */
-export abstract class StateMachine<Env, St extends string, D, E, R = unknown> extends Behaviour<Env, E, R, E> {
+export abstract class DurableStateMachine<Env, St extends string, D, E, R = unknown> extends Behaviour<Env, E, R, E> {
   // Handlers live in `states`, an instance field, which RPC never exposes.
   protected static override readonly callbacks: readonly string[] = ["init", "migrate"];
 

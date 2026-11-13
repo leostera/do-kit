@@ -15,8 +15,8 @@ const value = async (name: string, operation: string, args: unknown[] = [], opti
   return settled.value;
 };
 
-describe("StatefulServer", () => {
-  test("serves calls and casts on its state", async () => {
+describe("every behaviour, through a one-state DurableStateMachine", () => {
+  test("serves calls and casts on its data", async () => {
     const pool = unique("pool");
     expect(await value(pool, "alloc")).toBe(0);
     expect(await value(pool, "alloc")).toBe(1);
@@ -95,16 +95,16 @@ describe("StatefulServer", () => {
   });
 
   test("a raw stub can't run a callback outside an event", async () => {
-    const reached = await post<{ handleCall: Settled; states: Settled }>("/behaviours", { op: "reachCallback", name: unique("pool") });
+    const reached = await post<{ init: Settled; states: Settled }>("/behaviours", { op: "reachCallback", name: unique("pool") });
     // Protected methods are on the prototype, so RPC reaches them: the base class refuses them.
-    expect(reached.handleCall).toMatchObject({ ok: false });
-    expect((reached.handleCall as { message: string }).message).toContain("is a callback");
-    // Instance fields (a state machine's handlers) are never exposed over RPC.
+    expect(reached.init).toMatchObject({ ok: false });
+    expect((reached.init as { message: string }).message).toContain("is a callback");
+    // Instance fields (the state handlers) are never exposed over RPC.
     expect(reached.states).toMatchObject({ ok: false });
   });
 });
 
-describe("StateMachine", () => {
+describe("DurableStateMachine", () => {
   test("moves between states on events", async () => {
     const lock = unique("lock") + ":60000";
     expect(await value(lock, "lockStatus")).toEqual({ state: "locked", opened: 0 });
@@ -153,7 +153,7 @@ describe("StateMachine", () => {
 });
 
 describe("outbox", () => {
-  test("a message a state machine sends reaches a server", async () => {
+  test("a message one state machine sends reaches another", async () => {
     const name = unique("door") + ":60000";
     await value(name, "enter", ["1234"]);
     for (let i = 0; i < 50; i++) {

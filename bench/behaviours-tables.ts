@@ -1,7 +1,7 @@
 // The overhead tables of RFD0009, from the results files that back them:
 //   bun bench/behaviours-tables.ts
-// Reads behaviours-probe-edge.json, behaviours-load-edge.json, behaviours-load-edge-shared.json and
-// behaviours-client-bun.json in bench/results; a missing file's tables are skipped.
+// Reads behaviours-probe-edge.json, behaviours-load-edge.json and behaviours-client-bun.json in
+// bench/results; a missing file's tables are skipped.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -23,17 +23,11 @@ const RPC_ROWS: [string, string][] = [
   ["single", "plain object, raw stub"],
   ["single-client", "plain object, Client"],
   ["single-client-opts", "plain object, Client with a deadline, retries, an interceptor"],
-  ["kvserver-plain", "StatefulServer's object, raw stub, plain write"],
-  ["kvserver-receive", "StatefulServer's object, raw stub, envelope"],
-  ["stateful-server", "StatefulServer client"],
-  ["stateful-server-keyed", "StatefulServer client with retries (idempotency key)"],
-  ["state-machine", "StateMachine client"],
+  ["state-machine-plain", "state machine's object, raw stub, plain write"],
+  ["state-machine-receive", "state machine's object, raw stub, envelope"],
+  ["state-machine", "DurableStateMachine client"],
+  ["state-machine-keyed", "DurableStateMachine client with retries (idempotency key)"],
 ];
-
-/** Results recorded before the classes were renamed name their targets the old way. */
-const RENAMED: Record<string, string> = { genserver: "stateful-server", "genserver-keyed": "stateful-server-keyed", genstatem: "state-machine" };
-const renamed = <T>(byTarget: Record<string, T>): Record<string, T> =>
-  Object.fromEntries(Object.entries(byTarget).map(([target, v]) => [RENAMED[target] ?? target, v]));
 
 const probe = load<{ generatedAt: string; events?: { microsPerEvent: Record<string, number[]> }; rpc?: { microsPerCall: Record<string, number[]> } }>("behaviours-probe-edge.json");
 if (probe?.events) {
@@ -47,7 +41,7 @@ if (probe?.events) {
 if (probe?.rpc) {
   console.log("\n| One put end to end, one at a time | best | median |\n|---|---|---|");
   for (const [target, label] of RPC_ROWS) {
-    const xs = renamed(probe.rpc.microsPerCall)[target];
+    const xs = probe.rpc.microsPerCall[target];
     if (xs) console.log(`| ${label} | ${millis(Math.min(...xs))} | ${millis(median(xs))} |`);
   }
 }
@@ -61,14 +55,13 @@ interface LoadPoint {
   successes: number;
   latencyMs: { p50: number; p99: number };
 }
-for (const file of ["behaviours-load-edge.json", "behaviours-load-edge-shared.json"]) {
+for (const file of ["behaviours-load-edge.json"]) {
   const loadRun = load<{ generatedAt: string; points: LoadPoint[] }>(file);
   if (!loadRun) continue;
-  const points0 = loadRun.points.map((p) => ({ ...p, target: RENAMED[p.target] ?? p.target }));
-  const targets = [...new Set(points0.map((p) => p.target))];
-  const levels = [...new Set(points0.map((p) => p.concurrency))].sort((a, b) => a - b);
+  const targets = [...new Set(loadRun.points.map((p) => p.target))];
+  const levels = [...new Set(loadRun.points.map((p) => p.concurrency))].sort((a, b) => a - b);
   for (const operation of ["write", "read"]) {
-    const points = points0.filter((p) => p.operation === operation);
+    const points = loadRun.points.filter((p) => p.operation === operation);
     if (points.length === 0) continue;
     console.log(`\nFrom ${file} (${loadRun.generatedAt.slice(0, 10)}), one-key ${operation}s of 1 KiB on one object; calls/s, p50 / p99 ms, failed calls:\n`);
     console.log(`| Target | ${levels.map((c) => `${c} in flight`).join(" | ")} |\n|---|${levels.map(() => "---").join("|")}|`);
@@ -86,5 +79,5 @@ const client = load<{ nanosPerCall: Record<string, number[]> }>("behaviours-clie
 if (client) {
   console.log("\nFrom behaviours-client-bun.json:\n");
   console.log("| In the caller, per call, no network | median |\n|---|---|");
-  for (const [name, xs] of Object.entries(client.nanosPerCall)) console.log(`| ${name.replace(/^GenServer\b/, "StatefulServer")} | ${Math.round(median(xs))} ns |`);
+  for (const [name, xs] of Object.entries(client.nanosPerCall)) console.log(`| ${name} | ${Math.round(median(xs))} ns |`);
 }

@@ -2,9 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { LeasedRelay, LeasedSource, readHot, writeHot, type ReaderTarget } from "./leased.ts";
-import { BEHAVIOUR_TARGETS, behaviourRead, behaviourWrite, isBehaviour, KvMachine, KvServer, probeBehaviours, probeRpc, type BehaviourTarget, type ProbeBehaviours, type ProbeRpc } from "./behaviours.ts";
+import { BEHAVIOUR_TARGETS, behaviourRead, behaviourWrite, isBehaviour, KvMachine, probeBehaviours, probeRpc, type BehaviourTarget, type ProbeBehaviours, type ProbeRpc } from "./behaviours.ts";
 
-export { KvMachine, KvServer };
+export { KvMachine };
 
 export { LeasedRelay, LeasedSource };
 import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
@@ -106,7 +106,6 @@ interface Env {
   readonly INDEX_1: DurableObjectNamespace<Index1>;
   readonly INDEX_4: DurableObjectNamespace<Index4>;
   readonly INDEX_16: DurableObjectNamespace<Index16>;
-  readonly KV_SERVER: DurableObjectNamespace<KvServer>;
   readonly KV_MACHINE: DurableObjectNamespace<KvMachine>;
 }
 
