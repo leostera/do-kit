@@ -6,6 +6,7 @@
 //
 // POST /calibrate {rounds}  POST /start {run, shape, units, unitMs, runners, chunkMs, itersPerMs, faults?}
 // POST /status {run}
+import { where, type Where } from "../../worker/src/where.ts";
 import { createHash } from "node:crypto";
 import { burn, graphOf, TASKS, type Shape } from "./graphs.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY } from "../../../src/sharded/index.ts";
@@ -47,6 +48,36 @@ export class BenchRunner extends WorkGraphRunner<Env> {
   private async faults(run: string): Promise<Faults> {
     return (await this.ctx.storage.get<Faults>(`faults:${run}`)) ?? {};
   }
+  /** What this runner did when, in this isolate: alarm invocations, chunks started and computed. */
+  private timeline: { event: string; at: number; chunk?: number }[] = [];
+  /** The clock moves only with I/O: a storage read brings it up to date. */
+  private async mark(event: string, chunk?: number): Promise<void> {
+    await this.ctx.storage.get("mark");
+    if (this.timeline.length < 10_000) this.timeline.push({ event, at: Date.now(), ...(chunk === undefined ? {} : { chunk }) });
+  }
+  override async graphRun(run: string, index: number, results: string, ensure = false): Promise<void> {
+    await this.mark(ensure ? "run-ensure" : "run");
+    return super.graphRun(run, index, results, ensure);
+  }
+  override async graphWake(): Promise<void> {
+    await this.mark("wake");
+    return super.graphWake();
+  }
+  override async alarm(): Promise<void> {
+    await this.mark("alarm");
+    try {
+      await super.alarm();
+    } finally {
+      await this.mark("alarm-end");
+    }
+  }
+  async benchTimeline(): Promise<{ event: string; at: number; chunk?: number }[]> {
+    return this.timeline;
+  }
+  /** Which isolate and colo this runner is in (bench/worker/src/where.ts). */
+  async benchWhere(burnIterations: number): Promise<Where> {
+    return where(burnIterations);
+  }
   /** Burns `rounds` rounds: the caller times the call. */
   async benchBurn(rounds: number): Promise<string> {
     return burn("calibrate", rounds);
@@ -54,11 +85,13 @@ export class BenchRunner extends WorkGraphRunner<Env> {
   async benchFaults(run: string, faults: Faults): Promise<void> {
     await this.ctx.storage.put(`faults:${run}`, faults);
   }
-  protected override async chunkStarting(run: string, index: number): Promise<"run" | "abandon"> {
+  protected override async chunkStarting(run: string, index: number, chunk: number): Promise<"run" | "abandon"> {
+    await this.mark("start", chunk);
     const lose = (await this.faults(run)).lose ?? 0;
     return index < lose ? "abandon" : "run";
   }
   protected override async chunkComputed(run: string, _index: number, chunk: number): Promise<void> {
+    await this.mark("computed", chunk);
     const evict = (await this.faults(run)).evict ?? 0;
     if (evict === 0) return;
     // The same chunks in every run with the same share: a hash of the chunk id.
@@ -105,6 +138,22 @@ export default {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     try {
       switch (url.pathname) {
+        // Which isolate and colo each runner of a run is in: runners that share an isolate share
+        // its one thread, and compute one at a time.
+        case "/placement": {
+          const run = String(body.run);
+          const runners = Number(body.runners ?? 16);
+          const asked = Date.now();
+          const objects = await Promise.all(Array.from({ length: runners }, async (_, i) => ({ runner: i, ...(await env.RUNNERS.get(env.RUNNERS.idFromName(runnerName(run, i))).benchWhere(Number(body.burnIterations ?? 0))), answeredAt: Date.now() - asked })));
+          return Response.json({ asked, objects });
+        }
+        // Each runner's timeline of a run (from memory: a runner evicted meanwhile lost its own).
+        case "/timeline": {
+          const run = String(body.run);
+          const runners = Number(body.runners ?? 16);
+          const timelines = await Promise.all(Array.from({ length: runners }, (_, i) => env.RUNNERS.get(env.RUNNERS.idFromName(runnerName(run, i))).benchTimeline()));
+          return Response.json({ timelines });
+        }
         case "/calibrate": {
           // Timed around a call to a runner object (Date.now() moves only across I/O), against an
           // empty call to the same object: the difference is the burn.

@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { LeasedRelay, LeasedSource, readHot, writeHot, type ReaderTarget } from "./leased.ts";
 
@@ -125,6 +126,9 @@ function benchRow(key: string, payloadBytes: number): BenchRow {
 
 abstract class TableBench extends ShardedTable<Env, BenchRow> {
   protected table = benchRows;
+  async benchWhere(burnIterations: number): Promise<Where> {
+    return where(burnIterations);
+  }
 }
 const tablePolicy = (depth: number): SplitPolicy => ({ callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, initialDepth: depth, copy: "native" });
 export class Table1 extends TableBench {
@@ -153,8 +157,15 @@ export class Table64 extends TableBench {
 }
 abstract class IndexedBench extends IndexedTable<Env, BenchRow> {
   protected table = indexedRows;
+  async benchWhere(burnIterations: number): Promise<Where> {
+    return where(burnIterations);
+  }
 }
-abstract class IndexBench extends GlobalIndex<Env> {}
+abstract class IndexBench extends GlobalIndex<Env> {
+  async benchWhere(burnIterations: number): Promise<Where> {
+    return where(burnIterations);
+  }
+}
 export class Indexed1 extends IndexedBench {
   protected override splitPolicy = tablePolicy(0);
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
@@ -550,6 +561,10 @@ async function probeTable(env: Env, body: ProbeTable): Promise<{ runs: { ms: num
 
 /** Distributed load generator. locationHint is set only when each fresh driver is first created. */
 export class BenchDriver extends DurableObject<Env> {
+  async benchWhere(burnIterations: number): Promise<Where> {
+    return where(burnIterations);
+  }
+
   async probeTable(body: ProbeTable): Promise<{ runs: { ms: number; rows?: number; error?: string }[] }> {
     return probeTable(this.env, body);
   }
@@ -988,6 +1003,21 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;
     // One table call, timed: where a listing over many shards spends its time (or hangs). From a
     // driver object with `fromObject`, as the load runs.
+    // Which isolate and colo each shard of a table (or each driver) runs in, and when a fixed burn
+    // of CPU ran there, all asked at once: objects that share an isolate burn one after another.
+    if (request.method === "POST" && path === "/placement") {
+      const body = (await request.json()) as { target: string; objectName: string; burnIterations?: number; drivers?: number };
+      const burn = Math.min(body.burnIterations ?? 20_000_000, 200_000_000);
+      const ns = ({ "table-1": env.TABLE_1, "table-4": env.TABLE_4, "table-16": env.TABLE_16, "table-64": env.TABLE_64, "indexed-16": env.INDEXED_16, "index-16": env.INDEX_16 } as unknown as Record<string, DurableObjectNamespace<TableBench>>)[body.target];
+      const depth = Number(/-(\d+)$/.exec(body.target)?.[1] ?? 1);
+      const names = body.target === "drivers"
+        ? Array.from({ length: body.drivers ?? 16 }, (_, i) => body.objectName + "-" + i)
+        : Array.from({ length: depth }, (_, i) => shardObjectName(body.objectName, depth === 1 ? "" : i.toString(2).padStart(Math.log2(depth), "0")));
+      const stubOf = (name: string) => (body.target === "drivers" ? env.BENCH_DRIVERS.get(env.BENCH_DRIVERS.idFromName(name)) : ns!.get(ns!.idFromName(name)));
+      const asked = Date.now();
+      const objects = await Promise.all(names.map(async (name) => ({ name, ...(await (stubOf(name) as unknown as { benchWhere(n: number): Promise<Where> }).benchWhere(burn)), answeredAt: Date.now() - asked })));
+      return Response.json({ asked, objects });
+    }
     if (request.method === "POST" && path === "/probe-table") {
       const body = (await request.json()) as ProbeTable;
       if (body.fromObject) return Response.json(await env.BENCH_DRIVERS.get(env.BENCH_DRIVERS.idFromName(`probe-${body.objectName}`)).probeTable(body));
@@ -1113,8 +1143,15 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
     if (request.method !== "POST" || path !== "/measure") return new Response("Not found", { status: 404 });
     let input: ReturnType<typeof validate>;
+    /** Drivers to use instead of the default (to tell the load generator from the target). */
+    let forcedDrivers: number | null = null;
     try {
-      input = validate(await request.json());
+      const raw = (await request.json()) as Record<string, unknown>;
+      input = validate(raw);
+      if (raw.drivers !== undefined) {
+        if (!Number.isSafeInteger(raw.drivers) || (raw.drivers as number) < 1 || (raw.drivers as number) > Math.min(MAX_DRIVERS, input.concurrency)) throw new Error("drivers must be from 1 to the concurrency");
+        forcedDrivers = raw.drivers as number;
+      }
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : "invalid request" }, { status: 400 });
     }
@@ -1124,7 +1161,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     // A listing calls every shard for each page: drivers scale with the calls, not the pages.
     // An indexed create is two calls (reserve, then write): drivers scale with those too.
     const fanOut = input.operation === "list" && isTable(input.target) ? Number(input.target.slice("table-".length)) : input.operation === "create" && isIndexed(input.target) ? 2 : 1;
-    const driverCount = Math.min(MAX_DRIVERS, input.concurrency, Math.max(Math.min(16, input.concurrency), Math.ceil((input.concurrency * fanOut) / CALLS_PER_DRIVER)));
+    const driverCount = forcedDrivers ?? Math.min(MAX_DRIVERS, input.concurrency, Math.max(Math.min(16, input.concurrency), Math.ceil((input.concurrency * fanOut) / CALLS_PER_DRIVER)));
     const perDriver = Math.ceil(input.concurrency / driverCount);
     const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount, concurrency: perDriver }));
     const fleets: { stub: DurableObjectStub<BenchFleet>; configs: typeof configs }[] = [];

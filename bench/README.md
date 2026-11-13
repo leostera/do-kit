@@ -82,6 +82,16 @@ BENCH_URL=https://<its domain> BENCH_ACCESS_TOKEN=$(cloudflared access token -ap
 bun bench/workgraph/plot.ts
 ```
 
+## Probing
+
+When a result looks wrong, `bench/probe.ts` asks the deployed Workers why, before any guess goes into the code: which isolate and colo each shard, driver or runner runs in (`placement`, `runner-placement`), one `/measure` point with a chosen driver count (`measure`), each work graph runner's timeline of alarms, wakes and chunks (`timeline`), and the Worker's error events from Workers Observability (`errors`). The errors are where a runtime that resets objects shows up: retries hide it from the results.
+
+```sh
+bun bench/probe.ts placement '{"target":"table-16","objectName":"t"}'
+bun bench/probe.ts measure '{"target":"table-16","operation":"list","concurrency":256,"durationSeconds":15,"drivers":16}'
+bun bench/probe.ts errors '{"service":"do-kit-workgraph-bench","minutes":30}'
+```
+
 ## Tearing down
 
 Tear both Workers down when the runs are done, every time: their objects hold gigabytes of test data, and a Worker left deployed is one more thing on the internet. Deploying with `BENCH_TEARDOWN=1` replaces the Worker with a stub and marks every Durable Object class deleted, which deletes their objects and storage; then the Worker itself can go.
