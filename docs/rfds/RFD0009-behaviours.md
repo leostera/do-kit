@@ -224,71 +224,68 @@ Interceptors are the hook for tracing and logs. Outbox failures and dropped time
 
 ### Overhead, measured
 
-On the Cloudflare edge, a StatefulServer costs what a plain Durable Object doing the same SQL costs:
-the behaviour adds about 1 µs of work per event, and its client well under 1 µs per call, against
-calls of 10 to 40 ms. An idempotency key is the exception: it writes one more row, so a keyed read
-pays for a durable write. The tables below come from `bun bench/behaviours-tables.ts`.
+On the Cloudflare edge, a `DurableStateMachine` costs what plain methods doing the same SQL on the
+same object cost, at every load measured: the behaviour adds about 1 µs of work per event, and its
+client under 1 µs per call, against calls of 5 to 40 ms. An idempotency key is the exception: it
+writes one more row, so a keyed read waits for a durable commit. The tables below are printed by
+`bun bench/behaviours-tables.ts`.
 
 Inside one object, 20,000 one-key 1 KiB puts or counter increments per call, 11 rounds
-(`bench/results/behaviours-probe-edge.json`, Worker version `b97352f0`):
+(`bench/results/behaviours-probe-edge.json`, Worker version `4b985fbf`):
 
 | Inside one object, per event | best | median |
 |---|---|---|
-| put, plain transaction | 19.5 µs | 21.5 µs |
-| put, behaviour event | 19.8 µs | 22.1 µs |
-| put, envelope with a deadline | 20.8 µs | 24.2 µs |
-| put, envelope with an idempotency key (kept) | 38.0 µs | 40.3 µs |
-| counter in SQL, plain | 9.7 µs | 10.7 µs |
-| counter in the behaviour's JSON state | 11.4 µs | 13.0 µs |
+| put, plain transaction | 22.1 µs | 23.3 µs |
+| put, behaviour event | 22.4 µs | 23.8 µs |
+| put, envelope with a deadline | 22.4 µs | 24.0 µs |
+| put, envelope with an idempotency key (kept) | 35.5 µs | 42.6 µs |
+| counter in SQL, plain | 10.4 µs | 11.7 µs |
+| counter in the behaviour's JSON state | 14.3 µs | 14.8 µs |
 
 The same Worker version, 200 sequential puts from the Worker per round, 11 rounds, targets
 alternating within a round:
 
 | One put end to end, one at a time | best | median |
 |---|---|---|
-| plain object, raw stub | 14.05 ms | 14.34 ms |
-| plain object, Client | 13.71 ms | 14.21 ms |
-| plain object, Client with a deadline, retries, an interceptor | 13.90 ms | 14.11 ms |
-| StatefulServer's object, raw stub, plain write | 16.50 ms | 16.89 ms |
-| StatefulServer's object, raw stub, envelope | 16.41 ms | 16.64 ms |
-| StatefulServer client | 16.38 ms | 16.80 ms |
-| StatefulServer client with retries (idempotency key) | 16.50 ms | 16.95 ms |
-| DurableStateMachine client | 13.96 ms | 14.12 ms |
+| plain object, raw stub | 16.05 ms | 17.26 ms |
+| plain object, Client | 16.39 ms | 17.00 ms |
+| plain object, Client with a deadline, retries, an interceptor | 16.38 ms | 16.86 ms |
+| state machine's object, raw stub, plain write | 16.25 ms | 16.77 ms |
+| state machine's object, raw stub, envelope | 16.49 ms | 16.73 ms |
+| DurableStateMachine client | 16.21 ms | 16.75 ms |
+| DurableStateMachine client with retries (idempotency key) | 16.41 ms | 16.87 ms |
 
-The StatefulServer's object is 2.5 ms slower than the plain one whether it is called as a
-StatefulServer or through plain methods: that is where the object was placed, not the behaviour.
-Under load, one object called by up to 256 calls in flight, plain methods and the StatefulServer on
-that same object (`bench/results/behaviours-load-edge-shared.json`, Worker version `df25b5e3`;
-calls/s, p50 / p99):
+Under load, one object called by up to 256 calls in flight, through plain methods and as a state
+machine, on that same object, so placement is the same and only the behaviour differs
+(`bench/results/behaviours-load-edge.json`, the same Worker version; calls/s, p50 / p99):
 
-| Writes | 1 in flight | 16 in flight | 64 in flight | 256 in flight |
+Writes:
+
+| Target | 1 in flight | 16 in flight | 64 in flight | 256 in flight |
 |---|---|---|---|---|
-| plain methods | 34/s, 29 / 51 ms | 233/s, 36 / 194 ms | 669/s, 48 / 393 ms | 903/s, 168 / 932 ms |
-| StatefulServer | 41/s, 24 / 43 ms | 231/s, 44 / 194 ms | 787/s, 55 / 206 ms | 924/s, 239 / 590 ms |
-| StatefulServer, idempotency key | 41/s, 25 / 40 ms | 238/s, 34 / 190 ms | 615/s, 93 / 234 ms | 774/s, 245 / 857 ms |
+| state-machine-plain | 25/s, 40 / 58 ms | 150/s, 95 / 285 ms | 511/s, 73 / 430 ms | 1,204/s, 102 / 976 ms |
+| state-machine | 25/s, 41 / 55 ms | 158/s, 80 / 212 ms | 594/s, 96 / 220 ms | 1,351/s, 126 / 525 ms |
+| state-machine-keyed | 25/s, 41 / 50 ms | 154/s, 95 / 214 ms | 551/s, 99 / 302 ms | 1,105/s, 177 / 776 ms |
 
-| Reads | 1 in flight | 16 in flight | 64 in flight | 256 in flight |
+Reads:
+
+| Target | 1 in flight | 16 in flight | 64 in flight | 256 in flight |
 |---|---|---|---|---|
-| plain methods | 104/s, 10 / 20 ms | 278/s, 40 / 194 ms | 655/s, 59 / 405 ms | 869/s, 195 / 925 ms |
-| StatefulServer | 100/s, 10 / 19 ms | 289/s, 39 / 186 ms | 722/s, 70 / 231 ms | 958/s, 236 / 648 ms |
-| StatefulServer, idempotency key | 44/s, 23 / 47 ms | 173/s, 75 / 255 ms | 333/s, 157 / 1238 ms | 355/s, 755 / 1366 ms |
-
-`bench/results/behaviours-load-edge.json` ramps every target, each on its own object, to 1,024
-calls in flight. Every target levels off at 600 to 1,400 writes/s, and from 1,024 calls in flight
-some calls fail on all of them, plain objects included. The differences between targets there
-follow where each object was placed, so it shows one object's ceiling, not the behaviours' cost.
+| state-machine-plain | 206/s, 6 / 8 ms | 768/s, 6 / 161 ms | 1,844/s, 10 / 334 ms | 2,165/s, 45 / 806 ms |
+| state-machine | 243/s, 5 / 9 ms | 756/s, 6 / 156 ms | 1,929/s, 11 / 195 ms | 2,324/s, 50 / 538 ms |
+| state-machine-keyed | 44/s, 24 / 31 ms | 239/s, 45 / 216 ms | 710/s, 61 / 275 ms | 905/s, 227 / 820 ms |
 
 In the caller, with no network, Bun, 200,000 calls per round, 9 rounds
 (`bench/results/behaviours-client-bun.json`):
 
-| In the caller, per call | median |
+| In the caller, per call, no network | median |
 |---|---|
-| raw stub | 26 ns |
-| Client | 158 ns |
-| Client, timeout + retries + interceptor | 493 ns |
-| StatefulServer client | 222 ns |
-| StatefulServer client, timeout | 544 ns |
-| StatefulServer client, retries (idempotency key) | 322 ns |
+| raw stub | 37 ns |
+| Client | 196 ns |
+| Client, timeout + retries + interceptor | 641 ns |
+| DurableStateMachine client | 239 ns |
+| DurableStateMachine client, timeout | 880 ns |
+| DurableStateMachine client, retries (idempotency key) | 457 ns |
 
 Three things to know when reading these numbers:
 
@@ -297,10 +294,10 @@ Three things to know when reading these numbers:
   every benchmark write here stores a value no write stored before (`BENCH_UNIQUE_VALUES`).
 - **An idempotency key turns any call into a write.** Its answer is kept in `behaviour_replies` in
   the call's transaction. A keyed write costs nothing extra (the write commits anyway), but a keyed
-  read waits for a durable commit: 23 ms against 10 ms, and a third of the throughput under load.
+  read waits for a durable commit: 24 ms against 5 ms, and under half the throughput under load.
   Callers should send keys on calls that change state, and retry reads without one.
-- **JSON state** costs about 2 µs over a SQL counter for a small state, and grows with the state;
-  callbacks can keep big state in tables.
+- **JSON data** costs about 3 µs over a SQL counter for small data, and grows with it; handlers can
+  keep big data in tables.
 
 ## Drawbacks
 

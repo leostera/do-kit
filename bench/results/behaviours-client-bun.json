@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "kind": "behaviours-client-overhead",
+  "generatedAt": "2026-11-13T09:28:41.889Z",
+  "provenance": {
+    "commit": "4ed55add495d7549bad98ce404c6bc12df3447d3",
+    "dirty": false,
+    "engine": "Bun 1.4.4 (JavaScriptCore)",
+    "platform": "darwin-arm64"
+  },
+  "config": {
+    "calls": 200000,
+    "rounds": 9,
+    "payloadBytes": 1024
+  },
+  "notes": [
+    "Each case makes its client per call and calls a stub that answers at once: the time is the client's own work, no network or object.",
+    "Cases alternate within each round, in a rotating order; the medians are over rounds.",
+    "Bun (JavaScriptCore), not workerd (V8): an order of magnitude, not a workerd measurement."
+  ],
+  "nanosPerCall": {
+    "raw stub": [
+      26.997915,
+      26.19083,
+      25.826455,
+      157.773545,
+      36.906875,
+      40.780625,
+      37.319165,
+      177.32646,
+      31.74646
+    ],
+    "Client": [
+      155.887295,
+      134.93646,
+      282.155625,
+      216.54896,
+      193.71375,
+      450.86458,
+      195.93417,
+      140.50729,
+      284.979165
+    ],
+    "Client, timeout + retries + interceptor": [
+      837.674375,
+      461.01229,
+      483.32083,
+      641.116875,
+      699.864165,
+      783.596665,
+      533.701665,
+      511.48708,
+      1265.841875
+    ],
+    "DurableStateMachine client": [
+      232.40917,
+      675.59354,
+      235.0475,
+      207.225,
+      239.47375,
+      749.496045,
+      208.223955,
+      283.880835,
+      733.44708
+    ],
+    "DurableStateMachine client, timeout": [
+      810.31979,
+      879.90458,
+      1063.39417,
+      677.01417,
+      643.32583,
+      1106.746045,
+      534.52229,
+      920.71979,
+      1105.16896
+    ],
+    "DurableStateMachine client, retries (idempotency key)": [
+      313.705,
+      314.008335,
+      572.18375,
+      457.488125,
+      418.015415,
+      1013.08521,
+      315.104165,
+      1018.36396,
+      569.025835
+    ]
+  }
+}
