@@ -7,22 +7,28 @@
 //   state-machine          a one-state DurableStateMachine doing the same SQL in its handler, through
 //                          its client
 //   state-machine-keyed    the same, with retries on: every call carries an idempotency key, kept
+//   xstate                 the same one-state machine written in XState, run by DurableXState
 //   state-machine-plain    the DurableStateMachine's object through a raw stub, doing the SQL in plain
 //                          methods: with BENCH_SHARED_OBJECT, the same object as state-machine, so
 //                          placement is the same and only the behaviour differs
 //
 // `/probe-behaviours` times what runs inside the object, without RPC: N events in one call.
 import { Client, type CallOptions } from "../../../src/client/index.ts";
-import { DurableStateMachine, keep, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { assign, setup } from "xstate";
+import { DurableStateMachine, keep, next, stateTimeout, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { DurableXState, durableActions, reply } from "../../../src/xstate/index.ts";
 import type { SingleObject } from "./index.ts";
 
-export type BehaviourTarget = "single-client" | "single-client-opts" | "state-machine" | "state-machine-keyed" | "state-machine-plain";
-export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "state-machine", "state-machine-keyed", "state-machine-plain"];
+export type BehaviourTarget = "single-client" | "single-client-opts" | "state-machine" | "state-machine-keyed" | "state-machine-plain" | "xstate";
+export const BEHAVIOUR_TARGETS: readonly BehaviourTarget[] = ["single-client", "single-client-opts", "state-machine", "state-machine-keyed", "state-machine-plain", "xstate"];
 export const isBehaviour = (target: string): target is BehaviourTarget => (BEHAVIOUR_TARGETS as readonly string[]).includes(target);
 
 export interface BehavioursEnv {
   readonly SINGLE: DurableObjectNamespace<SingleObject>;
   readonly KV_MACHINE: DurableObjectNamespace<KvMachine>;
+  readonly KV_XSTATE: DurableObjectNamespace<KvXState>;
+  readonly SEAT_MACHINE: DurableObjectNamespace<SeatMachine>;
+  readonly SEAT_XSTATE: DurableObjectNamespace<SeatXState>;
 }
 
 type KvCall = { readonly op: "put"; readonly keys: readonly string[]; readonly values: readonly string[] } | { readonly op: "get"; readonly keys: readonly string[] };
@@ -121,6 +127,116 @@ export class KvMachine extends DurableStateMachine<BehavioursEnv, "serving", Cou
   }
 }
 
+// ---- The same one-state machine in XState ----
+
+/** KvMachine's events with the `type` XState routes on. */
+type XKvEvent =
+  | { readonly type: "put"; readonly op: "put"; readonly keys: readonly string[]; readonly values: readonly string[] }
+  | { readonly type: "get"; readonly op: "get"; readonly keys: readonly string[] }
+  | { readonly type: "inc"; readonly op: "inc" };
+
+/** KvMachine's handler as an XState machine: the SQL runs where the answer is computed. */
+const kvMachine = (sql: () => SqlStorage) =>
+  setup({ types: { context: {} as Counter, events: {} as XKvEvent }, actions: durableActions }).createMachine({
+    context: { n: 0 },
+    initial: "serving",
+    states: {
+      serving: {
+        on: {
+          put: { actions: reply(({ event }) => kv(sql(), event)) },
+          get: { actions: reply(({ event }) => kv(sql(), event)) },
+          inc: { actions: [assign({ n: ({ context }) => context.n + 1 }), reply(({ context }) => context.n)] },
+        },
+      },
+    },
+  });
+
+export class KvXState extends DurableXState<BehavioursEnv, ReturnType<typeof kvMachine>> {
+  protected readonly machine = kvMachine(() => this.sql);
+
+  put(keys: readonly string[], values: readonly string[]): Promise<number> {
+    return this.call({ type: "put", op: "put", keys, values }) as Promise<number>;
+  }
+  get(keys: readonly string[], _payloads: null): Promise<(string | null)[]> {
+    return this.call({ type: "get", op: "get", keys }) as Promise<(string | null)[]>;
+  }
+
+  async probeEmpty(): Promise<number> {
+    return 0;
+  }
+  /** `n` events through the machine, as calls from a client would run. */
+  async probeEvents(n: number, mode: "put" | "inc"): Promise<number> {
+    this.sql.exec(CREATE);
+    for (let i = 0; i < n; i++) await this.call(mode === "put" ? { type: "put", op: "put", keys: [`key-${i % 1000}`], values: [freshValue()] } : { type: "inc", op: "inc" });
+    return n;
+  }
+}
+
+// ---- A seat hold: every event changes state and sets or cancels a timer ----
+
+type SeatEvent = { readonly type: "grab"; readonly who: string } | { readonly type: "release" } | { readonly type: "expire" };
+const HOLD_MS = 60_000;
+
+export class SeatMachine extends DurableStateMachine<BehavioursEnv, "available" | "held", { readonly holder: string | null }, SeatEvent, boolean> {
+  protected init() {
+    return { state: "available" as const, data: { holder: null } };
+  }
+  protected readonly states: StateHandlers<"available" | "held", { readonly holder: string | null }, SeatEvent, boolean> = {
+    available: (event, data) => (event.type === "grab" ? next("held", { holder: event.who }, { reply: true, actions: [stateTimeout(HOLD_MS, { type: "expire" })] }) : keep(data, { reply: false })),
+    // Leaving "held" cancels its timeout.
+    held: (event, data) => (event.type === "release" || event.type === "expire" ? next("available", { holder: null }, { reply: true }) : keep(data, { reply: false })),
+  };
+
+  async probeEmpty(): Promise<number> {
+    return 0;
+  }
+  async probeSeat(n: number): Promise<number> {
+    for (let i = 0; i < n; i++) await this.call(i % 2 === 0 ? { type: "grab", who: "p" } : { type: "release" });
+    return n;
+  }
+  /** The same writes by hand, as a plain object would: the seat's row, its timer's row, the alarm. */
+  async probeSeatPlain(n: number): Promise<number> {
+    const sql = this.sql;
+    sql.exec("CREATE TABLE IF NOT EXISTS plain_seat (k INTEGER PRIMARY KEY, state TEXT NOT NULL, holder TEXT)");
+    sql.exec("CREATE TABLE IF NOT EXISTS plain_timer (name TEXT PRIMARY KEY, due INTEGER NOT NULL) WITHOUT ROWID");
+    for (let i = 0; i < n; i++) {
+      const grab = i % 2 === 0;
+      this.ctx.storage.transactionSync(() => {
+        sql.exec("INSERT INTO plain_seat (k, state, holder) VALUES (0, ?, ?) ON CONFLICT (k) DO UPDATE SET state = excluded.state, holder = excluded.holder", grab ? "held" : "available", grab ? "p" : null);
+        if (grab) sql.exec("INSERT OR REPLACE INTO plain_timer (name, due) VALUES ('hold', ?)", Date.now() + HOLD_MS);
+        else sql.exec("DELETE FROM plain_timer WHERE name = 'hold'");
+      });
+      if (grab) await this.ctx.storage.setAlarm(Date.now() + HOLD_MS);
+      else await this.ctx.storage.deleteAlarm();
+    }
+    return n;
+  }
+}
+
+const seatMachine = setup({ types: { context: {} as { holder: string | null }, events: {} as SeatEvent }, actions: durableActions }).createMachine({
+  context: { holder: null },
+  initial: "available",
+  states: {
+    available: { on: { grab: { target: "held", actions: [assign({ holder: ({ event }) => event.who }), reply(() => true)] }, release: { actions: reply(() => false) } } },
+    held: {
+      after: { [HOLD_MS]: { target: "available", actions: assign({ holder: null }) } },
+      on: { release: { target: "available", actions: [assign({ holder: null }), reply(() => true)] }, grab: { actions: reply(() => false) } },
+    },
+  },
+});
+
+export class SeatXState extends DurableXState<BehavioursEnv, typeof seatMachine> {
+  protected readonly machine = seatMachine;
+
+  async probeEmpty(): Promise<number> {
+    return 0;
+  }
+  async probeSeat(n: number): Promise<number> {
+    for (let i = 0; i < n; i++) await this.call(i % 2 === 0 ? { type: "grab", who: "p" } : { type: "release" });
+    return n;
+  }
+}
+
 /** A deadline, retries and an interceptor: every option's path, with none of them firing. */
 const OPTIONS: CallOptions = {
   timeoutMs: 30_000,
@@ -143,6 +259,8 @@ function clientOf(env: BehavioursEnv, target: BehaviourTarget, name: string): Pi
       return KvMachine.client(env.KV_MACHINE, name);
     case "state-machine-keyed":
       return KvMachine.client(env.KV_MACHINE, name, { retry: { maxAttempts: 3 } });
+    case "xstate":
+      return KvXState.client(env.KV_XSTATE, name);
     case "state-machine-plain": {
       const stub = env.KV_MACHINE.getByName(name);
       return { put: (keys, values) => stub.plainPut(keys, values), get: (keys) => stub.plainGet(keys, null) };
@@ -166,12 +284,12 @@ export interface ProbeBehaviours {
   readonly rounds: number;
 }
 
-type Kind = "plain-put" | "events-put" | "receive-put" | "receive-put-keyed" | "plain-inc" | "events-inc";
+type Kind = "plain-put" | "events-put" | "xstate-put" | "receive-put" | "receive-put-keyed" | "plain-inc" | "events-inc" | "xstate-inc" | "seat-plain" | "seat-machine" | "seat-xstate";
 
 export interface ProbeResult {
   readonly n: number;
   readonly rounds: number;
-  /** Microseconds per event, per round, by what ran. "empty" is a call that runs nothing. */
+  /** Microseconds per event, per round, by what ran, less an empty call to the same object. */
   readonly microsPerEvent: Record<Kind, number[]>;
   readonly emptyCallMs: number[];
 }
@@ -179,34 +297,48 @@ export interface ProbeResult {
 /**
  * Times `n` events inside one object, from the caller (the clock in the object does not move
  * while it computes): a call running `n` behaviour events against one doing the same writes
- * plainly, less a call that runs none. Each timed call follows an untimed empty one, so it doesn't
- * pay for flushing the writes of the call before it. Kinds alternate within a round, so drift
- * (other load on the machine, a runtime warming up) touches them all alike.
+ * plainly, less an empty call to the same object. Each timed call follows an untimed empty one, so
+ * it doesn't pay for flushing the writes of the call before it. Kinds alternate within a round, so
+ * drift (other load on the machine, a runtime warming up) touches them all alike.
+ *
+ * Two workloads, each written on DurableStateMachine and on DurableXState: one-key puts and a
+ * counter on a one-state machine (the fixed cost of an event), and a seat grabbed and released
+ * (every event changes state and sets or cancels a timer), against the same writes done by hand.
  */
 export async function probeBehaviours(env: BehavioursEnv, probe: ProbeBehaviours): Promise<ProbeResult> {
-  const stub = env.KV_MACHINE.getByName(probe.objectName);
-  const kinds = [
-    ["plain-put", () => stub.probePlain(probe.n, "put")],
-    ["events-put", () => stub.probeEvents(probe.n, "put")],
-    ["receive-put", () => stub.probeReceive(probe.n, false)],
-    ["receive-put-keyed", () => stub.probeReceive(probe.n, true)],
-    ["plain-inc", () => stub.probePlain(probe.n, "inc")],
-    ["events-inc", () => stub.probeEvents(probe.n, "inc")],
-  ] as const;
-  const empty = () => stub.probePlain(0, "put");
-  const timed = async (run: () => Promise<unknown>) => {
+  const kvm = env.KV_MACHINE.getByName(probe.objectName);
+  const kvx = env.KV_XSTATE.getByName(probe.objectName);
+  const seat = env.SEAT_MACHINE.getByName(probe.objectName);
+  const seatx = env.SEAT_XSTATE.getByName(probe.objectName);
+  const kvEmpty = () => kvm.probePlain(0, "put");
+  const kinds: readonly (readonly [Kind, () => Promise<unknown>, () => Promise<unknown>])[] = [
+    ["plain-put", () => kvm.probePlain(probe.n, "put"), kvEmpty],
+    ["events-put", () => kvm.probeEvents(probe.n, "put"), kvEmpty],
+    ["xstate-put", () => kvx.probeEvents(probe.n, "put"), () => kvx.probeEmpty()],
+    ["receive-put", () => kvm.probeReceive(probe.n, false), kvEmpty],
+    ["receive-put-keyed", () => kvm.probeReceive(probe.n, true), kvEmpty],
+    ["plain-inc", () => kvm.probePlain(probe.n, "inc"), kvEmpty],
+    ["events-inc", () => kvm.probeEvents(probe.n, "inc"), kvEmpty],
+    ["xstate-inc", () => kvx.probeEvents(probe.n, "inc"), () => kvx.probeEmpty()],
+    ["seat-plain", () => seat.probeSeatPlain(probe.n), () => seat.probeEmpty()],
+    ["seat-machine", () => seat.probeSeat(probe.n), () => seat.probeEmpty()],
+    ["seat-xstate", () => seatx.probeSeat(probe.n), () => seatx.probeEmpty()],
+  ];
+  const timed = async (run: () => Promise<unknown>, empty: () => Promise<unknown>) => {
     await empty();
     const before = performance.now();
     await run();
     return performance.now() - before;
   };
-  for (const [, run] of kinds) await run(); // warm: the object exists, its tables too
+  for (const [, run] of kinds) await run(); // warm: the objects exist, their tables too
   const microsPerEvent = Object.fromEntries(kinds.map(([kind]) => [kind, [] as number[]])) as Record<Kind, number[]>;
   const emptyCallMs: number[] = [];
   for (let round = 0; round < probe.rounds; round++) {
-    const emptyMs = await timed(empty);
-    emptyCallMs.push(emptyMs);
-    for (const [kind, run] of kinds) microsPerEvent[kind].push((((await timed(run)) - emptyMs) * 1000) / probe.n);
+    for (const [kind, run, empty] of kinds) {
+      const emptyMs = await timed(empty, empty);
+      if (kind === "plain-put") emptyCallMs.push(emptyMs);
+      microsPerEvent[kind].push((((await timed(run, empty)) - emptyMs) * 1000) / probe.n);
+    }
   }
   return { n: probe.n, rounds: probe.rounds, microsPerEvent, emptyCallMs };
 }
