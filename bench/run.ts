@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { $ } from "bun";
 
 type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | "table-1" | "table-4" | "table-16" | "table-64" | "indexed-1" | "indexed-4" | "indexed-16" | "reader-single" | "reader-leased";
-type Operation = "read" | "write" | "list" | "walk" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
+type Operation = "read" | "write" | "apply" | "rmw" | "list" | "walk" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
 type Distribution = "uniform" | "hot" | "control-plane";
 
 interface Point {

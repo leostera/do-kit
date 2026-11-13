@@ -138,6 +138,53 @@ export interface WriteResult {
   readonly refused?: string;
 }
 
+/**
+ * What a command decided for one row: its `result` for the caller, and what to write. No `write`
+ * (or null) writes nothing; `"delete"` deletes the row; a row replaces it whole.
+ */
+export interface Decision<Row extends RowShape, R> {
+  readonly result: R;
+  readonly write?: Row | "delete" | null;
+}
+
+/**
+ * A conditional update that runs inside the row's shard, in one transaction: given the row as it
+ * is (null: absent) and the caller's `args`, it decides what to write and what to answer.
+ *
+ * A command is pure and synchronous. It reads nothing but the row and `args`: no clock (pass the
+ * time in `args`), no storage, no network, no random values. It may run again for the same call
+ * only if the call is made again; a throw writes nothing and fails the call.
+ */
+export type Command<Row extends RowShape, A, R> = (current: Versioned<Row> | null, args: A) => Decision<Row, R>;
+
+/** A table's commands, by name: functions don't cross an RPC, so a call names one. */
+export type Commands<Row extends RowShape> = Readonly<Record<string, Command<Row, any, any>>>;
+
+/**
+ * Types a table's commands by its row, keeping each command's own argument and result types:
+ * `defineCommands<Doc>()({ rename: (current, args: { name: string }) => ... })`. The shard class
+ * registers the same object as `commands`, and the client takes it as its `commands` option.
+ */
+export function defineCommands<Row extends RowShape>(): <C extends Commands<Row>>(commands: C) => C {
+  return (commands) => commands;
+}
+
+export type CommandArgs<C> = C extends Command<any, infer A, any> ? A : never;
+export type CommandResult<C> = C extends Command<any, any, infer R> ? R : never;
+
+/**
+ * What `apply` answers. `ok`: the command ran, its write (if any) committed, and the row is now at
+ * `version` (0: absent). Not `ok`: the write would break a unique constraint, and nothing was
+ * written; the command's result is dropped.
+ */
+export type ApplyOutcome<R> = { readonly ok: true; readonly result: R; readonly version: number } | { readonly ok: false; readonly conflict: "unique"; readonly constraint: string; readonly version: number };
+
+/** What the client sends a shard for one `apply`. */
+export interface ApplyRequest {
+  readonly command: string;
+  readonly args: unknown;
+}
+
 export type Op = "=" | "!=" | "<" | "<=" | ">" | ">=" | "isNull" | "notNull" | "prefix" | "contains";
 
 /** A condition on one column; conditions are ANDed. `contains` ignores case. */

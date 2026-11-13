@@ -4,7 +4,7 @@ import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, t
 import { LeasedRelay, LeasedSource, readHot, writeHot, type ReaderTarget } from "./leased.ts";
 
 export { LeasedRelay, LeasedSource };
-import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
+import { defineCommands, defineTable, ShardedTable, table, type Decision, type TableClient } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedTableClient } from "../../../src/indexed/index.ts";
 import { entryOf, globalIndexes as globalIndexesOf } from "../../../src/indexed/entries.ts";
 import { splittable as twoCopySplittable, SplittableObject as TwoCopySplittableObject } from "./two-copy/index.ts";
@@ -37,14 +37,19 @@ const MAX_DRIVERS = 8192;
 const CALLS_PER_DRIVER = 16;
 /** "list": one page of 50 rows, newest first, each worker walking its own cursor (tables only). */
 /** "walk": the same, in shard order (`order: "shard"`): one shard a page. */
+/**
+ * "apply": one conditional update of a row in its shard (`apply`, RFD0010): the row's size goes up
+ * by one, or it is created. "rmw": the same decision made by the caller, as a read and a put
+ * conditional on the version read, made again from a fresh read on a conflict, up to RMW_ATTEMPTS.
+ */
 /** "create": a new row each time, only if absent (`ifVersion: 0`); tables only. */
 /**
  * "atomic-N": one `atomically` put of N distinct keys (sharded targets); "multi-N": the same put as
  * one plain `call`, which is not all-or-nothing, for comparison. "mixed": reads, and MIXED_WRITES of
  * the calls write (entrypoint targets).
  */
-type Operation = "read" | "write" | "list" | "walk" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
-const OPERATIONS: readonly Operation[] = ["read", "write", "list", "walk", "create", "atomic-2", "atomic-4", "multi-2", "multi-4", "mixed"];
+type Operation = "read" | "write" | "apply" | "rmw" | "list" | "walk" | "create" | "atomic-2" | "atomic-4" | "multi-2" | "multi-4" | "mixed";
+const OPERATIONS: readonly Operation[] = ["read", "write", "apply", "rmw", "list", "walk", "create", "atomic-2", "atomic-4", "multi-2", "multi-4", "mixed"];
 const keysPerCall = (op: Operation): number => (op.startsWith("atomic-") || op.startsWith("multi-") ? Number(op.slice(op.indexOf("-") + 1)) : 1);
 const MIXED_WRITES = 0.01;
 /** Keys a "hot" multi-key call picks from: a few, so calls contend for them. */
@@ -125,8 +130,20 @@ function benchRow(key: string, payloadBytes: number): BenchRow {
   return { name: key, createdAt: Date.now(), owner: `owner-${key.length % 16}`, size: payloadBytes, payload: "x".repeat(payloadBytes), email: `${key}@example.com`, team: teamOf(keyNumber(key)) };
 }
 
+/** Attempts of a read-modify-write before it counts as failed (a bounded retry loop). */
+const RMW_ATTEMPTS = 8;
+/** The decision of "apply" and "rmw": a row's size goes up by one; an absent row is created. */
+function touch(current: BenchRow | null, row: BenchRow): Decision<BenchRow, number> {
+  const next = current ? { ...current, size: current.size + 1 } : row;
+  return { result: next.size, write: next };
+}
+const benchCommands = defineCommands<BenchRow>()({
+  touch: (current, args: { row: BenchRow }) => touch(current?.row ?? null, args.row),
+});
+
 abstract class TableBench extends ShardedTable<Env, BenchRow> {
   protected table = benchRows;
+  protected override commands = benchCommands;
   async benchWhere(burnIterations: number): Promise<Where> {
     return where(burnIterations);
   }
@@ -232,7 +249,7 @@ function rowsClient(env: Env, target: TableTarget | IndexedTarget, name: string)
 
 function tableClient(env: Env, target: TableTarget, name: string): TableClient<BenchRow> {
   const ns = { "table-1": env.TABLE_1, "table-4": env.TABLE_4, "table-16": env.TABLE_16, "table-64": env.TABLE_64 }[target];
-  return table(ns as never, name, benchRows, { logShardErrors: true });
+  return table(ns as never, name, benchRows, { logShardErrors: true, commands: benchCommands as never });
 }
 
 interface MeasureConfig {
@@ -696,6 +713,19 @@ export class BenchDriver extends DurableObject<Env> {
             } else if (config.operation === "write") {
               await t.put(benchRow(key, config.payloadBytes));
               bytes += config.payloadBytes;
+            } else if (config.operation === "apply") {
+              const done = await (t as unknown as TableClient<BenchRow, typeof benchCommands>).apply(key, "touch", { row: benchRow(key, config.payloadBytes) });
+              if (!done.ok) throw new Error(`apply refused: ${JSON.stringify(done)}`);
+              bytes += config.payloadBytes;
+            } else if (config.operation === "rmw") {
+              for (let attempt = 1; ; attempt++) {
+                const current = await t.get(key);
+                const decided = touch(current?.row ?? null, benchRow(key, config.payloadBytes));
+                const written = await t.put(decided.write as BenchRow, { ifVersion: current?.version ?? 0 });
+                if (written.ok) break;
+                if (attempt === RMW_ATTEMPTS) throw new Error(`rmw: ${RMW_ATTEMPTS} conflicts in a row`);
+              }
+              bytes += config.payloadBytes;
             } else if (config.operation === "read") {
               // An indexed target reads by email, through its unique index; a table by key.
               const found = indexed ? await indexed.lookup("byEmail", [`${key}@example.com`]) : await t.get(key);
@@ -808,6 +838,7 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (keysPerCall(operation as Operation) > 1 && target !== "presplit" && target !== "split") throw new Error("atomic-N and multi-N are for sharded targets");
   if (isReader(target as Target) ? operation !== "read" && operation !== "mixed" : operation === "mixed") throw new Error("entrypoint targets take read or mixed, and only they take mixed");
   if (operation === "create" && !isRows(target as Target)) throw new Error("create is for table targets");
+  if ((operation === "apply" || operation === "rmw") && !isTable(target as Target)) throw new Error("apply and rmw are for sharded table targets");
   if (operation === "list" && !isRows(target as Target)) throw new Error("list is for table targets");
   if (operation === "walk" && !isTable(target as Target)) throw new Error("walk is for sharded table targets");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);

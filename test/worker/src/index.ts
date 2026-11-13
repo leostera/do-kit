@@ -6,7 +6,7 @@
 import { MAX_KNOWN_OBJECTS, RouteMismatch } from "../../../src/sharded/client.ts";
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type AtomicMethod, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import type { AtomicStep } from "../../../src/sharded/atomic.ts";
-import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
+import { defineCommands, defineTable, ShardedTable, table, TableClient, type Command, type Decision, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 import type { ShardPage, ShardPageRequest } from "../../../src/table/schema.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedListQuery } from "../../../src/indexed/index.ts";
 import { entryOf, globalIndexes } from "../../../src/indexed/entries.ts";
@@ -42,8 +42,46 @@ export const docs = defineTable<Doc>({
   counts: { byDeleted: "deleted" },
 });
 
+/** Commands of the docs table, for `apply`: each typed by its own arguments and result. */
+export const docCommands = defineCommands<Doc>()({
+  /** Adds `by` to the row's lastEditAt; nothing for an absent row. */
+  bump: (current, args: { by: number }): Decision<Doc, number | null> => {
+    if (!current) return { result: null };
+    const lastEditAt = (current.row.lastEditAt ?? 0) + args.by;
+    return { result: lastEditAt, write: { ...current.row, lastEditAt } };
+  },
+  /** Creates the row if absent; a no-op otherwise. */
+  ensure: (current, args: { row: Doc }): Decision<Doc, "created" | "exists"> => (current ? { result: "exists" } : { result: "created", write: args.row }),
+  /** Deletes the row: whether there was one. */
+  remove: (current, _args: null): Decision<Doc, boolean> => ({ result: current !== null, write: "delete" }),
+  /** Throws after deciding a write: nothing may be written. */
+  boom: (current, _args: null): Decision<Doc, never> => {
+    if (current) current.row.deleted = true;
+    throw new Error("test: the command failed");
+  },
+  /** Not synchronous: refused. */
+  later: ((_current: unknown, _args: null) => Promise.resolve({ result: 1 })) as unknown as Command<Doc, null, number>,
+});
+
+/** Compile-time checks of `apply`'s types (never called). */
+export async function applyTypes(t: TableClient<Doc, typeof docCommands>): Promise<void> {
+  const bumped = await t.apply("a", "bump", { by: 1 });
+  if (bumped.ok) {
+    const n: number | null = bumped.result;
+    void n;
+  }
+  // @ts-expect-error: bump takes { by: number }
+  await t.apply("a", "bump", { by: "1" });
+  // @ts-expect-error: no such command
+  await t.apply("a", "nope", null);
+  const ensured = await t.apply("a", "ensure", { row: { name: "a", id: "a", createdAt: 0, lastEditAt: null, deleted: false, meta: null } });
+  // @ts-expect-error: ensure answers "created" | "exists", not a number
+  if (ensured.ok) ensured.result satisfies number;
+}
+
 export class Docs extends ShardedTable<Env, Doc> {
   protected table = docs;
+  protected override commands = docCommands;
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6, holdWaitMs: 0 };
   /** Tests hold cleanup back, to list while shards still store rows they gave away. */
   protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
@@ -55,6 +93,17 @@ export class Docs extends ShardedTable<Env, Doc> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_flags (paused INTEGER NOT NULL)");
     this.ctx.storage.sql.exec("DELETE FROM test_flags");
     this.ctx.storage.sql.exec("INSERT INTO test_flags (paused) VALUES (?)", paused ? 1 : 0);
+  }
+  /** Makes this shard's next split slow to start copying, writes to the moving half held meanwhile. */
+  async slowHandOut(ms: number): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_slow (ms INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_slow");
+    this.ctx.storage.sql.exec("INSERT INTO test_slow (ms) VALUES (?)", ms);
+  }
+  protected override async beforeHandOut(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_slow (ms INTEGER NOT NULL)");
+    const ms = this.ctx.storage.sql.exec<{ ms: number }>("SELECT ms FROM test_slow").toArray()[0]?.ms ?? 0;
+    if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
   }
   /** Page calls this instance answered: what a listing costs. */
   private pages = 0;
@@ -816,7 +865,7 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
 
 /** POST /table {cls, name, op, args}: one call of the table client. */
 async function tableOp(env: Env, body: { cls: string; name: string; op: string; args: unknown[] }): Promise<unknown> {
-  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, body.cls === "routedTable" ? { routeOf: refRoute } : {}) as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, { ...(body.cls === "routedTable" ? { routeOf: refRoute } : {}), commands: docCommands as never }) as unknown as Record<string, (...a: unknown[]) => unknown>;
   if (body.op === "all") {
     const rows: unknown[] = [];
     for await (const row of (t.all as (q: ListQuery) => AsyncGenerator<unknown>).call(t, body.args[0] as ListQuery)) rows.push(row);

@@ -1,10 +1,10 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
 import { ShardedObject } from "../sharded/index.js";
-import { encodeIndexKey, encodeValue, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult } from "./schema.js";
+import { encodeIndexKey, encodeValue, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
 
 export * from "./schema.js";
-export { table, TableClient } from "./client.js";
+export { table, TableClient, type TableClientOptions } from "./client.js";
 
 const TABLE = "sharded_table";
 const COUNTS = "sharded_table_counts";
@@ -54,6 +54,11 @@ export interface PutOptions {
 export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObject<Env, never> {
   protected abstract readonly table: TableSchema<Row>;
   /**
+   * The commands `apply` may name (`defineCommands`): conditional updates that run here, in the
+   * row's transaction, instead of a read and a conditional put from the client.
+   */
+  protected commands: Commands<Row> = {};
+  /**
    * Rows whose key a new index is given per call, while it is built over rows that were there
    * before it. A shard with more answers "not ready" and goes on with the next call, so building
    * an index over millions of rows never needs more CPU than one call has.
@@ -87,6 +92,37 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       const ifVersion = payloads?.[i]?.ifVersion;
       return this.deleteRow(key, ifVersion === undefined ? {} : { ifVersion });
     }));
+  }
+
+  /**
+   * Runs a command on each key's row, all in one transaction: read the row, decide, write. One
+   * call, no version retries. "moved" and "not ready" are answered before the transaction, so a
+   * call the client routes again ran nowhere.
+   */
+  async tableApply(keys: readonly string[], payloads: readonly ApplyRequest[]): Promise<ApplyOutcome<unknown>[]> {
+    this.migrate();
+    // An IndexedTable reserves a write's index entries before the write: a command can't.
+    if (this.keepsGlobalIndexes()) throw new Error("apply is not supported on an IndexedTable: its writes reserve their index entries first; use put");
+    const commands = payloads.map(({ command }) => {
+      const fn = Object.hasOwn(this.commands, command) ? this.commands[command] : undefined;
+      if (typeof fn !== "function") throw new Error(`no command ${JSON.stringify(command)}`);
+      return fn;
+    });
+    return this.transact(keys, () => keys.map((key, i) => this.applyOne(key, payloads[i]!, commands[i]!)));
+  }
+
+  private applyOne(key: string, request: ApplyRequest, command: Commands<Row>[string]): ApplyOutcome<unknown> {
+    const current = this.getRow(key);
+    const decision = command(current, request.args) as Decision<Row, unknown> | PromiseLike<unknown>;
+    if (decision === null || typeof decision !== "object" || "then" in decision) throw new Error(`command ${request.command} must return { result, write? } synchronously`);
+    const write = decision.write ?? null;
+    if (write === null) return { ok: true, result: decision.result, version: current?.version ?? 0 };
+    const ifVersion = current?.version ?? 0;
+    const written = write === "delete" ? this.deleteRow(key, { ifVersion }) : this.putRow(this.checkKey(key, write), { ifVersion });
+    if (written.refused !== undefined) return { ok: false, conflict: "unique", constraint: written.refused, version: written.version };
+    // The row was read in this transaction: its version can't have moved.
+    if (!written.ok) throw new Error(`apply ${request.command} on ${key}: the row changed inside its own transaction`);
+    return { ok: true, result: decision.result, version: written.version };
   }
 
   // ---- Hooks for layers above (IndexedTable) ----

@@ -17,3 +17,4 @@ that capability belongs in it rather than in a layer above, or in the app.
 | [RFD0007](RFD0007-open-runs.md) | Open runs: adding to a work graph while it runs | Draft |
 | [RFD0008](RFD0008-atomic-calls-across-shards.md) | Atomic calls across shards | Implemented |
 | [RFD0009](RFD0009-walks-in-shard-order.md) | Walks in shard order | Implemented |
+| [RFD0010](RFD0010-table-commands.md) | Table commands: conditional updates inside the shard | Implemented |

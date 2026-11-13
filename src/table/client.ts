@@ -15,6 +15,11 @@ import {
   type Position,
   type RowShape,
   type ShardCursor,
+  type ApplyOutcome,
+  type ApplyRequest,
+  type CommandArgs,
+  type CommandResult,
+  type Commands,
   type ShardPage,
   type TableSchema,
   type ShardPageRequest,
@@ -61,20 +66,42 @@ export function perShardLimit(wanted: number, shards: number): number {
   return Math.min(wanted, Math.ceil(wanted / shards) * 2 + 2);
 }
 
-export class TableClient<Row extends RowShape> {
+/** A table client's options: the sharded client's, and the table's commands (`defineCommands`), for `apply`. */
+export interface TableClientOptions<C> extends ShardedClientOptions {
+  readonly commands?: C;
+}
+
+export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
   protected readonly client: Untyped;
   protected readonly primaryKey: keyof Row & string;
   private readonly indexes: Readonly<Record<string, readonly string[]>>;
+  private readonly commands: C | null;
 
   constructor(
     namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>,
     readonly name: string,
     schema: TableSchema<Row>,
-    options: ShardedClientOptions = {},
+    options: TableClientOptions<C> = {},
   ) {
     this.primaryKey = schema.primaryKey;
     this.indexes = schema.indexes ?? {};
-    this.client = sharded(namespace as never, name, options) as ShardedClient<never> as unknown as Untyped;
+    const { commands, ...sharding } = options;
+    this.commands = commands ?? null;
+    this.client = sharded(namespace as never, name, sharding) as ShardedClient<never> as unknown as Untyped;
+  }
+
+  /**
+   * Runs the table's command `command` on the row of `key`, inside its shard, in one transaction:
+   * it reads the row, decides what to write and what to answer, and writes. One call, with no
+   * version retries, however many callers update the row at once. A call answered "moved" or "not
+   * ready" did not run, and is routed again; a call whose answer is lost may have committed. The
+   * shard class must register the same commands (`protected commands`).
+   */
+  async apply<K extends keyof C & string>(key: string, command: K, args: CommandArgs<C[K]>): Promise<ApplyOutcome<CommandResult<C[K]>>> {
+    if (this.commands !== null && !Object.hasOwn(this.commands, command)) throw new Error(`no command ${JSON.stringify(command)} in this client's commands`);
+    const request: ApplyRequest = { command, args };
+    const [group] = await this.client.call([key], "tableApply", [request]);
+    return group!.result[0] as ApplyOutcome<CommandResult<C[K]>>;
   }
 
   async get(key: string): Promise<Versioned<Row> | null> {
@@ -222,8 +249,8 @@ function sumGroups(perShard: readonly (readonly GroupCount[])[]): GroupCount[] {
  * The client of the sharded table `name`: `namespace` is the binding of a `ShardedTable` class,
  * `schema` the table it declares (the client routes rows by its primary key).
  */
-export function table<T extends Rpc.DurableObjectBranded, Row extends RowShape>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>, options: ShardedClientOptions = {}): TableClient<Row> {
-  return new TableClient<Row>(namespace as unknown as DurableObjectNamespace<Rpc.DurableObjectBranded>, name, schema, options);
+export function table<T extends Rpc.DurableObjectBranded, Row extends RowShape, C extends Commands<Row> = {}>(namespace: DurableObjectNamespace<T>, name: string, schema: TableSchema<Row>, options: TableClientOptions<C> = {}): TableClient<Row, C> {
+  return new TableClient<Row, C>(namespace as unknown as DurableObjectNamespace<Rpc.DurableObjectBranded>, name, schema, options);
 }
 
 export { mergePages } from "./schema.js";
