@@ -3,7 +3,10 @@ import { sharded, type ShardedClient, type ShardedClientOptions } from "../shard
 import {
   mergePages,
   decodeCursor,
+  decodeShardCursor,
+  nextShard,
   encodeCursor,
+  encodeShardCursor,
   pageRequest,
   queryFingerprint,
   type GroupCount,
@@ -11,6 +14,7 @@ import {
   type ListQuery,
   type Position,
   type RowShape,
+  type ShardCursor,
   type ShardPage,
   type TableSchema,
   type ShardPageRequest,
@@ -32,11 +36,22 @@ interface TableMethods {
 export type Untyped = {
   call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{ positions: readonly number[]; result: readonly unknown[] }[]>;
   scan(method: string, ...args: unknown[]): Promise<unknown[]>;
+  scanShard(bits: string, method: string, ...args: unknown[]): Promise<{ ok: unknown } | { split: string[] }>;
+  knownLeaves(): Promise<string[]>;
   knownShardCount(): Promise<number>;
 };
 
 /** Rounds of shard calls one page may take to fill up, when shards returned less than needed. */
 const MAX_ROUNDS = 3;
+/** Shards one page in shard order may ask, when those before it run out partway. */
+const SHARD_CALLS_PER_PAGE = 3;
+
+/** A walk in shard order that has not begun, from one of these shards picked at random. */
+function fromAnyShard(leaves: readonly string[]): ShardCursor {
+  const start = leaves[Math.floor(Math.random() * leaves.length)]!;
+  return { leaf: start, after: null, floor: null, start, wrapped: false };
+}
+
 
 /**
  * Rows to ask each of `shards` shards for, to fill `wanted`: keys spread over shards by hash, so
@@ -108,6 +123,8 @@ export class TableClient<Row extends RowShape> {
    * filter ran out of budget) and still have a cursor.
    */
   async list(query: ListQuery = {}): Promise<ListPage<Row>> {
+    if (query.order === "shard") return this.listByShard(query);
+    if (query.order !== undefined && query.order !== "query") throw new Error('order must be "query" or "shard"');
     const request0 = pageRequest(query, null);
     const fingerprint = queryFingerprint(request0, request0.index === null ? [] : (this.indexes[request0.index] ?? []));
     const after = query.cursor ? decodeCursor(query.cursor, fingerprint) : null;
@@ -135,6 +152,35 @@ export class TableClient<Row extends RowShape> {
       cursor: next === null ? null : encodeCursor(fingerprint, next),
       ...counted,
     };
+  }
+
+  /**
+   * One page of a listing in shard order: from the cursor's shard on, one shard at a time, until
+   * the page is full or SHARD_CALLS_PER_PAGE shards were asked.
+   */
+  private async listByShard(query: ListQuery): Promise<ListPage<Row>> {
+    if (query.withCount) throw new Error('withCount is not supported in order "shard"');
+    const request = pageRequest(query, null);
+    const fingerprint = `${queryFingerprint(request, request.index === null ? [] : (this.indexes[request.index] ?? []))}:shard`;
+    let at: ShardCursor | null = query.cursor ? decodeShardCursor(query.cursor, fingerprint) : fromAnyShard(await this.client.knownLeaves());
+    const rows: ShardPage["rows"][number][] = [];
+    for (let calls = 0; at !== null && rows.length < request.limit && calls < SHARD_CALLS_PER_PAGE; ) {
+      const answer = await this.client.scanShard(at.leaf, "tablePage", { ...request, limit: request.limit - rows.length, after: at.after });
+      if ("split" in answer) {
+        // A walk not yet begun starts at any of its shards.
+        if (!at.wrapped && at.leaf === at.start && at.after === null) at = fromAnyShard(answer.split);
+        // Otherwise the shard split since: its shards, in order, each from where it was.
+        else at = { ...at, leaf: answer.split[0]!, floor: at.floor ?? (at.after === null ? null : { bits: at.leaf, after: at.after }) };
+        // Wrapped around to the root, which has split down to the start: done.
+        if (at.wrapped && at.leaf.startsWith(at.start)) at = null;
+        continue;
+      }
+      calls++;
+      const page = answer.ok as ShardPage;
+      rows.push(...page.rows);
+      at = page.frontier !== null ? { ...at, after: page.frontier } : nextShard(at);
+    }
+    return { rows: rows.map(({ row, version }) => ({ row: row as Row, version })), cursor: at === null ? null : encodeShardCursor(fingerprint, at) };
   }
 
   /** Every row of a query, page after page. */

@@ -10,7 +10,7 @@ useWorker();
 type Doc = { name: string; id: string; createdAt: number; lastEditAt: number | null; deleted: boolean; meta: unknown };
 type Versioned = { row: Doc; version: number };
 type Page = { rows: Versioned[]; cursor: string | null };
-type Query = { index?: string; direction?: "asc" | "desc"; where?: { column: string; op: string; value?: unknown }[]; limit?: number; budget?: number; cursor?: string | null };
+type Query = { index?: string; direction?: "asc" | "desc"; where?: { column: string; op: string; value?: unknown }[]; limit?: number; budget?: number; cursor?: string | null; order?: "query" | "shard"; withCount?: boolean };
 
 const op = <T>(name: string, operation: string, ...args: unknown[]) => post<T>("/table", { cls: "table", name, op: operation, args });
 const table = <T>(cls: string, name: string, operation: string, ...args: unknown[]) => post<T>("/table", { cls, name, op: operation, args });
@@ -169,6 +169,57 @@ test("listings match a reference sort, before, across and after splits", async (
   }
   for (const query of QUERIES) expect(await walk(name, query)).toEqual(expected(rows, query));
   expect(await op(name, "count")).toBe(rows.length);
+}, 120_000);
+
+/** Page calls the shards of a table answered, all told. */
+const pageCalls = async (name: string) => (await op<number[]>(name, "scan", "pageCalls")).reduce((a, b) => a + b, 0);
+
+/** How often a listing goes back in its query's order: at most once a shard, in shard order. */
+function breaks(names: string[], order: string[]): number {
+  const rank = new Map(order.map((n, i) => [n, i]));
+  return names.filter((n, i) => i > 0 && rank.get(n)! < rank.get(names[i - 1]!)!).length;
+}
+
+test("a walk in shard order lists every row once, in order within each shard, through splits, at one call a page", async () => {
+  const name = `by-shard-${Date.now()}`;
+  const rows = makeDocs(160);
+  for (let i = 0; i < rows.length; i += 40) await op(name, "putMany", rows.slice(i, i + 40).map((row) => ({ row })));
+  expect(await split(name, "")).toBe(true);
+  // Cleanup held back: both shards store every row, and each must be listed once.
+  await op(name, "scan", "pauseCleanup", true);
+
+  for (const query of QUERIES) {
+    const want = expected(rows, query);
+    const before = await pageCalls(name);
+    const listed = await walk(name, { ...query, order: "shard" });
+    expect([...listed].sort()).toEqual([...want].sort());
+    expect(breaks(listed, want)).toBeLessThanOrEqual(1);
+    // One shard a page, and another when one runs out partway: against two a page in query order.
+    const pages = Math.max(1, Math.ceil(want.length / query.limit!));
+    expect(await pageCalls(name)).toBeLessThanOrEqual(before + pages + 2);
+  }
+
+  // The shard being walked splits partway through it, and so does one not reached yet.
+  let step = 0;
+  const splitMidWalk = async () => {
+    const at = step++;
+    if (at === 1) expect(await split(name, "0")).toBe(true);
+    if (at === 4) expect(await split(name, "1")).toBe(true);
+  };
+  const query = QUERIES[1]!;
+  const listed = await walk(name, { ...query, order: "shard" }, splitMidWalk);
+  expect((await shards("table", name)).length).toBe(4);
+  expect([...listed].sort()).toEqual([...expected(rows, query)].sort());
+
+  // Walks start at any shard: walks begun together do not all ask the first one.
+  const firsts = new Set<string>();
+  for (let i = 0; i < 24; i++) firsts.add((await op<Page>(name, "list", { ...query, order: "shard", limit: 1 })).rows[0]!.row.name);
+  expect(firsts.size).toBeGreaterThan(1);
+
+  // A cursor of one order does not continue the other.
+  const first = await op<Page>(name, "list", { ...query, order: "shard" });
+  expect(op(name, "list", { ...query, cursor: first.cursor })).rejects.toThrow(/another query/);
+  expect(op(name, "list", { ...query, order: "shard", withCount: true })).rejects.toThrow(/withCount/);
 }, 120_000);
 
 test("a sparse filter with a small budget returns short pages but every match", async () => {

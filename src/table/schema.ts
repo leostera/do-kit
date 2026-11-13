@@ -163,6 +163,15 @@ export interface ListQuery {
    * group's name for its counts per value too (`counts`). Counts ignore `where`.
    */
   readonly withCount?: boolean | string;
+  /**
+   * `"query"` (the default): rows in the query's order across the whole table; each page asks
+   * every shard. `"shard"`: rows in the query's order within each shard, shard after shard; each
+   * page asks one shard (up to three, if one runs out partway), so walking a table of N shards
+   * costs about 1/N of the calls. For walks that need every row and not their order: exports,
+   * backfills, scans. Every row that existed when the walk began is listed once, through splits;
+   * `withCount` is not supported.
+   */
+  readonly order?: "query" | "shard";
 }
 
 export interface ListPage<Row> {
@@ -290,6 +299,58 @@ export function shortDigest(text: string): string {
 
 export function encodeCursor(fingerprint: string, position: Position): string {
   return Buffer.from(JSON.stringify({ f: fingerprint, p: position })).toString("base64url");
+}
+
+/**
+ * Where a listing in shard order is: in shard `leaf`, after `after`; every shard under `floor.bits`
+ * from after `floor.after`. A walk starts at the node `start`, goes to the last shard, wraps around
+ * (`wrapped`) to the first, and ends when it is back under `start`: walks that start together
+ * spread over the shards instead of all asking the first one.
+ */
+export interface ShardCursor {
+  readonly leaf: string;
+  readonly after: Position | null;
+  /** Set once a shard split partway through it: its shards go on from where it was. */
+  readonly floor: { readonly bits: string; readonly after: Position | null } | null;
+  readonly start: string;
+  readonly wrapped: boolean;
+}
+
+export function encodeShardCursor(fingerprint: string, at: ShardCursor): string {
+  return Buffer.from(JSON.stringify({ f: fingerprint, s: at })).toString("base64url");
+}
+
+export function decodeShardCursor(cursor: string, fingerprint: string): ShardCursor {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString());
+  } catch {
+    throw new Error("not a cursor of this table");
+  }
+  const { f, s } = (parsed ?? {}) as { f?: unknown; s?: Partial<ShardCursor> };
+  if (f !== fingerprint) throw new Error("the cursor belongs to another query (index, direction, conditions or order)");
+  const bits = (b: unknown) => typeof b === "string" && /^[01]*$/.test(b);
+  const position = (p: unknown) => p === null || typeof p === "string";
+  if (!s || !bits(s.leaf) || !position(s.after) || !bits(s.start) || typeof s.wrapped !== "boolean" || !(s.floor === null || (s.floor !== undefined && bits(s.floor.bits) && position(s.floor.after)))) throw new Error("not a cursor of this table");
+  return s as ShardCursor;
+}
+
+/**
+ * Where a walk in shard order goes once shard `at.leaf` is done: the node right after its subtree
+ * (the sibling of its nearest ancestor-or-self that is a left half), which exists since splits make
+ * both halves; after the last shard, the root (its first shard, once asked), unless the walk
+ * already wrapped. From that node's start, or from the floor's position if it is under the shard
+ * that split. Null once the walk is back under its start: done. Found from the bits alone, not the
+ * client's map of splits, which may know less than the cursor does.
+ */
+export function nextShard(at: ShardCursor): ShardCursor | null {
+  const left = at.leaf.lastIndexOf("0");
+  if (left < 0 && at.wrapped) return null;
+  const next = left < 0 ? "" : `${at.leaf.slice(0, left)}1`;
+  const wrapped = at.wrapped || left < 0;
+  if (wrapped && next.startsWith(at.start)) return null;
+  const floor = at.floor !== null && next.startsWith(at.floor.bits) ? at.floor : null;
+  return { ...at, leaf: next, after: floor?.after ?? null, floor, wrapped };
 }
 
 export function decodeCursor(cursor: string, fingerprint: string): Position {

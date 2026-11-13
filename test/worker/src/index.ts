@@ -7,6 +7,7 @@ import { MAX_KNOWN_OBJECTS, RouteMismatch } from "../../../src/sharded/client.ts
 import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type AtomicMethod, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import type { AtomicStep } from "../../../src/sharded/atomic.ts";
 import { defineTable, ShardedTable, table, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
+import type { ShardPage, ShardPageRequest } from "../../../src/table/schema.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedListQuery } from "../../../src/indexed/index.ts";
 import { entryOf, globalIndexes } from "../../../src/indexed/entries.ts";
 import { storageReport, type StorageReport } from "./storage-report.ts";
@@ -54,6 +55,15 @@ export class Docs extends ShardedTable<Env, Doc> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_flags (paused INTEGER NOT NULL)");
     this.ctx.storage.sql.exec("DELETE FROM test_flags");
     this.ctx.storage.sql.exec("INSERT INTO test_flags (paused) VALUES (?)", paused ? 1 : 0);
+  }
+  /** Page calls this instance answered: what a listing costs. */
+  private pages = 0;
+  override async tablePage(request: ShardPageRequest): Promise<ShardPage> {
+    this.pages++;
+    return super.tablePage(request);
+  }
+  async pageCalls(): Promise<number> {
+    return this.pages;
   }
   /** Rows stored here, owned or not. */
   async storedRows(): Promise<number> {
