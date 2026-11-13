@@ -1,12 +1,12 @@
-// Durable XState in the test Worker: a seat that can be held for a while, written as a plain
-// XState machine and run by DurableXState. The route runs in the Worker, so the class's client
+// A seat that can be held for a while, in the test Worker: a plain XState machine with a delayed
+// transition, run by DurableStateMachine. The route runs in the Worker, so the class's client
 // methods run here, as in any caller.
 import { assign, setup } from "xstate";
 import { CallError, type CallOptions } from "../../../src/client/index.ts";
-import { DurableXState, durableActions, reply, sendDurable } from "../../../src/xstate/index.ts";
+import { DurableStateMachine, durableActions, reply, sendToObject } from "../../../src/behaviours/index.ts";
 import type { BehavioursEnv } from "./behaviours.ts";
 
-export interface XStateEnv extends BehavioursEnv {
+export interface SeatsEnv extends BehavioursEnv {
   readonly SEATS: DurableObjectNamespace<Seat>;
 }
 
@@ -37,7 +37,7 @@ const seat = setup({
           actions: [
             assign({ holder: ({ event }) => event.who, holdMs: ({ event }) => event.holdMs }),
             reply(() => true),
-            sendDurable("AUDITS", ({ event }) => event.audit ?? "nobody", ({ event }) => ({ type: "held", lock: event.who })),
+            sendToObject("AUDITS", ({ event }) => event.audit ?? "nobody", ({ event }) => ({ type: "held", lock: event.who })),
           ],
         },
         status: { actions: reply(({ context }) => ({ state: "available", holder: context.holder })) },
@@ -56,7 +56,7 @@ const seat = setup({
   },
 });
 
-export class Seat extends DurableXState<XStateEnv, typeof seat> {
+export class Seat extends DurableStateMachine<SeatsEnv, typeof seat> {
   protected readonly machine = seat;
 
   // ---- client API: runs in the caller ----
@@ -84,7 +84,7 @@ export class Seat extends DurableXState<XStateEnv, typeof seat> {
   }
 }
 
-export type XStateRequest = { op: string; name: string; options?: CallOptions; args?: unknown[] };
+export type SeatsRequest = { op: string; name: string; options?: CallOptions; args?: unknown[] };
 
 async function settle(work: () => Promise<unknown>): Promise<unknown> {
   try {
@@ -94,7 +94,7 @@ async function settle(work: () => Promise<unknown>): Promise<unknown> {
   }
 }
 
-export async function xstateRoute(env: XStateEnv, request: XStateRequest): Promise<unknown> {
+export async function seatsRoute(env: SeatsEnv, request: SeatsRequest): Promise<unknown> {
   const { name, options = {} } = request;
   const args = request.args ?? [];
   const seats = Seat.client(env.SEATS, name, options);

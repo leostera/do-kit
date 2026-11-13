@@ -1,10 +1,11 @@
-// Behaviours and Client in the test Worker (RFD0009): a channel pool (a one-state DurableStateMachine, for
-// what every behaviour does), a code lock that reports to an audit log, and a plain object for
-// Client. The route
-// runs in the Worker, so the classes' client methods run here, as in any caller.
+// Behaviours and Client in the test Worker (RFD0009): XState machines run as Durable Objects (a
+// one-state channel pool, for what every behaviour does; a code lock that reports to an audit log)
+// and a plain object for Client. The route runs in the Worker, so the classes' client methods run
+// here, as in any caller.
 import { DurableObject } from "cloudflare:workers";
 import { CallError, Client, type Attempt, type CallOptions } from "../../../src/client/index.ts";
-import { DurableStateMachine, keep, next, postpone, replyTo, send, stateTimeout, type From, type Metadata, type StateHandlers } from "../../../src/behaviours/index.ts";
+import { assign, setup } from "xstate";
+import { DurableStateMachine, callOf, durableActions, postpone, reply, replyTo, sendToObject, type From } from "../../../src/behaviours/index.ts";
 
 export interface BehavioursEnv {
   readonly CHANNELS: DurableObjectNamespace<Channels>;
@@ -16,71 +17,84 @@ export interface BehavioursEnv {
 // ---- A channel pool ----
 
 type Pool = { readonly free: readonly number[]; readonly waiting: readonly From[]; readonly lastCaller: string | null };
-type PoolEvent = { readonly op: "alloc" } | { readonly op: "allocWait" } | { readonly op: "hang" } | { readonly op: "explode" } | { readonly op: "state" } | { readonly op: "rows" } | { readonly op: "free"; readonly channel: number };
+type PoolEvent = { readonly type: "alloc" } | { readonly type: "allocWait" } | { readonly type: "hang" } | { readonly type: "explode" } | { readonly type: "state" } | { readonly type: "rows" } | { readonly type: "free"; readonly channel: number };
 
-export class Channels extends DurableStateMachine<BehavioursEnv, "serving", Pool, PoolEvent, unknown> {
+/** One state, for what every behaviour does: answers now and later, metadata, rollback, SQL. */
+const poolMachine = (sql: () => SqlStorage) =>
+  setup({
+    types: { context: {} as Pool, events: {} as PoolEvent },
+    actions: {
+      ...durableActions,
+      ignore: () => {},
+      // Writes a row, then throws: neither the row nor the context change before it may stick.
+      boom: () => {
+        sql().exec("INSERT INTO pool_log (n) VALUES (1)");
+        throw new Error("explode");
+      },
+    },
+    guards: { hasFree: ({ context }) => context.free.length > 0, hasWaiter: ({ context }) => context.waiting.length > 0 },
+  }).createMachine({
+    context: { free: [0, 1, 2], waiting: [], lastCaller: null },
+    initial: "serving",
+    states: {
+      serving: {
+        on: {
+          alloc: [
+            { guard: "hasFree", actions: [reply(({ context }) => context.free[0]), assign({ free: ({ context }) => context.free.slice(1), lastCaller: ({ context, event }) => callOf(event).metadata.caller ?? context.lastCaller })] },
+            { actions: reply(() => null) },
+          ],
+          allocWait: [
+            { guard: "hasFree", actions: [reply(({ context }) => context.free[0]), assign({ free: ({ context }) => context.free.slice(1) })] },
+            // No answer now: the caller waits, and a later free answers it.
+            { actions: assign({ waiting: ({ context, event }) => [...context.waiting, callOf(event).from!] }) },
+          ],
+          free: [
+            { guard: "hasWaiter", actions: [replyTo(({ context }) => context.waiting[0], ({ event }) => event.channel), assign({ waiting: ({ context }) => context.waiting.slice(1) })] },
+            { actions: assign({ free: ({ context, event }) => [...context.free, event.channel] }) },
+          ],
+          hang: { actions: "ignore" },
+          explode: { actions: [assign({ free: [] }), "boom"] },
+          state: { actions: reply(({ context }) => context) },
+          rows: { actions: reply(() => sql().exec<{ n: number }>("SELECT COUNT(*) AS n FROM pool_log").one().n) },
+        },
+      },
+    },
+  });
+
+export class Channels extends DurableStateMachine<BehavioursEnv, ReturnType<typeof poolMachine>> {
+  protected readonly machine = poolMachine(() => this.sql);
+
+  constructor(ctx: DurableObjectState, env: BehavioursEnv) {
+    super(ctx, env);
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS pool_log (n INTEGER)");
+  }
+
   // ---- client API: runs in the caller ----
   alloc(): Promise<number | null> {
-    return this.call({ op: "alloc" }) as Promise<number | null>;
+    return this.call({ type: "alloc" }) as Promise<number | null>;
   }
   /** Waits for a channel if none is free. */
   allocWait(): Promise<number> {
-    return this.call({ op: "allocWait" }) as Promise<number>;
+    return this.call({ type: "allocWait" }) as Promise<number>;
   }
   free(channel: number): Promise<void> {
     if (!Number.isInteger(channel) || channel < 0) return Promise.reject(new CallError("INVALID_ARGUMENT", `not a channel: ${channel}`));
-    return this.cast({ op: "free", channel });
+    return this.cast({ type: "free", channel });
   }
   /** Never answers. */
   hang(): Promise<never> {
-    return this.call({ op: "hang" }) as Promise<never>;
+    return this.call({ type: "hang" }) as Promise<never>;
   }
-  /** Writes a row and changes the data, then throws. */
+  /** Writes a row and changes the context, then throws. */
   explode(): Promise<never> {
-    return this.call({ op: "explode" }) as Promise<never>;
+    return this.call({ type: "explode" }) as Promise<never>;
   }
   state(): Promise<Pool> {
-    return this.call({ op: "state" }) as Promise<Pool>;
+    return this.call({ type: "state" }) as Promise<Pool>;
   }
   rows(): Promise<number> {
-    return this.call({ op: "rows" }) as Promise<number>;
+    return this.call({ type: "rows" }) as Promise<number>;
   }
-
-  // ---- callbacks ----
-  protected init() {
-    this.sql.exec("CREATE TABLE IF NOT EXISTS pool_log (n INTEGER)");
-    return { state: "serving" as const, data: { free: [0, 1, 2], waiting: [], lastCaller: null } };
-  }
-
-  protected readonly states: StateHandlers<"serving", Pool, PoolEvent, unknown> = {
-    serving: (event, pool, { from, metadata }) => {
-      const lastCaller = metadata.caller ?? pool.lastCaller;
-      switch (event.op) {
-        case "alloc":
-        case "allocWait": {
-          const [channel, ...free] = pool.free;
-          if (channel !== undefined) return keep({ ...pool, free, lastCaller }, { reply: channel });
-          if (event.op === "alloc") return keep(pool, { reply: null });
-          return keep({ ...pool, waiting: [...pool.waiting, from!] }); // answered by a later free
-        }
-        case "hang":
-          return keep(pool);
-        case "explode":
-          this.sql.exec("INSERT INTO pool_log (n) VALUES (1)");
-          (pool as unknown as { free: number[] }).free = []; // changed in place, then throws: neither may stick
-          throw new Error("explode");
-        case "state":
-          return keep(pool, { reply: pool });
-        case "rows":
-          return keep(pool, { reply: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM pool_log").one().n });
-        case "free": {
-          const [waiter, ...waiting] = pool.waiting;
-          if (waiter) return keep({ ...pool, waiting }, { actions: [replyTo(waiter, event.channel)] });
-          return keep({ ...pool, free: [...pool.free, event.channel] });
-        }
-      }
-    },
-  };
 
   /** Test only, through a raw stub: ends this instance. */
   async restart(): Promise<void> {
@@ -91,10 +105,57 @@ export class Channels extends DurableStateMachine<BehavioursEnv, "serving", Pool
 // ---- A code lock that reports to an audit log ----
 
 type LockState = "locked" | "open";
-type LockData = { readonly code: string; readonly entered: string; readonly opened: number };
+type LockContext = { readonly code: string; readonly entered: string; readonly opened: number; readonly openMs: number; readonly name: string };
 type LockEvent = { readonly type: "press"; readonly digit: string } | { readonly type: "lock" } | { readonly type: "status" } | { readonly type: "setCode"; readonly code: string };
 
-export class CodeLock extends DurableStateMachine<BehavioursEnv, LockState, LockData, LockEvent, unknown> {
+/** A lock named "anything:ms" stays open for ms after the right code. */
+const lockMachine = (name: string) =>
+  setup({
+    types: { context: {} as LockContext, events: {} as LockEvent },
+    actions: { ...durableActions, ignore: () => {} },
+    guards: {
+      opens: ({ context, event }) => event.type === "press" && (context.entered + event.digit).slice(-context.code.length) === context.code,
+      isCall: ({ event }) => callOf(event).kind === "call",
+    },
+    delays: { openFor: ({ context }) => context.openMs },
+  }).createMachine({
+    context: { code: "1234", entered: "", opened: 0, openMs: Number(name.split(":")[1] ?? 10_000), name },
+    initial: "locked",
+    states: {
+      locked: {
+        on: {
+          press: [
+            {
+              guard: "opens",
+              target: "open",
+              actions: [
+                assign({ entered: "", opened: ({ context }) => context.opened + 1 }),
+                sendToObject("AUDITS", ({ context }) => context.name, ({ context }) => ({ type: "opened", lock: context.name, n: context.opened })),
+              ],
+            },
+            { actions: assign({ entered: ({ context, event }) => (context.entered + event.digit).slice(-context.code.length) }) },
+          ],
+          status: { actions: reply(({ context }) => ({ state: "locked", opened: context.opened })) },
+          // A call waits until the lock opens; a cast is dropped.
+          setCode: [{ guard: "isCall", actions: postpone() }, { actions: "ignore" }],
+          lock: { actions: "ignore" },
+        },
+      },
+      open: {
+        after: { openFor: "locked" },
+        on: {
+          lock: "locked",
+          status: { actions: reply(({ context }) => ({ state: "open", opened: context.opened })) },
+          setCode: { actions: [assign({ code: ({ event }) => event.code }), reply(() => true)] },
+          // press: no transition here, so presses wait until it locks again.
+        },
+      },
+    },
+  });
+
+export class CodeLock extends DurableStateMachine<BehavioursEnv, ReturnType<typeof lockMachine>> {
+  protected readonly machine = lockMachine(this.ctx.id.name ?? "");
+
   // ---- client API ----
   press(digit: string): Promise<void> {
     return this.cast({ type: "press", digit });
@@ -113,43 +174,6 @@ export class CodeLock extends DurableStateMachine<BehavioursEnv, LockState, Lock
     return this.call({ type: "setCode", code }) as Promise<boolean>;
   }
 
-  // ---- callbacks ----
-  protected init() {
-    return { state: "locked" as const, data: { code: "1234", entered: "", opened: 0 } };
-  }
-
-  protected readonly states: StateHandlers<LockState, LockData, LockEvent, unknown> = {
-    locked: (event, data, context) => {
-      switch (event.type) {
-        case "press": {
-          const entered = (data.entered + event.digit).slice(-data.code.length);
-          if (entered !== data.code) return keep({ ...data, entered });
-          const opened = data.opened + 1;
-          const name = this.ctx.id.name ?? "";
-          return next("open", { ...data, entered: "", opened }, { actions: [stateTimeout(Number(name.split(":")[1] ?? 10_000), { type: "lock" }), send("AUDITS", name, { type: "opened", lock: name, n: opened })] });
-        }
-        case "status":
-          return keep(data, { reply: { state: "locked", opened: data.opened } });
-        case "setCode":
-          return context.kind === "call" ? postpone() : keep(data);
-        default:
-          return keep(data);
-      }
-    },
-    open: (event, data) => {
-      switch (event.type) {
-        case "lock":
-          return next("locked", data);
-        case "status":
-          return keep(data, { reply: { state: "open", opened: data.opened } });
-        case "setCode":
-          return keep({ ...data, code: event.code }, { reply: true });
-        default:
-          return postpone(); // presses wait until it locks again
-      }
-    },
-  };
-
   /** Test only, through a raw stub. */
   async restart(): Promise<void> {
     this.ctx.abort("test restart");
@@ -160,23 +184,29 @@ export class CodeLock extends DurableStateMachine<BehavioursEnv, LockState, Lock
   }
 }
 
-// ---- An audit log: the last events cast to it ----
+// ---- An audit log: the last events sent to it ----
 
 type AuditEvent = { readonly type: string; readonly lock?: string; readonly n?: number };
-type AuditMessage = AuditEvent | { readonly type: "recent?" };
 
-export class Audit extends DurableStateMachine<BehavioursEnv, "recording", readonly AuditEvent[], AuditMessage, readonly AuditEvent[]> {
+const auditMachine = setup({ types: { context: {} as { events: readonly AuditEvent[] }, events: {} as AuditEvent }, actions: durableActions }).createMachine({
+  context: { events: [] },
+  initial: "recording",
+  states: {
+    recording: {
+      on: {
+        "recent?": { actions: reply(({ context }) => context.events) },
+        "*": { actions: assign({ events: ({ context, event }) => [...context.events, { ...event }].slice(-10) }) },
+      },
+    },
+  },
+});
+
+export class Audit extends DurableStateMachine<BehavioursEnv, typeof auditMachine> {
+  protected readonly machine = auditMachine;
+
   recent(): Promise<readonly AuditEvent[]> {
     return this.call({ type: "recent?" }) as Promise<readonly AuditEvent[]>;
   }
-
-  protected init() {
-    return { state: "recording" as const, data: [] as readonly AuditEvent[] };
-  }
-
-  protected readonly states: StateHandlers<"recording", readonly AuditEvent[], AuditMessage, readonly AuditEvent[]> = {
-    recording: (event, events) => (event.type === "recent?" ? keep(events, { reply: events }) : keep([...events, event].slice(-10))),
-  };
 }
 
 // ---- A plain object, for Client ----
@@ -244,7 +274,7 @@ export async function behavioursRoute(env: BehavioursEnv, request: BehavioursReq
       return waiting;
     }
     case "pastDeadline":
-      return env.CHANNELS.getByName(name).receive({ kind: "call", message: { op: "alloc" }, deadline: Date.now() - 1_000 });
+      return env.CHANNELS.getByName(name).receive({ kind: "call", message: { type: "alloc" }, deadline: Date.now() - 1_000 });
     case "intercepted": {
       const seen: unknown[] = [];
       const record = (attempt: Attempt, nextAttempt: (a: Attempt) => Promise<unknown>) => {
@@ -265,9 +295,9 @@ export async function behavioursRoute(env: BehavioursEnv, request: BehavioursReq
     case "reachCallback": {
       // Can a caller reach a protected callback through a raw stub?
       const stub = env.CHANNELS.getByName(name) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
-      const init = await settle(() => stub.init!());
-      const states = await settle(async () => typeof (await (stub.states as unknown as Promise<unknown>)));
-      return { init, states };
+      const migrate = await settle(() => stub.migrate!(1, {}));
+      const machine = await settle(async () => typeof (await (stub.machine as unknown as Promise<unknown>)));
+      return { migrate, machine };
     }
 
     case "enter":

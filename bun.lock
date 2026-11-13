@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "splittable-object",
+      "dependencies": {
+        "xstate": "^5.33.4",
+      },
       "devDependencies": {
         "@cloudflare/kumo": "^2.16.0",
         "@cloudflare/vite-plugin": "beta",
@@ -25,7 +28,6 @@
         "tailwindcss": "^4.3.3",
         "typescript": "^7.0.2",
         "vite": "^8.3.5",
-        "xstate": "5.33.4",
         "zod": "^4.6.7",
       },
     },

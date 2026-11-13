@@ -20,6 +20,7 @@ Bun.plugin({
 
 const { Client } = await import("../src/client/index.ts");
 const { DurableStateMachine } = await import("../src/behaviours/index.ts");
+const { setup } = await import("xstate");
 
 type Put = (keys: readonly string[], values: readonly string[]) => Promise<unknown>;
 
@@ -31,18 +32,13 @@ const stub = {
 const fakeNamespace = { getByName: (_name: string) => stub };
 const namespace = fakeNamespace as unknown as DurableObjectNamespace<any>;
 
-class Kv extends DurableStateMachine<unknown, "serving", null, { op: "put"; keys: readonly string[]; values: readonly string[] }, number> {
+const kvMachine = setup({ types: { events: {} as { type: "put"; keys: readonly string[]; values: readonly string[] } } }).createMachine({ initial: "serving", states: { serving: {} } });
+
+class Kv extends DurableStateMachine<unknown, typeof kvMachine> {
+  protected readonly machine = kvMachine;
   put(keys: readonly string[], values: readonly string[]): Promise<number> {
-    return this.call({ op: "put", keys, values }) as Promise<number>;
+    return this.call({ type: "put", keys, values }) as Promise<number>;
   }
-  protected init() {
-    return { state: "serving" as const, data: null };
-  }
-  protected readonly states = {
-    serving: (): never => {
-      throw new Error("the client never runs callbacks");
-    },
-  };
 }
 
 const interceptor = (attempt: unknown, next: (a: any) => Promise<unknown>) => next(attempt);

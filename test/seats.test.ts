@@ -1,5 +1,5 @@
-// Durable XState on objects, under cf dev or deployed: a plain XState machine whose delayed
-// transitions, answers and outgoing messages survive the object.
+// DurableStateMachine on objects, under cf dev or deployed: a seat hold, a plain XState machine
+// whose delayed transitions, answers and outgoing messages survive the object.
 import { describe, expect, test } from "bun:test";
 import { post, useWorker } from "./harness.ts";
 
@@ -8,7 +8,7 @@ useWorker();
 const unique = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 type Settled = { ok: true; value: any } | { ok: false; code: string; message: string };
-const op = (name: string, operation: string, args: unknown[] = []) => post<Settled>("/xstate", { op: operation, name, args });
+const op = (name: string, operation: string, args: unknown[] = []) => post<Settled>("/seats", { op: operation, name, args });
 const value = async (name: string, operation: string, args: unknown[] = []) => {
   const settled = await op(name, operation, args);
   if (!settled.ok) throw new Error(`${operation}: ${settled.code} ${settled.message}`);
@@ -16,7 +16,7 @@ const value = async (name: string, operation: string, args: unknown[] = []) => {
 };
 const behaviours = (name: string, operation: string) => post<Settled>("/behaviours", { op: operation, name, args: [] });
 
-describe("DurableXState", () => {
+describe("a seat hold", () => {
   test("answers calls from the machine's transitions", async () => {
     const seat = unique("seat");
     expect(await value(seat, "status")).toEqual({ state: "available", holder: null });

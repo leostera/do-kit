@@ -1,146 +1,170 @@
-// DurableStateMachine (RFD0009): an object as a state machine. Orders, sessions, leases, provisioning: things
-// that move through states, where what an event means depends on the state, and where "if nothing
-// happens in 15 minutes, give up" is part of the logic. Written by hand on a Durable Object, that
-// is a status column, an if-ladder in every method, and timeouts multiplexed over the one alarm.
+// DurableStateMachine (RFD0009): an XState machine as a Durable Object, with nothing lost when the
+// object is evicted. XState decides; this runs it the way a Durable Object needs: one event at a
+// time, each in one transaction with the machine's snapshot, its SQL, its timers and its messages.
 //
-// A subclass names one handler per state; each takes an event and the machine's data and returns
-// where to go: `next(state, data)`, `keep(data)`, or `postpone()`. Timeouts are durable: a state
-// timeout is cancelled when the state changes, a named one when set again or cancelled, and both
-// survive the object being evicted. A postponed event ("not in this state") runs again, oldest
-// first, after the next state change, so callers don't have to retry.
-import { Behaviour, type BehaviourEvent, type Step } from "./behaviour.js";
-import { cancelTimer, timer, type Effect, type EventKind, type From, type Metadata } from "./envelope.js";
+// XState's own runtime keeps delayed transitions in `setTimeout` and invoked promises in memory, so
+// an object evicted between them forgets both. Here every event goes through XState's pure
+// `transition()`, which returns the next snapshot and the actions to run without running them. The
+// actions that must outlive the object become rows: a delayed event is a timer on the alarm,
+// leaving its state cancels it, a message to another object is an outbox entry, and an answer to a
+// caller is kept with its idempotency key. The rest run inside the transaction.
+import { initialTransition, transition, type AnyMachineSnapshot, type AnyStateMachine, type EventFromLogic, type ExecutableActionObject, type SnapshotFrom } from "xstate";
+import { Behaviour, type BehaviourEvent, type Initial, type Step } from "./behaviour.js";
+import { cancelTimer, replyTo as replyEffect, send, timer, type Effect, type EventKind, type From, type Metadata } from "./envelope.js";
 
-const STATE_TIMEOUT = "state-machine:state";
-const NAMED_TIMEOUT = "state-machine:timeout:";
+const REPLY = "durable.reply";
+const REPLY_TO = "durable.replyTo";
+const SEND = "durable.send";
+const POSTPONE = "durable.postpone";
 
-/** An action besides the effects every behaviour has. */
-export type StateMachineAction<E> =
-  | Effect<E>
-  /** Delivers `event` as a timeout after `afterMs`, unless the state changes first. */
-  | { readonly kind: "stateTimeout"; readonly afterMs: number; readonly event: E }
-  /** Delivers `event` as a timeout after `afterMs`, unless set again or cancelled by name. */
-  | { readonly kind: "timeout"; readonly name: string; readonly afterMs: number; readonly event: E }
-  | { readonly kind: "cancelTimeout"; readonly name: string };
-
-export type StateMachineTransition<St, D, E, R> =
-  | { readonly next?: St; readonly data: D; readonly reply?: R; readonly actions?: readonly StateMachineAction<E>[] }
-  | { readonly postpone: true };
-
-export interface StateMachineContext {
-  /** "timeout" for state and named timeouts. */
+/** How an event reached the machine. Read it from an action with `callOf(event)`. */
+export interface CallInfo {
   readonly kind: EventKind;
-  /** Set for calls. Answer with `reply` in the transition, or later with `replyTo(from, value)`. */
+  /** Set for calls: answer now with `reply`, or keep it in the context and answer later with `replyTo`. */
   readonly from: From | undefined;
   readonly metadata: Metadata;
 }
 
-export type StateHandler<St, D, E, R> = (event: E, data: D, context: StateMachineContext) => StateMachineTransition<St, D, E, R>;
+const CALL = Symbol("durable.call");
+const NO_CALL: CallInfo = { kind: "info", from: undefined, metadata: {} };
 
-export type StateHandlers<St extends string, D, E, R> = { readonly [K in St]: StateHandler<St, D, E, R> };
+/** How `event` reached the machine: who waits for an answer, and the caller's metadata. */
+export const callOf = (event: object): CallInfo => (event as { [CALL]?: CallInfo })[CALL] ?? NO_CALL;
 
-interface Stored<St, D> {
-  readonly state: St;
-  readonly data: D;
-}
+type ActionArgs = { readonly context: any; readonly event: any };
 
-export interface TransitionOptions<E, R> {
-  /** The answer to this event's caller. */
-  readonly reply?: R;
-  readonly actions?: readonly StateMachineAction<E>[];
-}
+/**
+ * Declare these in `setup({ actions: { ...durableActions } })` so a machine may use the durable
+ * actions below. They never run: the object reads them from the transition.
+ */
+export const durableActions = {
+  [REPLY]: (_: unknown, _params: { value: unknown }) => {},
+  [REPLY_TO]: (_: unknown, _params: { to: From; value: unknown }) => {},
+  [SEND]: (_: unknown, _params: { binding: string; name: string; message: unknown }) => {},
+  [POSTPONE]: () => {},
+};
 
-/** Go to `state` with `data`. */
-export function next<St, D, E = never, R = never>(state: St, data: D, options?: TransitionOptions<E, R>): StateMachineTransition<St, D, E, R> {
-  return { next: state, data, ...options };
-}
+/** Answers this event's caller with `value(args)`, once the event commits. */
+export const reply = (value: (args: ActionArgs) => unknown) => ({ type: REPLY, params: (args: ActionArgs) => ({ value: value(args) }) }) as const;
 
-/** Stay in this state, with `data`. */
-export function keep<D, E = never, R = never>(data: D, options?: TransitionOptions<E, R>): StateMachineTransition<never, D, E, R> {
-  return { data, ...options };
-}
+/** Answers an earlier caller, kept from `callOf(event).from`, with `value(args)`. */
+export const replyTo = (to: (args: ActionArgs) => From, value: (args: ActionArgs) => unknown) =>
+  ({ type: REPLY_TO, params: (args: ActionArgs) => ({ to: to(args), value: value(args) }) }) as const;
 
-/** Not now: run this event again after the next state change. */
-export function postpone(): { readonly postpone: true } {
-  return { postpone: true };
-}
+/** Sends `message(args)` to object `name` of `binding`, once this event commits, at least once. */
+export const sendToObject = (binding: string, name: string | ((args: ActionArgs) => string), message: (args: ActionArgs) => unknown) =>
+  ({ type: SEND, params: (args: ActionArgs) => ({ binding, name: typeof name === "string" ? name : name(args), message: message(args) }) }) as const;
 
-export const stateTimeout = <E>(afterMs: number, event: E): StateMachineAction<E> => ({ kind: "stateTimeout", afterMs, event });
-export const namedTimeout = <E>(name: string, afterMs: number, event: E): StateMachineAction<E> => ({ kind: "timeout", name, afterMs, event });
-export const cancelTimeout = (name: string): StateMachineAction<never> => ({ kind: "cancelTimeout", name });
+/** Not now: keep this event, and run it again after the next state change. */
+export const postpone = () => ({ type: POSTPONE }) as const;
 
 /**
  * ```ts
- * export class Door extends DurableStateMachine<Env, "locked" | "open", { code: string; entered: string }, DoorEvent, boolean> {
- *   press(digit: string) { return this.cast({ type: "button", digit }); }   // client API
- *
- *   protected init() { return { state: "locked", data: { code: "1234", entered: "" } } as const; }
- *   protected states = {
- *     locked: (event, data) => ... next("open", { ...data, entered: "" }, { actions: [stateTimeout(10_000, { type: "lock" })] }),
- *     open: (event, data) => (event.type === "lock" ? next("locked", data) : postpone()),
- *   };
+ * const seat = setup({ types: { events: {} as SeatEvent }, actions: { ...durableActions } }).createMachine({
+ *   initial: "available",
+ *   states: {
+ *     available: { on: { grab: { target: "held", actions: reply(() => true) } } },
+ *     held: { after: { 600_000: "available" }, on: { release: { target: "available", actions: reply(() => true) } } },
+ *   },
+ * });
+ * export class Seat extends DurableStateMachine<Env, typeof seat> {
+ *   protected readonly machine = seat;
+ *   grab() { return this.call({ type: "grab" }) as Promise<boolean>; }   // client API, run in the caller
  * }
  * ```
+ *
+ * An event the current state takes no transition for waits, and runs again after the next state
+ * change (`postponeUnhandled`, on by default); off, such a call fails and such a cast is dropped.
  */
-export abstract class DurableStateMachine<Env, St extends string, D, E, R = unknown> extends Behaviour<Env, E, R, E> {
-  // Handlers live in `states`, an instance field, which RPC never exposes.
-  protected static override readonly callbacks: readonly string[] = ["init", "migrate"];
+export abstract class DurableStateMachine<Env, M extends AnyStateMachine> extends Behaviour<Env, EventFromLogic<M>, unknown, EventFromLogic<M>> {
+  // The machine is an instance field, which RPC never exposes; migrate is a prototype method.
+  protected static override readonly callbacks: readonly string[] = ["migrate"];
 
-  /** The state and data a new object starts in. Runs once in the object's life. */
-  protected abstract init(): Stored<St, D>;
+  protected abstract readonly machine: M;
+  /** Keep events the current state takes no transition for, until a state does. */
+  protected readonly postponeUnhandled: boolean = true;
 
-  /** One handler per state. */
-  protected abstract readonly states: StateHandlers<St, D, E, R>;
-
-  /** Upgrades data stored by an older `version`. */
-  protected migrate(fromVersion: number, _stored: unknown): Stored<St, D> {
-    throw new Error(`${this.constructor.name} has state of version ${fromVersion} and no migrate() for it`);
+  /** Upgrades a snapshot stored by an older `version`. */
+  protected migrate(fromVersion: number, _stored: unknown): SnapshotFrom<M> {
+    throw new Error(`${this.constructor.name} has a snapshot of version ${fromVersion} and no migrate() for it`);
   }
 
-  protected override behaviourInit(): unknown {
-    return this.init();
+  protected override behaviourInit(): Initial {
+    const [snapshot, actions] = initialTransition(this.machine as AnyStateMachine);
+    const { effects, answer, postponed } = this.#translate(actions);
+    if (answer || postponed) throw new Error(`${this.constructor.name}: the initial state has no event to answer or postpone`);
+    return { state: snapshot, effects };
   }
 
   protected override behaviourMigrate(fromVersion: number, stored: unknown): unknown {
     return this.migrate(fromVersion, stored);
   }
 
-  protected override behaviourStep(event: BehaviourEvent, stored: unknown): Step {
-    const current = stored as Stored<St, D>;
-    const handler = this.states[current.state];
-    if (!handler) throw new Error(`${this.constructor.name} has no handler for state ${current.state}`);
-    const kind = event.kind === "info" ? "timeout" : event.kind;
-    const transition = handler.call(this, event.message as E, current.data, { kind, from: event.from, metadata: event.metadata });
-    if ("postpone" in transition) return { state: stored, postpone: true };
-    const target = transition.next ?? current.state;
-    const changed = target !== current.state;
-    const state = changed || transition.data !== current.data ? { state: target, data: transition.data } : stored;
-    const effects = effectsOf(transition.actions, changed);
-    return "reply" in transition && event.from ? { state, effects, changed, reply: { value: transition.reply } } : { state, effects, changed };
+  protected override behaviourEncode(snapshot: unknown): unknown {
+    return this.machine.getPersistedSnapshot(snapshot as SnapshotFrom<M>);
+  }
+
+  protected override behaviourDecode(stored: unknown): unknown {
+    return this.machine.resolveState(stored as never);
+  }
+
+  protected override behaviourStep(event: BehaviourEvent, state: unknown): Step {
+    const current = state as AnyMachineSnapshot;
+    const message = { ...(event.message as object), [CALL]: { kind: event.kind === "info" ? "timeout" : event.kind, from: event.from, metadata: event.metadata } satisfies CallInfo };
+    const [next, actions] = transition(this.machine as AnyStateMachine, current, message as never) as [AnyMachineSnapshot, ExecutableActionObject[]];
+    // No transition and nothing to do: XState would drop the event without a word.
+    if (next === current && actions.length === 0 && event.kind !== "info") {
+      if (this.postponeUnhandled) return { state, postpone: true };
+      if (event.from) throw new Error(`${this.constructor.name} takes no ${(event.message as { type: string }).type} in ${JSON.stringify(current.value)}`);
+      return { state };
+    }
+    const { effects, answer, postponed } = this.#translate(actions);
+    if (postponed) return { state, postpone: true };
+    const changed = next !== current && !sameValue(next.value, current.value);
+    return answer && event.from ? { state: next, effects, changed, reply: answer } : { state: next, effects, changed };
+  }
+
+  /** XState's actions as this object's effects; the rest run here, inside the transaction. */
+  #translate(actions: readonly ExecutableActionObject[]): { effects: Effect<unknown>[]; answer: { value: unknown } | undefined; postponed: boolean } {
+    const effects: Effect<unknown>[] = [];
+    let answer: { value: unknown } | undefined;
+    for (const action of actions) {
+      switch (action.type) {
+        case "xstate.raise": {
+          const params = action.params as { event: unknown; id?: string; delay?: number };
+          // A raise without a delay was already taken, inside this transition.
+          if (params.delay !== undefined) effects.push(timer(params.id ?? `xstate.raise.${crypto.randomUUID()}`, params.delay, params.event));
+          break;
+        }
+        case "xstate.cancel":
+          effects.push(cancelTimer((action.params as { sendId: string }).sendId));
+          break;
+        case REPLY:
+          answer = { value: (action.params as { value: unknown }).value };
+          break;
+        case REPLY_TO: {
+          const params = action.params as { to: From; value: unknown };
+          effects.push(replyEffect(params.to, params.value));
+          break;
+        }
+        case SEND: {
+          const params = action.params as { binding: string; name: string; message: unknown };
+          effects.push(send(params.binding, params.name, params.message));
+          break;
+        }
+        case POSTPONE:
+          return { effects: [], answer: undefined, postponed: true };
+        default:
+          // Invoked actors, sendTo, emit and the like live in XState's in-memory system: an evicted
+          // object would lose them, so they are refused rather than half-supported.
+          if (action.type.startsWith("xstate.") && action.type !== "xstate.log") throw new Error(`${this.constructor.name}: ${action.type} is not durable; use delayed transitions (after), reply, replyTo and sendToObject`);
+          action.exec?.(action.info, action.params);
+      }
+    }
+    return { effects, answer, postponed: false };
   }
 }
 
-/** The machine's actions as effects; a state change cancels the state timeout unless it sets one. */
-function effectsOf<E>(actions: readonly StateMachineAction<E>[] | undefined, changed: boolean): Effect<unknown>[] | undefined {
-  if (!actions && !changed) return undefined;
-  const effects: Effect<unknown>[] = [];
-  let setsStateTimeout = false;
-  for (const action of actions ?? []) {
-    switch (action.kind) {
-      case "stateTimeout":
-        setsStateTimeout = true;
-        effects.push(timer(STATE_TIMEOUT, action.afterMs, action.event));
-        break;
-      case "timeout":
-        effects.push(timer(NAMED_TIMEOUT + action.name, action.afterMs, action.event));
-        break;
-      case "cancelTimeout":
-        effects.push(cancelTimer(NAMED_TIMEOUT + action.name));
-        break;
-      default:
-        effects.push(action);
-    }
-  }
-  if (changed && !setsStateTimeout) effects.unshift(cancelTimer(STATE_TIMEOUT));
-  return effects;
+function sameValue(a: unknown, b: unknown): boolean {
+  return a === b || (typeof a === "object" && typeof b === "object" && JSON.stringify(a) === JSON.stringify(b));
 }

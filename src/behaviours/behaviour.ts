@@ -43,6 +43,12 @@ export interface Step {
   readonly changed?: boolean;
 }
 
+/** @internal A new object's first state, and the effects of entering it. */
+export interface Initial {
+  readonly state: unknown;
+  readonly effects?: readonly Effect<unknown>[];
+}
+
 /** What one committed step leaves to do once its transaction is durable. */
 interface Committed {
   current: Outcome | undefined;
@@ -143,8 +149,8 @@ export abstract class Behaviour<Env = unknown, Call = unknown, Reply = unknown, 
     }
   }
 
-  /** @internal The state a new object starts with. */
-  protected abstract behaviourInit(): unknown;
+  /** @internal The state a new object starts with, and what entering it asks for (its timers, say). */
+  protected abstract behaviourInit(): Initial;
   /** @internal The stored state of an older `version`, upgraded. */
   protected abstract behaviourMigrate(fromVersion: number, stored: unknown): unknown;
   /** @internal One event's transition. Synchronous: it runs inside the transaction. */
@@ -252,9 +258,24 @@ export abstract class Behaviour<Env = unknown, Call = unknown, Reply = unknown, 
   #loadState(): unknown {
     const row = this.sql.exec<{ version: number; state: string }>("SELECT version, state FROM behaviour_state WHERE k = 0").toArray()[0];
     if (row && row.version === this.version) return this.behaviourDecode(JSON.parse(row.state));
-    const state = this.#inStep(() => (row ? this.behaviourMigrate(row.version, JSON.parse(row.state)) : this.behaviourInit()));
-    this.#saveState(state);
-    return state;
+    if (row) {
+      const state = this.#inStep(() => this.behaviourMigrate(row.version, JSON.parse(row.state)));
+      this.#saveState(state);
+      return state;
+    }
+    // A new object: its first state and the timers or messages entering it sets, committed together.
+    const committed: Committed = { current: undefined, replies: [], timersChanged: false, sent: false };
+    let initial: Initial | undefined;
+    this.ctx.storage.transactionSync(() => {
+      initial = this.#inStep(() => this.behaviourInit());
+      this.#saveState(initial.state);
+      for (const effect of initial.effects ?? []) {
+        if (effect.kind === "reply") throw new Error(`${this.constructor.name}: the initial state has no caller to answer`);
+        this.#recordEffect(effect, committed);
+      }
+    });
+    this.#afterCommit(committed);
+    return initial!.state;
   }
 
   #saveState(state: unknown): void {

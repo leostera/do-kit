@@ -15,7 +15,7 @@ const value = async (name: string, operation: string, args: unknown[] = [], opti
   return settled.value;
 };
 
-describe("every behaviour, through a one-state DurableStateMachine", () => {
+describe("every behaviour, through a one-state machine", () => {
   test("serves calls and casts on its data", async () => {
     const pool = unique("pool");
     expect(await value(pool, "alloc")).toBe(0);
@@ -35,7 +35,7 @@ describe("every behaviour, through a one-state DurableStateMachine", () => {
     expect(channel).toBe(0);
     expect(seen).toHaveLength(1);
     expect(seen[0]!.method).toBe("receive");
-    expect(seen[0]!.args[0]).toMatchObject({ kind: "call", message: { op: "alloc" }, metadata: { caller: "tests" } });
+    expect(seen[0]!.args[0]).toMatchObject({ kind: "call", message: { type: "alloc" }, metadata: { caller: "tests" } });
     expect((await value(pool, "poolState")).lastCaller).toBe("tests");
   });
 
@@ -95,12 +95,12 @@ describe("every behaviour, through a one-state DurableStateMachine", () => {
   });
 
   test("a raw stub can't run a callback outside an event", async () => {
-    const reached = await post<{ init: Settled; states: Settled }>("/behaviours", { op: "reachCallback", name: unique("pool") });
+    const reached = await post<{ migrate: Settled; machine: Settled }>("/behaviours", { op: "reachCallback", name: unique("pool") });
     // Protected methods are on the prototype, so RPC reaches them: the base class refuses them.
-    expect(reached.init).toMatchObject({ ok: false });
-    expect((reached.init as { message: string }).message).toContain("is a callback");
-    // Instance fields (the state handlers) are never exposed over RPC.
-    expect(reached.states).toMatchObject({ ok: false });
+    expect(reached.migrate).toMatchObject({ ok: false });
+    expect((reached.migrate as { message: string }).message).toContain("is a callback");
+    // Instance fields (the machine) are never exposed over RPC.
+    expect(reached.machine).toMatchObject({ ok: false });
   });
 });
 

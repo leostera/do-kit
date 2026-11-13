@@ -2,9 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { LeasedRelay, LeasedSource, readHot, writeHot, type ReaderTarget } from "./leased.ts";
-import { BEHAVIOUR_TARGETS, behaviourRead, behaviourWrite, isBehaviour, KvMachine, KvXState, SeatMachine, SeatXState, probeBehaviours, probeRpc, type BehaviourTarget, type ProbeBehaviours, type ProbeRpc } from "./behaviours.ts";
+import { BEHAVIOUR_TARGETS, behaviourRead, behaviourWrite, isBehaviour, KvMachine, SeatMachine, probeBehaviours, probeRpc, type BehaviourTarget, type ProbeBehaviours, type ProbeRpc } from "./behaviours.ts";
 
-export { KvMachine, KvXState, SeatMachine, SeatXState };
+export { KvMachine, SeatMachine };
 
 export { LeasedRelay, LeasedSource };
 import { defineTable, ShardedTable, table, type TableClient } from "../../../src/table/index.ts";
@@ -107,9 +107,7 @@ interface Env {
   readonly INDEX_4: DurableObjectNamespace<Index4>;
   readonly INDEX_16: DurableObjectNamespace<Index16>;
   readonly KV_MACHINE: DurableObjectNamespace<KvMachine>;
-  readonly KV_XSTATE: DurableObjectNamespace<KvXState>;
   readonly SEAT_MACHINE: DurableObjectNamespace<SeatMachine>;
-  readonly SEAT_XSTATE: DurableObjectNamespace<SeatXState>;
 }
 
 // ---- Sharded tables: the same rows, indexes and queries on 1, 4, 16 and 64 shards ----
