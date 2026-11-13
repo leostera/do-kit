@@ -26,6 +26,7 @@ const OUTPUTS: Record<string, { runs: string[]; extra?: Record<string, unknown> 
   "indexed.json": { runs: ["v050-indexed"] },
   "atomic.json": { runs: ["v050-atomic"] },
   "leased.json": { runs: ["v050-leased"] },
+  "apply.json": { runs: ["v050-table-apply"] },
 };
 
 for (const [output, { runs, extra }] of Object.entries(OUTPUTS)) {

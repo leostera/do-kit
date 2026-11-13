@@ -249,6 +249,33 @@ Listings were measured again on 2026-11-13, in query order and in shard order fr
 - Two fixes went in while measuring: pages first scanned rows instead of seeking (10,000 rows listed at a third of the speed of 2,000), and every shard returned a full page (16 shards moved 800 rows to list 50).
 - An index stored by sort order (range-partitioned) would let a page touch one or two index shards. That is the next layer.
 
+## Table commands
+
+`apply` against the same update made by the caller, a `get` and a `put(row, { ifVersion })` retried from a fresh read up to 8 times, on 1 and 16 shards, measured on the edge on 2026-11-13 ([raw data](../bench/results/apply.json), design in [RFD0010](rfds/RFD0010-table-commands.md)). The update raises a row's size by one, or creates the row. 10 s per point.
+
+![Updates of one hot row](bench/apply-hot-throughput.svg)
+
+![Updates of uniform keys, p99](bench/apply-uniform-p99.svg)
+
+| One hot row, in flight | apply, 1 shard | get + put, 1 shard | apply, 16 shards | get + put, 16 shards |
+|---|---|---|---|---|
+| 1 | 34/s, p99 52 ms | 19/s, p99 123 ms | 19/s, p99 67 ms | 24/s, p99 62 ms |
+| 16 | 177/s, p99 284 ms | 17/s, p99 2,935 ms, 72 failed | 120/s, p99 321 ms | 22/s, p99 2,617 ms, 117 failed |
+| 64 | 432/s, p99 378 ms | 12/s, p99 3,401 ms, 344 failed | 471/s, p99 304 ms | 15/s, p99 3,000 ms, 391 failed |
+| 128 | 562/s, p99 395 ms | 9/s, p99 4,237 ms, 492 failed | 698/s, p99 447 ms | 10/s, p99 3,644 ms, 611 failed |
+| 256 | 596/s, p99 597 ms, 540 failed | 6/s, p99 5,231 ms, 713 failed | 879/s, p99 565 ms | 6/s, p99 5,353 ms, 827 failed |
+
+| 10,000 rows, uniform, in flight | apply, 1 shard | get + put, 1 shard | apply, 16 shards | get + put, 16 shards |
+|---|---|---|---|---|
+| 1 | 23/s, p99 93 ms | 25/s, p99 86 ms | 24/s, p99 120 ms | 21/s, p99 144 ms |
+| 16 | 173/s, p99 202 ms | 78/s, p99 994 ms | 146/s, p99 366 ms | 81/s, p99 1,003 ms |
+| 64 | 395/s, p99 364 ms | 200/s, p99 2,056 ms, 6 failed | 616/s, p99 272 ms | 305/s, p99 1,278 ms |
+| 128 | 505/s, p99 483 ms | 221/s, p99 3,354 ms, 6 failed | 1,180/s, p99 341 ms | 516/s, p99 1,618 ms |
+| 256 | 590/s, p99 606 ms | 188/s, p99 5,347 ms, 25 failed | 2,064/s, p99 584 ms | 1,061/s, p99 1,539 ms, 2 failed |
+
+- **One hot row:** `apply` commits 562–698 updates/s at 128 in flight, with no failures; the read-and-put commits 9–10/s, and 492–611 calls run out of attempts. A hot row is one object, so at 256 in flight its queue fills and calls are refused as overloaded.
+- **Uniform keys:** `apply` is about twice as fast with a fifth of the p99, from the call it saves and the conflicts it avoids.
+
 ## Indexed tables
 
 `IndexedTable` against `ShardedTable`, on the same 10,000 rows of 1 KiB, on 1 and 16 shards. The indexed table adds a unique global index on `email` and one on `(team, createdAt)`, each on as many index shards as there are row shards ("16 + 16"). Updates are one-row puts of existing rows, each moving both index entries; creates are new rows, only if absent, so the indexed table reserves the email first; reads are a lookup by email through the index, against a get by key; a listing is one page of 50 rows newest first, of one team from one index shard, against the whole table from every shard. 10 s per point, measured on the edge on 2026-11-12 ([raw data](../bench/results/indexed.json)).

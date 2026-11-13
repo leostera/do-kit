@@ -138,8 +138,38 @@ that need exactly-once carry their own operation IDs in the row, as with any wri
 
 ### Measured
 
-To be filled from `bench/` operations `apply` and `rmw` (a read and a conditional put, retried up
-to 8 times) at 128 in flight, on hot and uniform keys.
+On the edge, on 2026-11-13 (`bench/`, operations `apply` and `rmw`, data in
+`bench/results/v050-table-apply.json`). Both make the same decision: a row's size goes up by one,
+or the row is created. `rmw` is a `get` and a `put(row, { ifVersion })`, made again from a fresh
+read on a conflict, up to 8 times; a call that conflicts 8 times counts as failed. 10 s per point.
+
+| One hot row, in flight | apply, 1 shard | get + put, 1 shard | apply, 16 shards | get + put, 16 shards |
+|---|---|---|---|---|
+| 1 | 34/s, p99 52 ms | 19/s, p99 123 ms | 19/s, p99 67 ms | 24/s, p99 62 ms |
+| 16 | 177/s, p99 284 ms | 17/s, p99 2,935 ms, 72 failed | 120/s, p99 321 ms | 22/s, p99 2,617 ms, 117 failed |
+| 64 | 432/s, p99 378 ms | 12/s, p99 3,401 ms, 344 failed | 471/s, p99 304 ms | 15/s, p99 3,000 ms, 391 failed |
+| 128 | 562/s, p99 395 ms | 9/s, p99 4,237 ms, 492 failed | 698/s, p99 447 ms | 10/s, p99 3,644 ms, 611 failed |
+| 256 | 596/s, p99 597 ms, 540 failed | 6/s, p99 5,231 ms, 713 failed | 879/s, p99 565 ms | 6/s, p99 5,353 ms, 827 failed |
+
+| 10,000 rows, uniform, in flight | apply, 1 shard | get + put, 1 shard | apply, 16 shards | get + put, 16 shards |
+|---|---|---|---|---|
+| 1 | 23/s, p99 93 ms | 25/s, p99 86 ms | 24/s, p99 120 ms | 21/s, p99 144 ms |
+| 16 | 173/s, p99 202 ms | 78/s, p99 994 ms | 146/s, p99 366 ms | 81/s, p99 1,003 ms |
+| 64 | 395/s, p99 364 ms | 200/s, p99 2,056 ms, 6 failed | 616/s, p99 272 ms | 305/s, p99 1,278 ms |
+| 128 | 505/s, p99 483 ms | 221/s, p99 3,354 ms, 6 failed | 1,180/s, p99 341 ms | 516/s, p99 1,618 ms |
+| 256 | 590/s, p99 606 ms | 188/s, p99 5,347 ms, 25 failed | 2,064/s, p99 584 ms | 1,061/s, p99 1,539 ms, 2 failed |
+
+- **On one hot row, apply commits 50–90 times as many updates.** Every `rmw` caller reads the
+  same version and all but one put fails, so from 16 in flight most attempts are wasted and many
+  calls run out of attempts: at 128 in flight, 9–10 commits/s, p99 3.6–4.2 s, and 492–611 calls
+  failed. `apply` commits 562/s on one shard and 698/s on 16 (the row's shard is one object
+  either way), with p99 under 450 ms and no failures. At 256 in flight one object's queue fills,
+  and calls are refused as overloaded.
+- **On uniform keys, apply is about twice as fast at a fifth of the tail.** At 128 in flight on 16
+  shards: 1,180/s with p99 341 ms, against 516/s with p99 1,618 ms. The difference is the second
+  call, and the conflicts that keys shared by concurrent callers still have.
+- At one in flight, both are one or two hops from the caller, and the location of the caller and
+  the shard decides the latency.
 
 ## Drawbacks
 

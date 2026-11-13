@@ -293,6 +293,27 @@ if (tableResults) {
   graphs["table-read-throughput"] = chart({ title: "Table reads: rows per second", subtitle: tSub("One-row gets by primary key"), xLabel: "Concurrent in-flight reads", yLabel: "reads / s", xTicks: tLevels, series: tSeries("read", (p) => p.operationsPerSecond) });
 }
 
+// ---- Table commands: apply against a read and a conditional put (bench/results/apply.json) ----
+const applyResults = await readFile(join(import.meta.dir, "results", "apply.json"), "utf8").then((t) => JSON.parse(t) as { points: (Omit<Point, "target" | "operation"> & { target: string; operation: string; distribution: string })[] }).catch(() => null);
+if (applyResults) {
+  const levels = [...new Set(applyResults.points.map((p) => p.concurrency))].sort((a, b) => a - b);
+  const SERIES = [
+    ["table-16", "apply", "apply, 16 shards", "#e4572e"],
+    ["table-1", "apply", "apply, 1 shard", "#f79009"],
+    ["table-16", "rmw", "get + put(ifVersion), 16 shards", "#2e86ab"],
+    ["table-1", "rmw", "get + put(ifVersion), 1 shard", "#667085"],
+  ] as const;
+  const series = (distribution: string, value: (p: Point) => number) =>
+    SERIES.map(([target, operation, label, color]) => ({
+      label,
+      color,
+      points: applyResults.points.filter((p) => p.target === target && p.operation === operation && p.distribution === distribution).map((p): [number, number] => [p.concurrency, value(p as unknown as Point)]),
+    }));
+  const subtitle = (what: string) => `A row's size goes up by one, or it is created. The read-and-put retries from a fresh read, up to 8 times. ${what}, 10 s per point`;
+  graphs["apply-hot-throughput"] = chart({ title: "Updates of one hot row: committed per second", subtitle: subtitle("Every caller updates the same row"), xLabel: "Concurrent in-flight updates", yLabel: "committed / s", xTicks: levels, series: series("hot", (p) => p.operationsPerSecond) });
+  graphs["apply-uniform-p99"] = chart({ title: "Updates of 10,000 rows: p99 latency", subtitle: subtitle("Uniform keys"), xLabel: "Concurrent in-flight updates", yLabel: "p99 latency (ms)", xTicks: levels, series: series("uniform", (p) => p.latencyMs.p99) });
+}
+
 // ---- IndexedTable vs ShardedTable: the same rows on 1, 4 and 16 shards (bench/results/indexed.json) ----
 const indexedFile = join(import.meta.dir, "results", "indexed.json");
 const indexedResults = await readFile(indexedFile, "utf8").then((t) => JSON.parse(t) as { points: (Omit<Point, "target" | "operation"> & { target: string; operation: string })[] }).catch(() => null);
@@ -334,7 +355,7 @@ const seriesOf = (points: readonly LoosePoint[], defs: readonly (readonly [strin
       label,
       color: ["#e4572e", "#667085", "#2e86ab", "#7a5af8"][i % 4]!,
       ...(dash ? { dash } : {}),
-      points: points.filter((p) => p.target === target && p.operation === operation && p.distribution === distribution).map((p): [number, number] => [p.concurrency, value(p)]),
+      points: points.filter((p) => p.target === target && p.operation === operation && p.distribution === distribution).map((p): [number, number] => [p.concurrency, value(p as unknown as Point)]),
     }));
 const atomic = await looseResults("atomic.json");
 if (atomic) {
