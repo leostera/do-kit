@@ -260,20 +260,63 @@ Interceptors are the hook for tracing and logs. Outbox failures and dropped time
 
 ### Overhead, measured
 
-From `bench/results/behaviours-probe-events-local.json` (local workerd under cf dev, 20,000 one-key
-1 KiB puts or counter increments per call, 15 rounds; best round and median, microseconds per
-event) and `bench/results/behaviours-client-bun.json` (Bun, 200,000 calls per round, 9 rounds), printed by `bun bench/behaviours-tables.ts`:
+On the Cloudflare edge, a GenServer costs what a plain Durable Object doing the same SQL costs:
+the behaviour adds about 1 µs of work per event, and its client well under 1 µs per call, against
+calls of 10 to 40 ms. An idempotency key is the exception: it writes one more row, so a keyed
+read pays for a durable write. The tables below come from `bun bench/behaviours-tables.ts`.
+
+Inside one object, 20,000 one-key 1 KiB puts or counter increments per call, 11 rounds
+(`bench/results/behaviours-probe-edge.json`, Worker version `b97352f0`):
 
 | Inside one object, per event | best | median |
 |---|---|---|
-| put, plain transaction | 19.85 µs | 25.60 µs |
-| put, behaviour event | 20.75 µs | 27.80 µs |
-| put, envelope with a deadline | 20.50 µs | 27.30 µs |
-| put, envelope with an idempotency key (kept) | 23.95 µs | 30.65 µs |
-| counter in SQL, plain | 4.95 µs | 5.80 µs |
-| counter in the behaviour's JSON state | 6.30 µs | 8.65 µs |
+| put, plain transaction | 19.5 µs | 21.5 µs |
+| put, behaviour event | 19.8 µs | 22.1 µs |
+| put, envelope with a deadline | 20.8 µs | 24.2 µs |
+| put, envelope with an idempotency key (kept) | 38.0 µs | 40.3 µs |
+| counter in SQL, plain | 9.7 µs | 10.7 µs |
+| counter in the behaviour's JSON state | 11.4 µs | 13.0 µs |
 
-| In the caller, per call, no network | median |
+The same Worker version, 200 sequential puts from the Worker per round, 11 rounds, targets
+alternating within a round:
+
+| One put end to end, one at a time | best | median |
+|---|---|---|
+| plain object, raw stub | 14.05 ms | 14.34 ms |
+| plain object, Client | 13.71 ms | 14.21 ms |
+| plain object, Client with a deadline, retries, an interceptor | 13.90 ms | 14.11 ms |
+| GenServer's object, raw stub, plain write | 16.50 ms | 16.89 ms |
+| GenServer's object, raw stub, envelope | 16.41 ms | 16.64 ms |
+| GenServer client | 16.38 ms | 16.80 ms |
+| GenServer client with retries (idempotency key) | 16.50 ms | 16.95 ms |
+| GenStatem client | 13.96 ms | 14.12 ms |
+
+The GenServer's object is 2.5 ms slower than the plain one whether it is called as a GenServer or
+through plain methods: that is where the object was placed, not the behaviour. Under load, one
+object called by up to 256 calls in flight, plain methods and the GenServer on that same object
+(`bench/results/behaviours-load-edge-shared.json`, Worker version `df25b5e3`; calls/s, p50 / p99):
+
+| Writes | 1 in flight | 16 in flight | 64 in flight | 256 in flight |
+|---|---|---|---|---|
+| plain methods | 34/s, 29 / 51 ms | 233/s, 36 / 194 ms | 669/s, 48 / 393 ms | 903/s, 168 / 932 ms |
+| GenServer | 41/s, 24 / 43 ms | 231/s, 44 / 194 ms | 787/s, 55 / 206 ms | 924/s, 239 / 590 ms |
+| GenServer, idempotency key | 41/s, 25 / 40 ms | 238/s, 34 / 190 ms | 615/s, 93 / 234 ms | 774/s, 245 / 857 ms |
+
+| Reads | 1 in flight | 16 in flight | 64 in flight | 256 in flight |
+|---|---|---|---|---|
+| plain methods | 104/s, 10 / 20 ms | 278/s, 40 / 194 ms | 655/s, 59 / 405 ms | 869/s, 195 / 925 ms |
+| GenServer | 100/s, 10 / 19 ms | 289/s, 39 / 186 ms | 722/s, 70 / 231 ms | 958/s, 236 / 648 ms |
+| GenServer, idempotency key | 44/s, 23 / 47 ms | 173/s, 75 / 255 ms | 333/s, 157 / 1238 ms | 355/s, 755 / 1366 ms |
+
+`bench/results/behaviours-load-edge.json` ramps every target, each on its own object, to 1,024
+calls in flight. Every target levels off at 600 to 1,400 writes/s, and from 1,024 calls in flight
+some calls fail on all of them, plain objects included. The differences between targets there
+follow where each object was placed, so it shows one object's ceiling, not the behaviours' cost.
+
+In the caller, with no network, Bun, 200,000 calls per round, 9 rounds
+(`bench/results/behaviours-client-bun.json`):
+
+| In the caller, per call | median |
 |---|---|
 | raw stub | 26 ns |
 | Client | 158 ns |
@@ -282,13 +325,17 @@ event) and `bench/results/behaviours-client-bun.json` (Bun, 200,000 calls per ro
 | GenServer client, timeout | 544 ns |
 | GenServer client, retries (idempotency key) | 322 ns |
 
-A behaviour event adds about 1 µs to the object's work, and an idempotency key about 4 µs (it
-reads and writes one more row). The JSON state costs about 1.5 µs over a SQL counter for a small
-state; it grows with the state, which is why callbacks can keep big state in tables. Clients add
-well under a microsecond per call. The local machine was shared with other work, so medians are
-noisy; the edge benchmark (the `single-client`, `single-client-opts`, `genserver`,
-`genserver-keyed` and `genstatem` targets of `bench/worker`) is the measurement to quote for end
-to end latency and throughput, and has not run yet.
+Three things to know when reading these numbers:
+
+- **A write is a durable write only if it changes bytes.** A put of the value a key already holds
+  changes no page, commits nothing, and costs what a read does (7 ms against 15 ms, measured). So
+  every benchmark write here stores a value no write stored before (`BENCH_UNIQUE_VALUES`).
+- **An idempotency key turns any call into a write.** Its answer is kept in `behaviour_replies` in
+  the call's transaction. A keyed write costs nothing extra (the write commits anyway), but a keyed
+  read waits for a durable commit: 23 ms against 10 ms, and a third of the throughput under load.
+  Callers should send keys on calls that change state, and retry reads without one.
+- **JSON state** costs about 2 µs over a SQL counter for a small state, and grows with the state;
+  callbacks can keep big state in tables.
 
 ## Drawbacks
 

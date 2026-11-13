@@ -1,7 +1,7 @@
 // The overhead tables of RFD0009, from the results files that back them:
 //   bun bench/behaviours-tables.ts
-// Reads behaviours-probe-edge.json, behaviours-load-edge.json and behaviours-client-bun.json in
-// bench/results; a missing file's tables are skipped.
+// Reads behaviours-probe-edge.json, behaviours-load-edge.json, behaviours-load-edge-shared.json and
+// behaviours-client-bun.json in bench/results; a missing file's tables are skipped.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -56,14 +56,15 @@ interface LoadPoint {
   successes: number;
   latencyMs: { p50: number; p99: number };
 }
-const loadRun = load<{ generatedAt: string; points: LoadPoint[] }>("behaviours-load-edge.json");
-if (loadRun) {
+for (const file of ["behaviours-load-edge.json", "behaviours-load-edge-shared.json"]) {
+  const loadRun = load<{ generatedAt: string; points: LoadPoint[] }>(file);
+  if (!loadRun) continue;
   const targets = [...new Set(loadRun.points.map((p) => p.target))];
   const levels = [...new Set(loadRun.points.map((p) => p.concurrency))].sort((a, b) => a - b);
   for (const operation of ["write", "read"]) {
     const points = loadRun.points.filter((p) => p.operation === operation);
     if (points.length === 0) continue;
-    console.log(`\nFrom behaviours-load-edge.json (${loadRun.generatedAt.slice(0, 10)}), one-key ${operation}s of 1 KiB on one object; calls/s, p50 / p99 ms, failed calls:\n`);
+    console.log(`\nFrom ${file} (${loadRun.generatedAt.slice(0, 10)}), one-key ${operation}s of 1 KiB on one object; calls/s, p50 / p99 ms, failed calls:\n`);
     console.log(`| Target | ${levels.map((c) => `${c} in flight`).join(" | ")} |\n|---|${levels.map(() => "---").join("|")}|`);
     for (const target of targets) {
       const cells = levels.map((c) => {

@@ -17,6 +17,7 @@ The numbers and graphs in the [README](../README.md) and [docs/performance.md](.
 | `indexed-1`, `indexed-4`, `indexed-16` | An `IndexedTable` on the same rows, with a unique global index on email and one on (team, createdAt), its rows and index entries each on that many shards. Adds `create` (new rows only if absent), and its reads and listings go through the global indexes. |
 | `single-client`, `single-client-opts` | The `single` object through `Client` (RFD0009): with no options, and with a deadline, retries and an interceptor. |
 | `genserver`, `genserver-keyed`, `genstatem` | The same SQL in a `GenServer`'s or a one-state `GenStatem`'s callbacks, through its client; `genserver-keyed` with retries on, so every call carries an idempotency key the object keeps. Take `read` and `write`. |
+| `kvserver-plain` | The `GenServer`'s object through a raw stub, doing the same SQL in plain methods. With `BENCH_SHARED_OBJECT=1` every target measures one object per namespace, so `genserver` and `kvserver-plain` share placement and only the behaviour differs. Takes `read` and `write`. |
 | `reader-single`, `reader-leased` | One hot key, read by the drivers as an app's isolates would: from one plain Durable Object, or with leased reads (`worker/src/leased.ts`: a source, its relays, and a sub-lease kept in the driver's memory). Take `read` and `mixed`. A point on `reader-leased` also reports what reached the source. |
 
 Operations besides `read` and `write`: `list` and `create` (table targets); `atomic-2` and `atomic-4`, one `atomically` put of that many distinct keys, against `multi-2` and `multi-4`, the same put as one plain call (`presplit` or `split`; with `hot`, keys come from a pool of 8); and `mixed`, reads with 1% writes (`reader-*`).
@@ -35,6 +36,8 @@ Driver Durable Objects generate the load from several regions, using `locationHi
   - errors.
 
   Each split runs as a background job on the Worker that the script polls, since a large one takes minutes.
+
+A write of the bytes a key already holds changes no page and commits nothing, so it costs what a read does. `BENCH_UNIQUE_VALUES=1` makes every write store a value no write stored before; use it whenever write latency is the point.
 
 Results go to `results/latest.json` (or `results/$BENCH_RESULTS_NAME.json`) after every point, with the commit, whether the tree had changes, and the deployed Worker version (`BENCH_WORKER_VERSION`). `bun bench/collect.ts` builds the files the graphs read (`latest.json`, `table.json`, `indexed.json`, `atomic.json`, `leased.json`, `workgraph.json`) from the named runs that back the published numbers, listed in the script; `bun run bench:plot` then draws the graphs into `docs/bench/`.
 
