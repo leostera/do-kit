@@ -73,6 +73,11 @@ export class Seat extends DurableStateMachine<SeatsEnv, typeof seat> {
   explode(): Promise<never> {
     return this.call({ type: "explode" }) as Promise<never>;
   }
+  /** Test only: an event type no state names, as a typo in a client method would send. */
+  misspelled(kind: "call" | "cast"): Promise<unknown> {
+    const event = { type: "grabb", who: "ana", holdMs: 1 } as never;
+    return kind === "call" ? this.call(event) : this.cast(event);
+  }
 
   /** Test only, through a raw stub. */
   async restart(): Promise<void> {
@@ -107,6 +112,14 @@ export async function seatsRoute(env: SeatsEnv, request: SeatsRequest): Promise<
       return settle(() => seats.status());
     case "explode":
       return settle(() => seats.explode());
+    case "misspelled":
+      return settle(() => seats.misspelled(args[0] as "call" | "cast"));
+    case "untyped":
+      return settle(async () => {
+        const outcome = (await env.SEATS.getByName(name).receive({ kind: "call", message: { who: "ana" } })) as { ok: true; value: unknown } | { ok: false; code: "INVALID_ARGUMENT"; message: string };
+        if (!outcome.ok) throw new CallError(outcome.code, outcome.message);
+        return outcome.value;
+      });
     case "grabWhileHeld": {
       // Waits while held; answered once a release makes the seat available.
       const waiting = settle(() => seats.grab(String(args[0])));

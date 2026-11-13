@@ -9,6 +9,7 @@
 // leaving its state cancels it, a message to another object is an outbox entry, and an answer to a
 // caller is kept with its idempotency key. The rest run inside the transaction.
 import { initialTransition, transition, type AnyMachineSnapshot, type AnyStateMachine, type EventFromLogic, type ExecutableActionObject, type SnapshotFrom } from "xstate";
+import { CallError } from "../client/index.js";
 import { Behaviour, type BehaviourEvent, type Initial, type Step } from "./behaviour.js";
 import { cancelTimer, replyTo as replyEffect, send, timer, type Effect, type EventKind, type From, type Metadata } from "./envelope.js";
 
@@ -73,8 +74,10 @@ export const postpone = () => ({ type: POSTPONE }) as const;
  * }
  * ```
  *
- * An event the current state takes no transition for waits, and runs again after the next state
- * change (`postponeUnhandled`, on by default); off, such a call fails and such a cast is dropped.
+ * An event no state of the machine names fails at once with INVALID_ARGUMENT: a misspelled type
+ * must not wait for a state that will never come. An event the machine names but the current state
+ * takes no transition for waits, and runs again after the next state change (`postponeUnhandled`,
+ * on by default); off, such a call fails with FAILED_PRECONDITION and such a cast is dropped.
  */
 export abstract class DurableStateMachine<Env, M extends AnyStateMachine> extends Behaviour<Env, EventFromLogic<M>, unknown, EventFromLogic<M>> {
   // The machine is an instance field, which RPC never exposes; migrate is a prototype method.
@@ -83,6 +86,8 @@ export abstract class DurableStateMachine<Env, M extends AnyStateMachine> extend
   protected abstract readonly machine: M;
   /** Keep events the current state takes no transition for, until a state does. */
   protected readonly postponeUnhandled: boolean = true;
+
+  #names: EventNames | undefined;
 
   /** Upgrades a snapshot stored by an older `version`. */
   protected migrate(fromVersion: number, _stored: unknown): SnapshotFrom<M> {
@@ -110,18 +115,28 @@ export abstract class DurableStateMachine<Env, M extends AnyStateMachine> extend
 
   protected override behaviourStep(event: BehaviourEvent, state: unknown): Step {
     const current = state as AnyMachineSnapshot;
+    // Timers carry the events XState itself asked for; only events from callers are checked.
+    if (event.kind !== "info") this.#refuseUnknown(event.message);
     const message = { ...(event.message as object), [CALL]: { kind: event.kind === "info" ? "timeout" : event.kind, from: event.from, metadata: event.metadata } satisfies CallInfo };
     const [next, actions] = transition(this.machine as AnyStateMachine, current, message as never) as [AnyMachineSnapshot, ExecutableActionObject[]];
     // No transition and nothing to do: XState would drop the event without a word.
     if (next === current && actions.length === 0 && event.kind !== "info") {
       if (this.postponeUnhandled) return { state, postpone: true };
-      if (event.from) throw new Error(`${this.constructor.name} takes no ${(event.message as { type: string }).type} in ${JSON.stringify(current.value)}`);
+      if (event.from) throw new CallError("FAILED_PRECONDITION", `${this.constructor.name} takes no ${(event.message as { type: string }).type} in ${JSON.stringify(current.value)}`);
       return { state };
     }
     const { effects, answer, postponed } = this.#translate(actions);
     if (postponed) return { state, postpone: true };
     const changed = next !== current && !sameValue(next.value, current.value);
     return answer && event.from ? { state: next, effects, changed, reply: answer } : { state: next, effects, changed };
+  }
+
+  /** An event whose type no state names, or with no type at all, is refused before XState sees it. */
+  #refuseUnknown(message: unknown): void {
+    const type = (message as { type?: unknown } | null)?.type;
+    if (typeof type !== "string") throw new CallError("INVALID_ARGUMENT", `${this.constructor.name} takes events with a string type, got ${JSON.stringify(message)}`);
+    this.#names ??= eventNames(this.machine as AnyStateMachine);
+    if (!this.#names.accepts(type)) throw new CallError("INVALID_ARGUMENT", `${this.constructor.name} has no event ${JSON.stringify(type)}; its states take ${this.#names.listed}`);
   }
 
   /** XState's actions as this object's effects; the rest run here, inside the transaction. */
@@ -163,6 +178,23 @@ export abstract class DurableStateMachine<Env, M extends AnyStateMachine> extend
     }
     return { effects, answer, postponed: false };
   }
+}
+
+/** The event types a machine's states name: exact ones, and wildcards ("*", "user.*"). */
+interface EventNames {
+  accepts(type: string): boolean;
+  readonly listed: string;
+}
+
+function eventNames(machine: AnyStateMachine): EventNames {
+  const named = (machine.events as string[]).filter((name) => !name.startsWith("xstate."));
+  const exact = new Set(named.filter((name) => !name.endsWith("*")));
+  const any = named.includes("*");
+  const prefixes = named.filter((name) => name.endsWith(".*")).map((name) => name.slice(0, -1));
+  return {
+    accepts: (type) => any || exact.has(type) || prefixes.some((prefix) => type.startsWith(prefix)),
+    listed: named.join(", "),
+  };
 }
 
 function sameValue(a: unknown, b: unknown): boolean {

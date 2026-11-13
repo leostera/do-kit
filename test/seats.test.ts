@@ -51,6 +51,19 @@ describe("a seat hold", () => {
     expect(await value(seat, "status")).toEqual({ state: "held", holder: "bo" });
   });
 
+  test("an event no state names fails at once, call or cast, and changes nothing", async () => {
+    const seat = unique("seat");
+    const started = Date.now();
+    for (const kind of ["call", "cast"]) {
+      const settled = await op(seat, "misspelled", [kind]);
+      expect(settled).toMatchObject({ ok: false, code: "INVALID_ARGUMENT" });
+      expect((settled as { message: string }).message).toContain('"grabb"');
+    }
+    expect(await op(seat, "untyped")).toMatchObject({ ok: false, code: "INVALID_ARGUMENT" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(await value(seat, "status")).toEqual({ state: "available", holder: null });
+  });
+
   test("an action that throws commits nothing", async () => {
     const seat = unique("seat");
     expect(await op(seat, "explode")).toMatchObject({ ok: false, message: "explode" });

@@ -17,6 +17,14 @@
     "./client": "./src/client/index.ts",
     "./behaviours": "./src/behaviours/index.ts"
   },
+  "peerDependencies": {
+    "xstate": "^5.33.0"
+  },
+  "peerDependenciesMeta": {
+    "xstate": {
+      "optional": true
+    }
+  },
   "scripts": {
     "check": "tsc -p tsconfig.json && tsc -p tsconfig.consumer.json",
     "test": "bun test",
@@ -45,6 +53,7 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",
+    "xstate": "^5.33.4",
     "zod": "^4.6.7"
   },
   "main": "./src/index.ts",
@@ -62,8 +71,5 @@
   ],
   "publishConfig": {
     "access": "public"
-  },
-  "dependencies": {
-    "xstate": "^5.33.4"
   }
 }

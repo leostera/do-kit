@@ -154,8 +154,12 @@ The machine is plain XState, designed and tested as XState is. What the object a
   `callOf(event).from`, which also carries the caller's metadata.
 - `sendToObject(binding, name, fn)` sends an event to another object through the outbox.
 - `after` transitions are timers on the alarm; leaving the state cancels them.
-- An event the current state takes no transition for waits, and runs again after the next state
-  change, oldest first (`postponeUnhandled`, on by default); `postpone()` does the same from a
+- An event whose type no state of the machine names (a typo, an event from an older version)
+  fails at once with `INVALID_ARGUMENT`, call or cast, before XState sees it. The names come from
+  the machine (`machine.events`), wildcards included: a state with `"*"` takes anything.
+- An event the machine names but the current state takes no transition for waits, and runs again
+  after the next state change, oldest first (`postponeUnhandled`, on by default; off, such a call
+  fails with `FAILED_PRECONDITION` and such a cast is dropped). `postpone()` does the same from a
   guarded transition. A postponed call keeps its caller waiting, and is answered when the state
   lets it run.
 
@@ -236,7 +240,9 @@ that ran gets its first answer.
 
 ### Compatibility and migration
 
-New layers; nothing else changes. A behaviour's stored state carries `version`: bump it and
+New layers; nothing else changes. `xstate` is an optional peer dependency: an app that imports
+`@leostera/do-kit/behaviours` installs it, and one that doesn't needs nothing. For that, the root
+`@leostera/do-kit` does not re-export the behaviours; they come only from their own path. A behaviour's stored state carries `version`: bump it and
 implement `migrate(fromVersion, stored)` when the state's shape changes. The base class owns
 `alarm()`, as `ShardedObject` does; a subclass that defines it fails at construction.
 
@@ -257,7 +263,7 @@ Interceptors are the hook for tracing and logs. Outbox failures and dropped time
   another.
 - `test/seats.test.ts` runs a seat hold: a delayed transition fired from the alarm after a
   restart, its cancellation, an event waiting for a state that takes it, an action that throws,
-  and an outbox message.
+  an event no state names (call, cast, no type) failing at once, and an outbox message.
 - `test/client.test.ts` covers the Client's retries, overload, stub reuse, deadlines, interceptors and
   option merging against a scripted namespace.
 
@@ -433,7 +439,6 @@ Each app keeps writing its own status columns, alarm multiplexers, retry loops a
 ### Before acceptance
 
 - Should `cast` return before handling (enqueue and answer), rather than after the commit?
-- Should `postponeUnhandled` stay on by default? On, a misspelled event waits forever.
 
 ### During implementation
 
