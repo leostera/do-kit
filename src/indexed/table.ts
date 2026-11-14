@@ -34,6 +34,10 @@ const DELIVERY_BATCH = 200;
  * the entries of many writes.
  */
 const MAX_SENDS = 4;
+/** A delivery call that has not answered in this long fails, and frees its slot. */
+const SEND_TIMEOUT_MS = 10_000;
+/** Outbox entries one alarm delivers at most: a backlog goes over several alarms. */
+const ALARM_DELIVERIES = 1_000;
 const SEND_BATCH = 500;
 
 /** A delivery a write waits for. */
@@ -86,7 +90,8 @@ interface Batch {
  * the writes' index changes before returning. A custom write that changes a unique column's value
  * is refused (`refused: index`): those go through the client, which reserves first.
  *
- * Subclasses that override `onAlarm`, `afterClone` or `cleanupForeign` must call `super`.
+ * Subclasses that override `afterClone` or `cleanupForeign` must call `super`. `onAlarm` is the
+ * app's own: deliveries and builds run apart from it, whether it calls super or throws.
  */
 export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTable<Env, Row> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -270,8 +275,25 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
     }
   }
 
-  /** One call: sends these entries to their index shards, and deletes them once applied. */
+  /**
+   * One call: sends these entries to their index shards, and deletes them once applied. A call
+   * that doesn't answer within SEND_TIMEOUT_MS fails, and frees its slot: the entries stay in the
+   * outbox for the alarm (applying one twice changes nothing).
+   */
   private async send(ids: readonly number[]): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`index delivery did not answer in ${SEND_TIMEOUT_MS} ms`)), SEND_TIMEOUT_MS)));
+    try {
+      await Promise.race([this.sendOnce(ids), timeout]);
+    } catch (error) {
+      for (const id of ids) this.waiting.get(id)?.reject(error);
+    } finally {
+      clearTimeout(timer);
+      for (const id of ids) this.waiting.delete(id);
+    }
+  }
+
+  private async sendOnce(ids: readonly number[]): Promise<void> {
     try {
       const rows = slices(ids).flatMap((part) => this.store.exec<{ id: number; op: string }>(`SELECT id, op FROM ${OUTBOX} WHERE id IN (${marks(part)})`, ...part).toArray());
       if (rows.length) {
@@ -293,8 +315,6 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
       for (const id of ids) this.waiting.get(id)?.resolve();
     } catch (error) {
       for (const id of ids) this.waiting.get(id)?.reject(error);
-    } finally {
-      for (const id of ids) this.waiting.delete(id);
     }
   }
 
@@ -325,10 +345,10 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
   /**
    * Delivers what writes left in the outbox: entries older than DELIVERY_RETRY_MS that no delivery
    * is sending (a write that crashed, or gave up waiting and failed). Younger entries belong to
-   * writes still delivering them. Call `super.onAlarm()`.
+   * writes still delivering them. Runs apart from the app's onAlarm (see layerAlarm).
    */
-  protected override async onAlarm(): Promise<void> {
-    await super.onAlarm();
+  protected override async layerAlarm(): Promise<void> {
+    await super.layerAlarm();
     this.migrate();
     this.wakeAt = null;
     // This shard's own keys only. Entries of keys a split gave away went with the copy, which
@@ -336,15 +356,21 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
     // at the split, and a put sent from one much later could bring back an entry its row has let
     // go of since.
     const [lo, hi] = this.ownedHashRange();
-    for (;;) {
+    let more = false;
+    // Paged by id, past what this alarm has seen: entries still being sent are skipped, a page at a
+    // time, instead of read again by every page (a backlog to an index that fails is all in flight).
+    for (let sent = 0, after = 0; ; ) {
+      if (sent >= ALARM_DELIVERIES) {
+        more = true;
+        break;
+      }
       const old = Date.now() - DELIVERY_RETRY_MS;
-      const ids = this.store
-        .exec<{ id: number }>(`SELECT id FROM ${OUTBOX} WHERE at <= ? AND hash >= ? AND hash <= ? ORDER BY id LIMIT ?`, old, lo, hi, DELIVERY_BATCH + this.waiting.size)
-        .toArray()
-        .map((r) => r.id)
-        .filter((id) => !this.waiting.has(id))
-        .slice(0, DELIVERY_BATCH);
-      if (ids.length === 0) break;
+      const page = this.store.exec<{ id: number }>(`SELECT id FROM ${OUTBOX} WHERE id > ? AND at <= ? AND hash >= ? AND hash <= ? ORDER BY id LIMIT ?`, after, old, lo, hi, DELIVERY_BATCH).toArray().map((r) => r.id);
+      if (page.length === 0) break;
+      after = page[page.length - 1]!;
+      sent += page.length;
+      const ids = page.filter((id) => !this.waiting.has(id));
+      if (ids.length === 0) continue;
       try {
         await this.deliver(ids);
       } catch (error) {
@@ -352,6 +378,7 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
         break;
       }
     }
+    if (more) await this.wake(Date.now());
     if (!(await this.sendDrops())) await this.wake(Date.now() + DELIVERY_RETRY_MS);
     if (await this.backfill()) return void (await this.wake(Date.now()));
     // Whatever is still there: due once it is old enough (and in flight now, most likely).
@@ -524,8 +551,8 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
   }
 
   protected override afterClone(owns: (key: string) => boolean): void {
-    this.migrate();
-    for (const { key } of this.store.exec<{ key: string }>(`SELECT DISTINCT key FROM ${OUTBOX}`).toArray()) if (!owns(key)) this.store.exec(`DELETE FROM ${OUTBOX} WHERE key = ?`, key);
+    // The outbox entries of keys the copy doesn't own are left to cleanupForeign, a batch at a
+    // time: walking a backlog here would hold up the claim. Deliveries send only owned entries.
     super.afterClone(owns);
   }
 

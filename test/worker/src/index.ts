@@ -451,10 +451,19 @@ export class Users extends IndexedTable<Env, User> {
   protected override async onAlarm(): Promise<void> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_throw_alarm (x INTEGER)");
     if (this.ctx.storage.sql.exec("SELECT x FROM test_throw_alarm").toArray().length) throw new Error("test: the app's onAlarm failed");
+    await super.onAlarm();
+  }
+  /** Around the library's deliveries: how many each alarm made, once asked to count (it reads the outbox). */
+  private countDeliveries = false;
+  async countDeliveriesPerAlarm(): Promise<void> {
+    this.countDeliveries = true;
+  }
+  protected override async layerAlarm(): Promise<void> {
+    if (!this.countDeliveries) return super.layerAlarm();
     const size = () => (this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'indexed_outbox'").one().n ? this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM indexed_outbox").one().n : 0);
     const before = size();
     try {
-      await super.onAlarm();
+      await super.layerAlarm();
     } finally {
       this.delivered.push(before - size());
     }
@@ -635,10 +644,10 @@ export class EvolvingDocs extends ShardedTable<Env, DocV2> {
     this.ctx.storage.sql.exec("DELETE FROM test_alarm_builds");
     this.ctx.storage.sql.exec("INSERT INTO test_alarm_builds (paused) VALUES (?)", paused ? 1 : 0);
   }
-  protected override async onAlarm(): Promise<void> {
+  protected override async layerAlarm(): Promise<void> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarm_builds (paused INTEGER NOT NULL)");
     if (this.ctx.storage.sql.exec("SELECT 1 FROM test_alarm_builds WHERE paused = 1").toArray().length) return;
-    await super.onAlarm();
+    await super.layerAlarm();
   }
   /** The migration, and one build step, as one call's would be: true once nothing is left to build. */
   async migrateOnce(): Promise<boolean> {
@@ -735,10 +744,10 @@ export class FlakyDocs extends EvolvingDocs {
       return `refused: ${String(error)}`;
     }
   }
-  /** onAlarm runs this instance made, and whether they throw. */
-  private alarmRuns = 0;
+  /** onAlarm runs this object made (stored: an instance idle between them is evicted), and whether they throw. */
   async onAlarmRuns(): Promise<number> {
-    return this.alarmRuns;
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarm_runs (n INTEGER NOT NULL)");
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM test_alarm_runs").one().n;
   }
   async failOnAlarm(on: boolean): Promise<void> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_fail_alarm (x INTEGER)");
@@ -746,7 +755,8 @@ export class FlakyDocs extends EvolvingDocs {
     if (on) this.ctx.storage.sql.exec("INSERT INTO test_fail_alarm (x) VALUES (1)");
   }
   protected override async onAlarm(): Promise<void> {
-    this.alarmRuns++;
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarm_runs (n INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("INSERT INTO test_alarm_runs (n) VALUES (1)");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_fail_alarm (x INTEGER)");
     if (this.ctx.storage.sql.exec("SELECT x FROM test_fail_alarm").toArray().length) throw new Error("test: onAlarm failed");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_crash (n INTEGER NOT NULL)");

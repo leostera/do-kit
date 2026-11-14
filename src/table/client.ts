@@ -2,6 +2,8 @@
 import { sharded, type ShardedClient, type ShardedClientOptions } from "../sharded/client.js";
 import {
   assertRowFits,
+  DEFAULT_MAX_COUNT_VALUES,
+  type TruncatedCounts,
   mergePages,
   decodeCursor,
   decodeShardCursor,
@@ -185,8 +187,12 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
    * Rows of the whole table per value of a count group's column (values with no rows left out),
    * kept with every write: as exact as `count()`.
    */
-  async countBy(group: string): Promise<GroupCount[]> {
-    return sumGroups((await this.client.scan("tableCountBy", group)) as GroupCount[][]);
+  async countBy(group: string): Promise<GroupCount[] | TruncatedCounts> {
+    const summed = sumGroups((await this.client.scan("tableCountBy", group)) as GroupCount[][]);
+    const max = this.schema.maxCountValues ?? DEFAULT_MAX_COUNT_VALUES;
+    if (summed.length <= max) return summed;
+    // More values than a count group reports (each shard sent its top ones and one more).
+    return { counts: summed.sort((a, b) => b.count - a.count).slice(0, max), truncated: true };
   }
 
   /**

@@ -341,6 +341,8 @@ class NotReady extends Error {
 /** An atomic step met an older call's hold: it gives way rather than wait (wait-die, RFD0008). */
 class Contended extends Error {}
 const HOLD_WAIT_MS = 2_000;
+/** The grid shared hold-wait timers fall on. */
+const TICK_MS = 50;
 /** How often a copy waiting to be activated nudges its parent, at most. */
 const NUDGE_EVERY_MS = 1_000;
 /** Keys whose route hash a shard remembers. */
@@ -383,6 +385,12 @@ const DELETE_BATCH_ROWS = 250;
 const DELETE_PAUSE_MS = 25;
 /** How soon the alarm tries again after activating a sibling or cleaning up failed. */
 const ALARM_RETRY_MS = 1000;
+/** The longest the ask to activate a sibling waits after refusals. */
+const MAX_ACTIVATE_BACKOFF_MS = 3_000;
+/** The longest a retry of failing alarm work waits. */
+const MAX_BACKOFF_MS = 60_000;
+/** The wait before retry `n` (1, 2, …) of work that keeps failing: 1 s, doubled each time, up to a minute. */
+const backoffMs = (n: number): number => Math.min(MAX_BACKOFF_MS, ALARM_RETRY_MS * 2 ** Math.max(0, n - 1));
 /** How often a shard with a split's work pending checks that its alarm is set. */
 const ALARM_CHECK_MS = 5_000;
 
@@ -1113,9 +1121,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
         waited(true);
         throw new NotReady(hold.until);
       }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const released = await Promise.race([hold.released.then(() => true), new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), left)))]);
-      clearTimeout(timer);
+      const released = await Promise.race([hold.released.then(() => true), this.tick(deadline).then(() => false)]);
       if (!released) {
         waited(true);
         throw new NotReady(hold.until);
@@ -1123,6 +1129,27 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     }
     waited(false);
   }
+
+  /**
+   * A promise that resolves at `at`, or a little after: one timer per TICK_MS slot, shared by every
+   * write waiting until then. A split holding thousands of writes keeps a handful of timers, not
+   * one each.
+   */
+  private tick(at: number): Promise<void> {
+    const slot = Math.ceil(at / TICK_MS) * TICK_MS;
+    let due = this.ticks.get(slot);
+    if (!due) {
+      due = new Promise<void>((resolve) =>
+        setTimeout(() => {
+          this.ticks.delete(slot);
+          resolve();
+        }, Math.max(0, slot - Date.now())),
+      );
+      this.ticks.set(slot, due);
+    }
+    return due;
+  }
+  private readonly ticks = new Map<number, Promise<void>>();
 
   /** Counts an answer other than "ok". */
   private answered<A extends CallAnswer<unknown>>(answer: A): A {
@@ -1672,16 +1699,22 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return options ? nodes.get(id, options) : nodes.get(id);
   }
 
-  private async activateSibling(): Promise<void> {
+  /** Activates the sibling a split made, if one waits: true once it serves (or none waits). */
+  private async activateSibling(): Promise<boolean> {
     const pending = this.meta?.activate;
-    if (!pending) return;
+    if (!pending) return true;
     if (!(await this.node(pending.bits).shardedActivate(this.meta!.name, pending.bits, pending.epoch))) {
       console.error(JSON.stringify({ event: "split-activate-refused", node: this.nodeLabel(), sibling: pending.bits }));
-      return;
+      return false;
     }
     const now = this.meta!;
     if (now.activate?.epoch === pending.epoch && now.activate.bits === pending.bits) this.saveMeta({ ...now, activate: null });
+    return true;
   }
+  /** Activations refused or failed in a row, and when to ask again (in memory: a restart asks at once). */
+  private activateFailures = 0;
+  private activateAgainAt = 0;
+
 
   // ---- Alarms ----
 
@@ -1691,6 +1724,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * it serves. If it throws, it runs again a second later. The default does nothing.
    */
   protected async onAlarm(): Promise<void> {}
+
+  /**
+   * For layers built on this class (a table's index builds, an indexed table's deliveries): their
+   * work at the time asked for with `scheduleAlarm`, run before `onAlarm` and apart from it, so
+   * app code that throws in `onAlarm` does not stop it. A layer overrides it and calls super;
+   * apps override `onAlarm`.
+   */
+  protected async layerAlarm(): Promise<void> {}
 
   /**
    * Asks for `onAlarm` at `at` (or earlier, if an earlier time is already asked for). Use it, not
@@ -1751,6 +1792,17 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return row ? Number(row.value) : null;
   }
 
+  /** Alarms in a row whose work threw (layers' or the app's). */
+  private loadWakeFailures(): number {
+    const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_meta WHERE key = 'wake_failures'").toArray()[0];
+    return row ? Number(row.value) : 0;
+  }
+
+  private saveWakeFailures(n: number): void {
+    if (n === 0) this.sql.exec("DELETE FROM sharded_meta WHERE key = 'wake_failures'");
+    else this.sql.exec("INSERT INTO sharded_meta (key, value) VALUES ('wake_failures', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(n));
+  }
+
   private saveWake(time: number | null): void {
     this.ensureSchema();
     if (time === null) this.sql.exec("DELETE FROM sharded_meta WHERE key = 'wake'");
@@ -1770,13 +1822,17 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // A verbatim copy not claimed yet carries the source's alarm: it is not this object's.
     if (!meta || this.isUnclaimedCopy()) return;
     let failed = false;
-    if (meta.activate) {
+    // A sibling that keeps refusing (or failing) activation is asked less and less often.
+    if (meta.activate && Date.now() >= this.activateAgainAt) {
+      let activated = false;
       try {
-        await this.activateSibling();
+        activated = await this.activateSibling();
       } catch (error) {
-        failed = true;
         console.error(JSON.stringify({ event: "split-activate-failed", node: this.nodeLabel(), sibling: meta.activate.bits, error: String(error) }));
       }
+      this.activateFailures = activated ? 0 : this.activateFailures + 1;
+      // Capped low: until the sibling serves, its rows wait (and calls to it nudge at once anyway).
+      this.activateAgainAt = activated ? 0 : Date.now() + Math.min(MAX_ACTIVATE_BACKOFF_MS, backoffMs(this.activateFailures));
     }
     try {
       this.cleanupBatch();
@@ -1810,20 +1866,33 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       this.saveWake(retry);
       await this.ctx.storage.setAlarm(retry);
       this.onAlarmAsked = null;
+      // The layers' work (index deliveries, builds) and the app's, each on its own: app code that
+      // throws, before it calls super or not, does not stop the library's.
+      let threw = false;
+      try {
+        await this.layerAlarm();
+      } catch (error) {
+        threw = true;
+        console.error(JSON.stringify({ event: "layer-alarm-failed", node: this.nodeLabel(), error: String(error) }));
+      }
       try {
         await this.onAlarm();
-        this.saveWake(this.onAlarmAsked);
       } catch (error) {
+        threw = true;
         console.error(JSON.stringify({ event: "on-alarm-failed", node: this.nodeLabel(), error: String(error) }));
-        this.saveWake(Date.now() + ALARM_RETRY_MS);
-      } finally {
-        this.onAlarmAsked = undefined;
       }
+      // Failing again and again: retried less and less often, from 1 s up to a minute. The count is
+      // stored: a shard idle between retries is evicted, and would start again from a second.
+      const failures = threw ? this.loadWakeFailures() + 1 : 0;
+      this.saveWakeFailures(failures);
+      this.saveWake(threw ? Date.now() + backoffMs(failures) : this.onAlarmAsked);
+      this.onAlarmAsked = undefined;
     }
     const now = this.meta!;
     const times: number[] = [];
-    if (now.activate || failed) times.push(Date.now() + ALARM_RETRY_MS);
-    else if (now.cleanup.length > 0 || now.foreign) times.push(Date.now() + DELETE_PAUSE_MS);
+    if (now.activate) times.push(Math.max(this.activateAgainAt, Date.now() + ALARM_RETRY_MS));
+    if (failed) times.push(Date.now() + ALARM_RETRY_MS);
+    if (now.cleanup.length > 0 || now.foreign) times.push(Date.now() + DELETE_PAUSE_MS);
     const next = this.loadWake();
     if (serving && next !== null) times.push(next);
     const holdDue = this.nextHoldDeadline();
@@ -2033,6 +2102,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (this.wiped) return;
     const meta = this.meta;
     if (!meta || meta.name !== name || meta.activate?.bits !== bits || meta.activate.epoch !== epoch) return;
+    this.activateAgainAt = 0; // a call waits on the sibling: ask it now, backoff or not
     await this.armAlarm(Date.now());
   }
 

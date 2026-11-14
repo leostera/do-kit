@@ -105,6 +105,7 @@ test("deliveries that never answer free their slots, and later writes are indexe
 test("a large outbox is delivered over several alarms, a bounded batch each", async () => {
   const name = `outbox-backlog-${unique()}`;
   await post("/indexed", { name, op: "put", args: [user("warm")] });
+  await object("users", name, "", "countDeliveriesPerAlarm");
   await post("/indexed", { name, op: "failApply", args: [true] });
   for (let i = 0; i < 2_500; i += 250) await post("/indexed", { name, op: "putMany", args: [Array.from({ length: 250 }, (_, j) => ({ row: user(`u${i + j}`) }))] });
   await post("/indexed", { name, op: "failApply", args: [false] });

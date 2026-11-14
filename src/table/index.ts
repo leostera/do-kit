@@ -1,7 +1,7 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
 import { ShardedObject } from "../sharded/index.js";
-import { DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
+import { DEFAULT_MAX_COUNT_VALUES, DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
 
 export * from "./schema.js";
 export { table, TableClient, type TableClientOptions } from "./client.js";
@@ -378,9 +378,12 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     let deleted = this.db.exec(`DELETE FROM ${TABLE} WHERE ${pk} IN (SELECT ${pk} FROM ${TABLE} WHERE _hash < ? OR _hash > ? LIMIT ?)`, lo, hi, Math.min(limit, CLEANUP_BATCH)).rowsWritten;
     if (deleted === 0) {
       const [blo, bhi] = [lo.slice(0, BUCKET_DIGITS), hi.slice(0, BUCKET_DIGITS)];
-      deleted = this.db.exec(`DELETE FROM ${COUNTS} WHERE bucket < ? OR bucket > ?`, blo, bhi).rowsWritten;
+      const batch = Math.min(limit, CLEANUP_BATCH);
+      deleted = this.db.exec(`DELETE FROM ${COUNTS} WHERE bucket IN (SELECT bucket FROM ${COUNTS} WHERE bucket < ? OR bucket > ? LIMIT ?)`, blo, bhi, batch).rowsWritten;
       if (this.db.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", OPS).one().n > 0) deleted += this.db.exec(`DELETE FROM ${OPS} WHERE _hash < ? OR _hash > ?`, lo, hi).rowsWritten;
-      deleted += this.db.exec(`DELETE FROM ${GROUP_COUNTS} WHERE bucket < ? OR bucket > ?`, blo, bhi).rowsWritten;
+      // A batch at a time: a group of many values has a row per value and bucket.
+      if (deleted === 0) deleted = this.db.exec(`DELETE FROM ${GROUP_COUNTS} WHERE (grp, value, bucket) IN (SELECT grp, value, bucket FROM ${GROUP_COUNTS} WHERE bucket < ? OR bucket > ? LIMIT ?)`, blo, bhi, batch).rowsWritten;
+      if (deleted === 0 && this.db.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", DIRTY).one().n > 0) deleted = this.db.exec(`DELETE FROM ${DIRTY} WHERE key IN (SELECT key FROM ${DIRTY} WHERE hash < ? OR hash > ? LIMIT ?)`, lo, hi, batch).rowsWritten;
     }
     return deleted + super.cleanupForeign(owns, limit);
   }
@@ -598,11 +601,9 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     return this.building.size > 0 || this.counting.size > 0 || this.countDrops || this.dirtyRows;
   }
 
-  /**
-   * Build steps, from the alarm: a few, then the alarm again if more is left. A subclass that
-   * overrides onAlarm calls super.
-   */
-  protected override async onAlarm(): Promise<void> {
+  /** Build steps, from the alarm: a few, then the alarm again if more is left. */
+  protected override async layerAlarm(): Promise<void> {
+    await super.layerAlarm();
     this.migrate();
     const until = Date.now() + ALARM_BUILD_MS;
     let more = this.buildWorkLeft();
@@ -750,7 +751,9 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     if (col === undefined) throw new Error(`no count group ${group}`);
     if (this.counting.has(group) || this.countDrops) this.notReady();
     const [lo, hi] = this.ownedBuckets();
-    const rows = this.db.exec<{ value: string; n: number }>(`SELECT value, SUM(n) AS n FROM ${GROUP_COUNTS} WHERE grp = ? AND bucket >= ? AND bucket <= ? GROUP BY value HAVING SUM(n) <> 0`, group, lo, hi).toArray();
+    // The values with the most rows, one more than reported, so the client can tell it is cut.
+    const max = (this.table.maxCountValues ?? DEFAULT_MAX_COUNT_VALUES) + 1;
+    const rows = this.db.exec<{ value: string; n: number }>(`SELECT value, SUM(n) AS n FROM ${GROUP_COUNTS} WHERE grp = ? AND bucket >= ? AND bucket <= ? GROUP BY value HAVING SUM(n) <> 0 ORDER BY n DESC LIMIT ?`, group, lo, hi, max).toArray();
     const type = this.table.columns[col as keyof Row & string];
     return rows.map(({ value, n }) => {
       const v = JSON.parse(value) as SqlValue;

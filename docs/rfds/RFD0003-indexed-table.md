@@ -211,14 +211,17 @@ write rows too (see "Custom methods").
    shards, deletes each one acknowledged, and only then returns the write's result.
    - Deliveries are coalesced: writes queue their entries, and at most 4 calls at a time send
      what is queued, up to 500 entries each. Under load one call carries the entries of many
-     writes.
+     writes. A call that has not answered in 10 s fails and frees its slot; its entries stay in
+     the outbox for the alarm.
    - The outbox keeps a put without its row. The row is read when the put is sent, and goes only
      if it is still at the put's version. A put that a later write superseded is sent as a
      **confirm** of its token (which clears the reservation), or not at all: the later write's
      changes cover the entry.
    - If delivery has not finished by the client's deadline, the call throws `IndexPending` with
      the row's version. The row is written, and the alarm delivers entries older than 2 s that
-     no write is sending, as it does whatever a restart left in the outbox.
+     no write is sending, as it does whatever a restart left in the outbox: at most 1,000 an
+     alarm, paged by id past the entries in flight, and the next alarm at once if more are left.
+     The delivery runs apart from the app's `onAlarm`, so app code that throws does not stop it.
    - A write asks for the alarm 30 s ahead, in case it never gets to deliver what it wrote, so
      a shard taking writes sets its alarm now and then, not with every write. A delivery that
      fails or runs late asks for it 2 s ahead. Row shards keep their client of the index shards,
@@ -273,9 +276,9 @@ changes go through the client, which reserves first.
 ### Splits
 
 - **Row shards.** The outbox and fences are tables, so a split copies them with the rows. Each
-  side keeps the outbox entries and fences of its own keys and drops the rest (`afterClone` in
-  the copy, `cleanupForeign` in the original), so every entry is sent by the shard that has its
-  row. An entry a write on the original is still sending when the split commits is sent by both;
+  side keeps the outbox entries and fences of its own keys and drops the rest, a batch at a time
+  by `cleanupForeign` on each side (the copy claims without walking the outbox; deliveries send
+  only owned entries), so every entry is sent by the shard that has its row. An entry a write on the original is still sending when the split commits is sent by both;
   changes apply by version, so that is harmless. The original's alarm never sends an entry of a
   key it gave away: its row of that key stopped changing at the split.
 - **Index shards** are sharded objects: they split by load like any other, by entry routing key.

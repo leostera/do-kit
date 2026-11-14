@@ -196,7 +196,12 @@ call. A non-empty object splits by load only.
   keeps the earliest time asked for. `onAlarm` runs only on a serving shard. While it runs, the
   time it was due stays stored, as a retry a second later: a shard restarted partway through
   (evicted, redeployed, out of CPU) runs `onAlarm` again. So `onAlarm` runs at least once, and
-  must be safe to run again.
+  must be safe to run again. An `onAlarm` that throws is retried after 1 s, doubled each time it
+  throws again, up to a minute; the count is stored, so an idle shard evicted between retries
+  keeps it. The layers' own work (`layerAlarm`: index builds, deliveries) runs apart from
+  `onAlarm`, so app code that throws does not stop it.
+- A sibling that refuses activation is asked again after 1 s, 2 s, then every 3 s: until it
+  serves, its rows wait. A call to it nudges the parent, which asks at once.
 - `update` writes only the keys it was given: a write to any other key was neither checked as
   this shard's nor held for a split, so it is refused.
 

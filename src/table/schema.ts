@@ -35,6 +35,11 @@ export interface TableSchema<Row extends RowShape> {
    */
   readonly version?: number;
   /**
+   * The values a count group reports at most (default 1,000): past it `countBy` answers the ones
+   * with the most rows and `truncated`. Count groups are for columns of few values.
+   */
+  readonly maxCountValues?: number;
+  /**
    * IndexedTable only: index name to a global index, kept apart from the rows on its own shards
    * (see RFD0003). A write returns once its entries are written.
    */
@@ -58,6 +63,15 @@ export interface GlobalIndexDef<Row extends RowShape> {
 export interface GroupCount {
   readonly value: unknown;
   readonly count: number;
+}
+
+/** Values a count group reports at most, by default: count groups are for columns of few values. */
+export const DEFAULT_MAX_COUNT_VALUES = 1_000;
+
+/** A count group with more values than `maxCountValues`: the values with the most rows, that many. */
+export interface TruncatedCounts {
+  readonly counts: readonly GroupCount[];
+  readonly truncated: true;
 }
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;

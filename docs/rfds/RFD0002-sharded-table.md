@@ -196,7 +196,10 @@ order on random tuples.
   every depth up to 16 (the table's `maxDepth` limit). After a split both sides store all
   prefixes but sum only their own, so nothing is recomputed.
 - **Count groups.** `counts: { byStatus: "status" }` counts rows per value of a column the same
-  way, in `sharded_table_group_counts`. `countBy(group)` sums a shard's range per value.
+  way, in `sharded_table_group_counts`. `countBy(group)` sums a shard's range per value. Count
+  groups are for columns of few values: past `maxCountValues` (1,000) values, `countBy` answers
+  `{ counts, truncated: true }` with the values with the most rows, each shard sending that many
+  and one more.
 - **With a listing.** `withCount: true`, or a group's name, returns `total`, and the group's
   `counts`, from the shards' first-round pages: one call per shard for a page and its total.
 - **During a split.** The object's count is the sum over shards. It may count a row twice, or not

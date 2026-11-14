@@ -61,7 +61,8 @@ export interface GlobalIndexStats {
  *       protected rowNodes() { return this.env.USERS; }
  *     }
  *
- * Subclasses that override `onAlarm` or `cleanupForeign` must call `super`.
+ * Subclasses that override `cleanupForeign` must call `super`. `onAlarm` is the app's own: the
+ * index's work runs apart from it.
  */
 export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -293,8 +294,9 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
 
   // ---- Alarms and splits ----
 
-  /** Resolves reservations left pending, and drops tombstones past their time. Call `super.onAlarm()`. */
-  protected override async onAlarm(): Promise<void> {
+  /** Resolves reservations left pending, and drops tombstones past their time. A layer above calls super. */
+  protected override async layerAlarm(): Promise<void> {
+    await super.layerAlarm();
     this.migrate();
     // Entries of dropped indexes first: a reservation of one is not worth resolving.
     if (this.deleteDroppedEntries()) return void (await this.wake(Date.now()));
