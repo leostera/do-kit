@@ -537,6 +537,7 @@ const docsV2 = defineTable<DocV2>({
 export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   /** A new index is built over a few hundred rows a call, so tests see it take several. */
   protected override indexBuildRows = 300;
+  protected override commands = docCommands as never;
   private readonly log: StatementLog;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -763,6 +764,13 @@ class CounterBase extends ShardedObject<Env, number> {
       this.ctx.abort("test: evicted at getAlarm");
       return getAlarm(options);
     }) as typeof storage.getAlarm;
+  }
+  /**
+   * Runs plain SQL statements here, outside any sharded state: the rows of each. An object used
+   * this way is a reference (a plain SQLite Durable Object), never a shard.
+   */
+  async sqlRun(statements: readonly { query: string; bindings?: readonly unknown[] }[]): Promise<unknown[][]> {
+    return statements.map(({ query, bindings }) => this.ctx.storage.sql.exec(query, ...((bindings ?? []) as never[])).toArray());
   }
   /** How many rows allRows() returns here (it loads them all). */
   async allRowsCount(): Promise<number> {
