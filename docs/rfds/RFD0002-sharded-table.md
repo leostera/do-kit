@@ -115,11 +115,25 @@ counted in one call.)
   did not match. `ifVersion: 0` means "only if absent".
 - Every write runs in the core's `transact`. It waits while a split copies the key, checks the
   shard still owns it, and is one SQLite transaction with the index keys and the counts.
+- A write may carry an `opId`. The shard keeps the opId with the write's result, in the
+  write's transaction, for `OP_ID_TTL_MS` (a day). The same request sent again under that opId
+  (its answer was lost) answers the kept result and writes nothing. Another request under it
+  throws `OperationMismatch`. The opId is kept with the row's hash, so a split leaves it with the
+  shard that owns the key. A write refused before writing (an index entry not reserved) keeps
+  nothing.
+- A write of rows over several shards, one of which fails, throws that shard's error with
+  `results`: each row's `WriteResult` where its shard answered, `{ unknown: true }` where its
+  shard failed (it may have applied). `get` and `getMany` write nothing, and are sent again once
+  after an error of unknown outcome.
 - A row written where none is starts above every version a deleted row of its shard had
   (`sharded_table_versions`). So a key never has the same version twice, and a write conditional
   on a version read before a delete fails on the row written since.
 
 ### Listing
+
+- A page in query order asks every shard each round. The client refuses a tree wider than
+  `maxShardsPerPage` (64) with `TooManyShards`: list such a tree in shard order, which asks a
+  few shards per page.
 
 The cursor is the sort position of the last row returned, plus a fingerprint of the query (the
 index and its columns, the direction and the conditions), so it cannot continue another query. It

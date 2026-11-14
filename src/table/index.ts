@@ -20,6 +20,20 @@ const COUNT_GROUPS = "sharded_table_count_groups";
 const VERSIONS = "sharded_table_versions";
 /** Indexes being built over rows that were there before them: how far each has got. */
 const BUILDS = "sharded_table_builds";
+/** Writes sent with an opId: the request and what it answered, so a retry answers the same. */
+const OPS = "sharded_table_ops";
+/** How long a shard keeps a write's opId: a retry later than this is a new write. */
+export const OP_ID_TTL_MS = 24 * 60 * 60 * 1000;
+/** Expired opIds deleted by a write that records one: the table stays near its TTL's worth. */
+const OP_PURGE_BATCH = 16;
+
+/** An opId sent again with another request than the write first recorded under it. */
+export class OperationMismatch extends Error {
+  constructor(readonly opId: string) {
+    super(`opId ${JSON.stringify(opId)} was recorded for another write: an opId names one write, sent again only as itself`);
+    this.name = "OperationMismatch";
+  }
+}
 const INDEX_PREFIX = "sharded_table_ix_";
 /** Each index keeps one hidden column of index keys (see encodeIndexKey), indexed alone. */
 const KEY_COLUMN_PREFIX = "_ix_";
@@ -77,22 +91,48 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     return keys.map((key) => this.getRow(key));
   }
 
-  async tablePut(keys: readonly string[], payloads: readonly { readonly row: Row; readonly ifVersion?: number }[]): Promise<WriteResult[]> {
+  async tablePut(keys: readonly string[], payloads: readonly { readonly row: Row; readonly ifVersion?: number; readonly opId?: string }[]): Promise<WriteResult[]> {
     this.migrate();
-    return this.writeBatch(keys, payloads, () => payloads.map(({ row, ifVersion }, i) => this.putRow(this.checkKey(keys[i]!, row), ifVersion === undefined ? {} : { ifVersion })));
+    return this.writeBatch(keys, payloads, () => payloads.map(({ row, ifVersion, opId }, i) => this.once(opId, "put", keys[i]!, { row, ifVersion }, () => this.putRow(this.checkKey(keys[i]!, row), ifVersion === undefined ? {} : { ifVersion }))));
   }
 
-  async tablePatch(keys: readonly string[], payloads: readonly { readonly changes: Partial<Row>; readonly ifVersion?: number }[]): Promise<WriteResult[]> {
+  async tablePatch(keys: readonly string[], payloads: readonly { readonly changes: Partial<Row>; readonly ifVersion?: number; readonly opId?: string }[]): Promise<WriteResult[]> {
     this.migrate();
-    return this.writeBatch(keys, payloads, () => payloads.map(({ changes, ifVersion }, i) => this.patchRow(keys[i]!, changes, ifVersion === undefined ? {} : { ifVersion })));
+    return this.writeBatch(keys, payloads, () => payloads.map(({ changes, ifVersion, opId }, i) => this.once(opId, "patch", keys[i]!, { changes, ifVersion }, () => this.patchRow(keys[i]!, changes, ifVersion === undefined ? {} : { ifVersion }))));
   }
 
-  async tableDelete(keys: readonly string[], payloads: readonly { readonly ifVersion?: number }[] | null): Promise<WriteResult[]> {
+  async tableDelete(keys: readonly string[], payloads: readonly { readonly ifVersion?: number; readonly opId?: string }[] | null): Promise<WriteResult[]> {
     this.migrate();
     return this.writeBatch(keys, payloads, () => keys.map((key, i) => {
       const ifVersion = payloads?.[i]?.ifVersion;
-      return this.deleteRow(key, ifVersion === undefined ? {} : { ifVersion });
+      return this.once(payloads?.[i]?.opId, "delete", key, { ifVersion }, () => this.deleteRow(key, ifVersion === undefined ? {} : { ifVersion }));
     }));
+  }
+
+  /**
+   * `write`, once per opId: in the write's transaction, its result is kept under the opId, and
+   * the same request sent again (its answer was lost) answers that result without writing. The
+   * opId sent with another request throws OperationMismatch. Kept with the row's hash, so a split
+   * hands it to the shard that owns the key, and for OP_ID_TTL_MS.
+   */
+  private once(opId: string | undefined, kind: string, key: string, request: object, write: () => WriteResult): WriteResult {
+    if (opId === undefined) return write();
+    if (typeof opId !== "string" || opId.length === 0 || opId.length > 200) throw new Error("opId must be a string of 1 to 200 characters");
+    const asked = JSON.stringify([kind, key, request]);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${OPS} (op_id TEXT PRIMARY KEY NOT NULL, _hash TEXT NOT NULL, request TEXT NOT NULL, result TEXT NOT NULL, at INTEGER NOT NULL)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS ${OPS}_at ON ${OPS} (at)`);
+    const now = Date.now();
+    const kept = this.db.exec<{ request: string; result: string }>(`SELECT request, result FROM ${OPS} WHERE op_id = ? AND at > ?`, opId, now - OP_ID_TTL_MS).toArray()[0];
+    if (kept) {
+      if (kept.request !== asked) throw new OperationMismatch(opId);
+      return JSON.parse(kept.result) as WriteResult;
+    }
+    const result = write();
+    // Refused before writing (an index entry not reserved): the caller reserves and sends it again.
+    if (result.refused !== undefined) return result;
+    this.db.exec(`DELETE FROM ${OPS} WHERE rowid IN (SELECT rowid FROM ${OPS} WHERE at <= ? ORDER BY at LIMIT ?)`, now - OP_ID_TTL_MS, OP_PURGE_BATCH);
+    this.db.exec(`INSERT INTO ${OPS} (op_id, _hash, request, result, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (op_id) DO UPDATE SET _hash = excluded._hash, request = excluded.request, result = excluded.result, at = excluded.at`, opId, this.routeHash(key), asked, JSON.stringify(result), now);
+    return result;
   }
 
   /**
@@ -320,6 +360,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     if (deleted === 0) {
       const [blo, bhi] = [lo.slice(0, BUCKET_DIGITS), hi.slice(0, BUCKET_DIGITS)];
       deleted = this.db.exec(`DELETE FROM ${COUNTS} WHERE bucket < ? OR bucket > ?`, blo, bhi).rowsWritten;
+      if (this.db.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", OPS).one().n > 0) deleted += this.db.exec(`DELETE FROM ${OPS} WHERE _hash < ? OR _hash > ?`, lo, hi).rowsWritten;
       deleted += this.db.exec(`DELETE FROM ${GROUP_COUNTS} WHERE bucket < ? OR bucket > ?`, blo, bhi).rowsWritten;
     }
     return deleted + super.cleanupForeign(owns, limit);

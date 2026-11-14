@@ -502,3 +502,15 @@ export function mergePages(pages: readonly ShardPage[], request: Pick<ShardPageR
   if (rows.length === request.limit && (complete.length > request.limit || frontier !== null)) return { rows, next: rows.at(-1)!.position };
   return { rows, next: frontier };
 }
+
+/** Longest error text `redact` returns. */
+const REDACTED_LENGTH = 200;
+
+/**
+ * An error's text fit for logs and metrics: quoted values (row keys, column values) replaced by
+ * `"…"`, and at most REDACTED_LENGTH characters. Errors of this library quote the keys they name.
+ */
+export function redact(error: unknown): string {
+  const text = String((error as Error)?.message ?? error).replace(/"(?:[^"\\]|\\.)*"/g, '"…"');
+  return text.length <= REDACTED_LENGTH ? text : `${text.slice(0, REDACTED_LENGTH - 1)}…`;
+}

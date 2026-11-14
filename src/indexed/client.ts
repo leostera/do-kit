@@ -1,7 +1,7 @@
 // The client of an indexed table: a table client that reserves unique values before it writes,
 // and looks up and lists through global indexes (RFD0003).
 import { sharded, type ShardedClientOptions } from "../sharded/client.js";
-import { TableClient, type Untyped } from "../table/client.js";
+import { TableClient, type Untyped, type WriteOptions } from "../table/client.js";
 import { assertRowFits, decodeCursor, encodeCursor, encodeValue, pageRequest, queryFingerprint, type Condition, type ListPage, type ListQuery, type RowShape, type TableSchema, type Versioned, type WriteResult } from "../table/schema.js";
 import { entryOf, globalIndexes, routeOf, type EntryAddress, type GlobalIndexInfo, type IndexPage, type IndexStatus, type ReserveAnswer } from "./entries.js";
 import type { IndexedShardResult } from "./table.js";
@@ -47,7 +47,7 @@ export type IndexedWriteResult = WriteResult & { readonly conflict?: string };
 /** A listing: through a global index with `partition`, its values for the index's leading columns. */
 export type IndexedListQuery = ListQuery & { readonly partition?: readonly unknown[] };
 
-type Write<Row> = { readonly row: Row; readonly ifVersion?: number };
+type Write<Row> = { readonly row: Row } & WriteOptions;
 
 export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
   private readonly index: Untyped;
@@ -67,7 +67,7 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
     this.index = sharded(indexNamespace as never, name, options) as unknown as Untyped;
   }
 
-  override async put(row: Row, options: { ifVersion?: number } = {}): Promise<IndexedWriteResult> {
+  override async put(row: Row, options: WriteOptions = {}): Promise<IndexedWriteResult> {
     return (await this.putMany([{ row, ...options }]))[0]!;
   }
 
@@ -96,7 +96,7 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
       });
       const go = todo.filter((i) => !reserve.has(i) || tokens.has(i));
       if (go.length === 0) break;
-      const payloads = go.map((i) => ({ row: writes[i]!.row, ...(writes[i]!.ifVersion === undefined ? {} : { ifVersion: writes[i]!.ifVersion }), ...(tokens.has(i) ? { tokens: tokens.get(i)! } : {}) }));
+      const payloads = go.map((i) => ({ row: writes[i]!.row, ...(writes[i]!.ifVersion === undefined ? {} : { ifVersion: writes[i]!.ifVersion }), ...(writes[i]!.opId === undefined ? {} : { opId: writes[i]!.opId }), ...(tokens.has(i) ? { tokens: tokens.get(i)! } : {}) }));
       const results = await this.byPosition<IndexedShardResult>(go.map((i) => this.keyOf(writes[i]!.row)), "tablePut", payloads);
       const optimistic = new Set(go.filter((i) => !reserve.has(i)));
       todo = this.settle(go, results, out, attempt, (i) => this.keyOf(writes[i]!.row), optimistic);
@@ -106,7 +106,7 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
   }
 
   /** Changes some columns of an existing row; reserves the unique values it changes first. */
-  override async patch(key: string, changes: Partial<Row>, options: { ifVersion?: number } = {}): Promise<IndexedWriteResult> {
+  override async patch(key: string, changes: Partial<Row>, options: WriteOptions = {}): Promise<IndexedWriteResult> {
     const out = new Array<IndexedWriteResult>(1);
     for (let attempt = 1; ; attempt++) {
       const touched = this.globals.filter((ix) => ix.unique && ix.columns.some((c) => c in changes));
@@ -127,7 +127,7 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
   }
 
   /** Deletes a row; returns once its index entries are removed, or throws IndexPending. */
-  override async delete(key: string, options: { ifVersion?: number } = {}): Promise<IndexedWriteResult> {
+  override async delete(key: string, options: WriteOptions = {}): Promise<IndexedWriteResult> {
     const out = new Array<IndexedWriteResult>(1);
     const results = await this.byPosition<IndexedShardResult>([key], "tableDelete", [options]);
     this.settle([0], results, out, WRITE_ATTEMPTS, () => key);
@@ -190,13 +190,16 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
   /** Results back in `out` at `positions`; returns the positions to write again (their reservation was given up). */
   private settle(positions: readonly number[], results: readonly IndexedShardResult[], out: IndexedWriteResult[], attempt: number, keyAt: (i: number) => string, optimistic: ReadonlySet<number> = new Set()): number[] {
     const again: number[] = [];
+    let failure: (IndexPending | IndexContended) | null = null;
+    // Every row's outcome first: a row whose index is late does not hide the versions of the others.
     positions.forEach((i, j) => {
       const r = results[j]!;
       if (r.refused !== undefined && (optimistic.has(i) || attempt < WRITE_ATTEMPTS)) return void again.push(i);
-      if (r.refused !== undefined) throw new IndexContended(keyAt(i), r.refused);
-      if (r.indexed === false) throw new IndexPending(keyAt(i), r.version);
+      if (r.refused !== undefined) return void (failure ??= new IndexContended(keyAt(i), r.refused));
       out[i] = { ok: r.ok, version: r.version };
+      if (r.indexed === false) failure ??= new IndexPending(keyAt(i), r.version);
     });
+    if (failure) throw Object.assign(failure, { results: [...out] });
     return again;
   }
 

@@ -41,8 +41,9 @@ interface TableMethods {
 
 export type Untyped = {
   call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{ positions: readonly number[]; result: readonly unknown[] }[]>;
+  read(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<{ positions: readonly number[]; result: readonly unknown[] }[]>;
   scan(method: string, ...args: unknown[]): Promise<unknown[]>;
-  scanShard(bits: string, method: string, ...args: unknown[]): Promise<{ ok: unknown } | { split: string[] }>;
+  scanShard(bits: string, method: string, ...args: unknown[]): Promise<{ ok: unknown } | { split: string[] } | { absent: true }>;
   knownLeaves(): Promise<string[]>;
   knownShardCount(): Promise<number>;
 };
@@ -70,13 +71,49 @@ export function perShardLimit(wanted: number, shards: number): number {
 /** A table client's options: the sharded client's, and the table's commands (`defineCommands`), for `apply`. */
 export interface TableClientOptions<C> extends ShardedClientOptions {
   readonly commands?: C;
+  /**
+   * Shards a page in query order may ask, each once a round: a tree with more is refused with
+   * TooManyShards (list it in shard order, which asks a few at a time). 64 by default.
+   */
+  readonly maxShardsPerPage?: number;
 }
+
+const DEFAULT_MAX_SHARDS_PER_PAGE = 64;
+
+/**
+ * A write's options. `ifVersion`: only at this version (0: only if absent). `opId`: names this
+ * write, so sending it again after a lost answer (same opId, same request) answers what the first
+ * did without writing twice; another request under the same opId throws OperationMismatch. A
+ * shard keeps an opId for OP_ID_TTL_MS (a day).
+ */
+export interface WriteOptions {
+  readonly ifVersion?: number;
+  readonly opId?: string;
+}
+
+/** A listing in query order over a tree wider than the client's maxShardsPerPage. */
+export class TooManyShards extends Error {
+  constructor(
+    readonly shards: number,
+    readonly max: number,
+  ) {
+    super(`a page in query order would ask ${shards} shards, more than maxShardsPerPage (${max}): list in order "shard", or raise it`);
+    this.name = "TooManyShards";
+  }
+}
+
+/**
+ * What one row of a write over several shards did, on the error of a write that failed: its
+ * WriteResult where its shard answered, `unknown` where its shard failed (it may have applied).
+ */
+export type RowOutcome = WriteResult | { readonly unknown: true };
 
 export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
   protected readonly client: Untyped;
   protected readonly primaryKey: keyof Row & string;
   private readonly indexes: Readonly<Record<string, readonly string[]>>;
   private readonly commands: C | null;
+  private readonly maxShardsPerPage: number;
   protected readonly schema: TableSchema<Row>;
 
   constructor(
@@ -88,8 +125,9 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
     this.schema = schema;
     this.primaryKey = schema.primaryKey;
     this.indexes = schema.indexes ?? {};
-    const { commands, ...sharding } = options;
+    const { commands, maxShardsPerPage, ...sharding } = options;
     this.commands = commands ?? null;
+    this.maxShardsPerPage = maxShardsPerPage ?? DEFAULT_MAX_SHARDS_PER_PAGE;
     this.client = sharded(namespace as never, name, sharding) as ShardedClient<never> as unknown as Untyped;
   }
 
@@ -113,28 +151,28 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
 
   /** Rows of these keys, in order (null: absent). */
   async getMany(keys: readonly string[]): Promise<(Versioned<Row> | null)[]> {
-    return this.byPosition<Versioned<Row> | null>(keys, "tableGet", null);
+    return this.byPosition<Versioned<Row> | null>(keys, "tableGet", null, true);
   }
 
   /**
    * Writes a whole row; `ifVersion: 0` only if absent, `ifVersion: n` only if at version n. A row
    * past the table's maxRowBytes throws RowTooLarge before anything is sent.
    */
-  async put(row: Row, options: { ifVersion?: number } = {}): Promise<WriteResult> {
+  async put(row: Row, options: WriteOptions = {}): Promise<WriteResult> {
     return (await this.putMany([{ row, ...options }]))[0]!;
   }
 
-  async putMany(writes: readonly { row: Row; ifVersion?: number }[]): Promise<WriteResult[]> {
+  async putMany(writes: readonly ({ row: Row } & WriteOptions)[]): Promise<WriteResult[]> {
     for (const w of writes) assertRowFits(this.schema, w.row);
     return this.byPosition<WriteResult>(writes.map((w) => this.keyOf(w.row)), "tablePut", writes);
   }
 
   /** Changes some columns of an existing row (`ok: false` if absent or at another version). */
-  async patch(key: string, changes: Partial<Row>, options: { ifVersion?: number } = {}): Promise<WriteResult> {
+  async patch(key: string, changes: Partial<Row>, options: WriteOptions = {}): Promise<WriteResult> {
     return (await this.byPosition<WriteResult>([key], "tablePatch", [{ changes, ...options }]))[0]!;
   }
 
-  async delete(key: string, options: { ifVersion?: number } = {}): Promise<WriteResult> {
+  async delete(key: string, options: WriteOptions = {}): Promise<WriteResult> {
     return (await this.byPosition<WriteResult>([key], "tableDelete", [options]))[0]!;
   }
 
@@ -168,10 +206,14 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
     let counted: { total?: number; counts?: GroupCount[] } = {};
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const wanted = request.limit - rows.length;
-      const limit = perShardLimit(wanted, await this.client.knownShardCount());
+      const known = await this.client.knownShardCount();
+      if (known > this.maxShardsPerPage) throw new TooManyShards(known, this.maxShardsPerPage);
+      const limit = perShardLimit(wanted, known);
       // Counts come with the first round's pages: the same calls to the same shards.
       const withCount = round === 0 && query.withCount ? { withCount: query.withCount } : {};
       const pages = (await this.client.scan("tablePage", { ...request, limit, after: next, ...withCount })) as ShardPage[];
+      // The client knew of fewer shards than there are: it does now, and the next page is refused.
+      if (pages.length > this.maxShardsPerPage) throw new TooManyShards(pages.length, this.maxShardsPerPage);
       if (round === 0 && query.withCount) {
         counted = { total: pages.reduce((n, p) => n + (p.total ?? 0), 0) };
         if (typeof query.withCount === "string") counted.counts = sumGroups(pages.map((p) => p.counts ?? []));
@@ -210,6 +252,11 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
         continue;
       }
       calls++;
+      // A presplit shard never written holds nothing: on to the next.
+      if ("absent" in answer) {
+        at = nextShard(at);
+        continue;
+      }
       const page = answer.ok as ShardPage;
       rows.push(...page.rows);
       at = page.frontier !== null ? { ...at, after: page.frontier } : nextShard(at);
@@ -233,9 +280,24 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
     return key;
   }
 
-  protected async byPosition<R>(keys: readonly string[], method: keyof TableMethods, payloads: readonly unknown[] | null): Promise<R[]> {
+  /**
+   * Calls `method` for each key, with the results back in the keys' order. A call over several
+   * shards one of which fails throws that shard's error with `results`: each row's RowOutcome.
+   * `read`: it writes nothing, and is sent again after an error of unknown outcome.
+   */
+  protected async byPosition<R>(keys: readonly string[], method: keyof TableMethods, payloads: readonly unknown[] | null, read = false): Promise<R[]> {
     const out = new Array<R>(keys.length);
-    for (const group of await this.client.call(keys, method, payloads)) group.positions.forEach((p, i) => (out[p] = group.result[i] as R));
+    try {
+      for (const group of await (read ? this.client.read(keys, method, payloads) : this.client.call(keys, method, payloads))) group.positions.forEach((p, i) => (out[p] = group.result[i] as R));
+    } catch (error) {
+      const e = error as { settled?: { positions: readonly number[]; result: readonly unknown[] }[]; unknown?: { positions: readonly number[] }[] } | null;
+      if (!read && e && typeof e === "object" && e.settled) {
+        const results = new Array<unknown>(keys.length).fill({ unknown: true });
+        for (const group of e.settled) group.positions.forEach((p, i) => (results[p] = group.result[i]));
+        Object.assign(e, { results });
+      }
+      throw error;
+    }
     return out;
   }
 }
