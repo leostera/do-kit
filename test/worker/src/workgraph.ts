@@ -101,6 +101,24 @@ export class GraphRunners extends WorkGraphRunner<GraphEnv> {
     if (run.includes("nostart") && !ensure) throw new Error("test: the start did not reach this runner");
     return super.graphRun(run, index, results, ensure);
   }
+  /** "strand": after its first alarm, this runner's alarm is stranded (getAlarm answers a past time that never fires). */
+  private stranded = false;
+  override async alarm(): Promise<void> {
+    await super.alarm();
+    if (!this.run?.includes("strand") || this.stranded) return;
+    this.stranded = true;
+    const storage = this.ctx.storage;
+    await storage.deleteAlarm();
+    const at = Date.now() - 10 * 60_000;
+    const getAlarm = storage.getAlarm.bind(storage);
+    const setAlarm = storage.setAlarm.bind(storage);
+    let on = true;
+    storage.getAlarm = (async (options?: DurableObjectGetAlarmOptions) => (on ? at : getAlarm(options))) as typeof storage.getAlarm;
+    storage.setAlarm = ((time: number | Date, options?: DurableObjectSetAlarmOptions) => {
+      on = false;
+      return setAlarm(time, options);
+    }) as typeof storage.setAlarm;
+  }
   protected override async chunkComputed(run: string, _index: number, chunk: number): Promise<void> {
     if (!run.includes("evict")) return;
     const key = `evicted:${run}:${chunk}`;

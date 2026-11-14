@@ -188,6 +188,23 @@ function failStatementOnce(storage: DurableObjectStorage, text: string): void {
   }) as typeof sql.exec;
 }
 
+/**
+ * Strands `storage`'s alarm, as the platform can: `getAlarm()` answers a time 10 minutes past, but
+ * no alarm will fire. Lasts until something sets an alarm (or the object restarts).
+ */
+async function strandAlarm(storage: DurableObjectStorage): Promise<void> {
+  await storage.deleteAlarm();
+  const stranded = Date.now() - 10 * 60_000;
+  const getAlarm = storage.getAlarm.bind(storage);
+  const setAlarm = storage.setAlarm.bind(storage);
+  let on = true;
+  storage.getAlarm = (async (options?: DurableObjectGetAlarmOptions) => (on ? stranded : getAlarm(options))) as typeof storage.getAlarm;
+  storage.setAlarm = ((time: number | Date, options?: DurableObjectSetAlarmOptions) => {
+    on = false;
+    return setAlarm(time, options);
+  }) as typeof storage.setAlarm;
+}
+
 /** While set, deliveries to this index object fail. */
 function setFailApply(storage: DurableObjectStorage, fail: boolean): void {
   storage.sql.exec("CREATE TABLE IF NOT EXISTS test_apply (fail INTEGER NOT NULL)");
@@ -381,6 +398,10 @@ export class FlakyDocs extends EvolvingDocs {
   async dropAlarm(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
   }
+  /** Strands this object's alarm: getAlarm() answers a past time that will never fire. */
+  async strandAlarm(): Promise<void> {
+    await strandAlarm(this.ctx.storage);
+  }
   /** Fires this object's alarm now, as a snapshot's copied alarm would. */
   async alarmNow(): Promise<void> {
     await this.ctx.storage.setAlarm(Date.now());
@@ -449,6 +470,12 @@ class CounterBase extends ShardedObject<Env, number> {
   /** Loses this shard's alarm, as a failed setAlarm or an alarm the runtime gave up on would. */
   async loseAlarm(keys: readonly string[], _payloads: null): Promise<null[]> {
     await this.ctx.storage.deleteAlarm();
+    return keys.map(() => null);
+  }
+
+  /** Strands this shard's alarm: getAlarm() answers a past time that will never fire. */
+  async strandAlarm(keys: readonly string[], _payloads: null): Promise<null[]> {
+    await strandAlarm(this.ctx.storage);
     return keys.map(() => null);
   }
 
@@ -881,7 +908,7 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     await ns.get(ns.idFromName(shardObjectName(body.name, body.args[1] as string))).failActivations(body.args[0] as boolean);
     return null;
   }
-  if (body.op === "wakeIn" || body.op === "failStatementOnce" || body.op === "alarmNow" || body.op === "alarmRan" || body.op === "dropAlarm" || body.op === "crashAlarmOnce" || body.op === "lateSchema") {
+  if (body.op === "wakeIn" || body.op === "failStatementOnce" || body.op === "alarmNow" || body.op === "alarmRan" || body.op === "dropAlarm" || body.op === "strandAlarm" || body.op === "crashAlarmOnce" || body.op === "lateSchema") {
     const ns = env.FLAKY;
     const stub = ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
     return stub[body.op]!(body.args[0]);
