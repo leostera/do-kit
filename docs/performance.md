@@ -204,17 +204,21 @@ See [`bench/README.md`](../bench/README.md).
 
 ![Table reads](bench/table-read-throughput.svg)
 
+<!-- bench:table table-writes -->
 | Writes | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
 | 64 in flight | 686/s, p50 68 ms | 628/s, p50 77 ms | 721/s, p50 68 ms | 804/s, p50 55 ms |
 | 256 | 1,338/s, p50 196 ms | 2,058/s, p50 91 ms | 2,333/s, p50 59 ms | 2,691/s, p50 50 ms |
 | 1,024 | 1,604/s, p50 515 ms, 9,089 failed | 1,633/s, p50 265 ms | 6,230/s, p50 80 ms | 8,117/s, p50 61 ms |
+<!-- /bench:table -->
 
+<!-- bench:table table-reads -->
 | Reads | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
 | 64 in flight | 1,305/s, p50 35 ms | 2,226/s, p50 7 ms | 871/s, p50 51 ms | 891/s, p50 48 ms |
 | 256 | 1,793/s, p50 118 ms | 3,413/s, p50 44 ms | 2,992/s, p50 50 ms | 2,504/s, p50 43 ms |
 | 1,024 | 2,136/s, p50 446 ms, 1,327 failed | 3,330/s, p50 134 ms | 8,846/s, p50 59 ms | 10,241/s, p50 39 ms |
+<!-- /bench:table -->
 
 The 64-shard reads are from a later run than the rest ([raw data](../bench/results/table.json) names each run).
 
@@ -226,6 +230,7 @@ Listings were measured again on 2026-11-13, in query order and in shard order fr
 
 ![Table walks in shard order](bench/table-walk-throughput.svg)
 
+<!-- bench:table table-list -->
 | Query order (`list`) | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
 | 1 in flight | 136/s, p50 8 ms | 17/s, p50 56 ms | 38/s, p50 24 ms | 10/s, p50 74 ms |
@@ -233,7 +238,9 @@ Listings were measured again on 2026-11-13, in query order and in shard order fr
 | 256 | 484/s, p50 496 ms | 450/s, p50 536 ms | 400/s, p50 625 ms | 262/s, p50 844 ms |
 | 1,024 | 505/s, p50 1,990 ms | 583/s, p50 1,762 ms | 166/s, p50 6 ms, 9,395 failed | 143/s, p50 18 ms, 34,584 failed |
 | 2,048 | 463/s, p50 3,802 ms, 2,175 failed | 88/s, p50 6 ms, 152,277 failed | 77/s, p50 6 ms, 182,098 failed | 86/s, p50 22 ms, 94,481 failed |
+<!-- /bench:table -->
 
+<!-- bench:table table-walk -->
 | Shard order (`order: "shard"`) | 1 shard | 4 shards | 16 shards | 64 shards |
 |---|---|---|---|---|
 | 1 in flight | 61/s, p50 17 ms | 217/s, p50 6 ms | 176/s, p50 6 ms | 13/s, p50 58 ms |
@@ -241,6 +248,7 @@ Listings were measured again on 2026-11-13, in query order and in shard order fr
 | 256 | 436/s, p50 571 ms | 2,218/s, p50 90 ms | 4,379/s, p50 22 ms | 1,481/s, p50 147 ms |
 | 1,024 | 515/s, p50 1,932 ms | 3,136/s, p50 330 ms | 9,294/s, p50 72 ms | 7,680/s, p50 85 ms |
 | 2,048 | 450/s, p50 2,827 ms, 4,778 failed | 3,452/s, p50 561 ms | 10,979/s, p50 158 ms | 8,804/s, p50 149 ms |
+<!-- /bench:table -->
 
 - **Writes and reads scale with shards** once one object is the bottleneck, from about 256 in flight. Below that, one object is as fast or faster: a sharded call is a routed call.
 - **Listings in query order do not.** A page asks every shard for its share (twice limit / shards, plus two), so each shard serves every page: throughput stays at or below one object's (400–580 pages/s in this run), and a page waits for its slowest shard. From 1,024 in flight, the shards of a 16- or 64-shard table refuse most pages ("overloaded"); the error log names every shard, not one hot one. A page also costs up to 3 × shards subrequests in the caller's invocation, and a Worker invocation may make only so many.

@@ -367,7 +367,7 @@ test("a split that fails as it starts lets writes and later splits go ahead", as
   const doc = (i: number, lastEditAt: number | null = null) => ({ name: `r${i}`, id: `id${i}`, createdAt: i, lastEditAt, deleted: false, meta: null });
   for (let i = 0; i < 40; i++) await table("flaky", name, "put", doc(i));
   // The statement a split runs first, right after it starts holding writes to the right half.
-  await table("flaky", name, "failStatementOnce", "COUNT(*) AS rows", "");
+  await table("flaky", name, "failStatementOnce", "AS rightRows", "");
   await post("/split", { cls: "flaky", name, bits: "" }).catch(() => null);
   // Every row takes a write again, whichever half it is in, and the shard splits.
   for (let i = 0; i < 40; i++) await table("flaky", name, "put", doc(i, 1));

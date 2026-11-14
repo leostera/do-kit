@@ -442,7 +442,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   /** How `route` calls a shard for a method of the subclass. */
   private method(method: string, args: readonly unknown[]): Invoke {
-    return (stub, bits, keys, payloads, hashes, deadline) => stub.shardedCall(this.name, bits, method, keys, payloads, args, this.stubOptions, this.presplitTo, hashes, deadline) as Promise<CallAnswer<unknown>>;
+    return (stub, bits, keys, payloads, hashes, deadline) => stub.shardedCall(this.name, bits, method, keys, payloads, args, this.stubOptions, this.presplitTo, hashes, deadline, Date.now()) as Promise<CallAnswer<unknown>>;
   }
 
   /** How `route` calls a shard for a step of an atomic call. */
@@ -759,7 +759,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
           return;
         }
-        const answer = (await slots.run(() => this.onShard(bits, [], (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo) as Promise<unknown>))) as CallAnswer<Result<T[M]>>;
+        const answer = (await slots.run(() => this.onShard(bits, [], (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo, Date.now()) as Promise<unknown>))) as CallAnswer<Result<T[M]>>;
         if ("ok" in answer) out.push(answer.ok);
         else if ("absent" in answer) return;
         else if ("moved" in answer) {
@@ -792,7 +792,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
     for (let attempt = 0; ; attempt++) {
       if (this.isSplit(bits)) return { split: this.leavesUnder(bits) };
-      const answer = (await this.onShard(bits, [], (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo) as Promise<unknown>)) as CallAnswer<Result<T[M]>>;
+      const answer = (await this.onShard(bits, [], (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo, Date.now()) as Promise<unknown>)) as CallAnswer<Result<T[M]>>;
       if ("ok" in answer) return { ok: answer.ok };
       // A presplit shard never called: it holds nothing, and is not made to say so.
       if ("absent" in answer) return { absent: true };

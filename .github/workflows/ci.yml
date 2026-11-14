@@ -14,5 +14,6 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bun run check
+      - run: bun bench/tables.ts --check
       - run: bun test
       - run: bun run specs:check

@@ -148,14 +148,28 @@ export interface NodeDescription {
   readonly splits: readonly SplitRecord[];
   /** What this object answered since it started in this process (counters reset on restart). */
   readonly counters: CallCounters;
+  /** Bytes of this object's database (`ctx.storage.sql.databaseSize`); null before it has one. */
+  readonly databaseSize: number | null;
+  /** How long a sibling a split made has waited to be activated; null if none waits. */
+  readonly activatePendingMs: number | null;
+  /** What the cleanup of what splits gave away has left: ranges (and other tables) to go, and rows deleted since the last split. */
+  readonly cleanup: { readonly pendingRanges: number; readonly rows: number };
+  /** The alarm set, and how far past due it is (more than 5 min: stranded, see RFD0001); null if none. */
+  readonly alarm: { readonly at: number; readonly overdueMs: number } | null;
 }
+
+/** Why a split ran. */
+export type SplitTrigger = "operator" | "load";
 
 /** One split attempt of a shard. */
 export interface SplitRecord {
   /** When it started (ms since the epoch) and how long until it was claimed or given up. */
   readonly at: number;
   readonly ms: number;
-  readonly outcome: "split" | "abandoned";
+  /** "interrupted": the object restarted partway through (the copy is never activated). */
+  readonly outcome: "split" | "abandoned" | "interrupted";
+  /** Why it ran: an operator's `shardedSplit`, or the call rate. */
+  readonly trigger: SplitTrigger;
   /** How the right half was copied; null if abandoned before it was. */
   readonly copy: "native" | "logical" | null;
   /** Rows this shard owned when it started, and of them the right half's (what was copied). */
@@ -216,6 +230,18 @@ export interface CallCounters {
   /** Writes that waited on a split, and the longest wait. */
   readonly held: number;
   readonly heldMsMax: number;
+  /**
+   * The wait from a client's send to the method's start, and the method's own time, in ms: the
+   * median and 99th percentile of the last CALL_SAMPLES calls; null before any call. Clocks across
+   * machines differ by milliseconds: the waits are approximate.
+   */
+  readonly waitedMs: number | null;
+  readonly waitedMsP99: number | null;
+  readonly handlerMsP99: number | null;
+  /** Per routed method: calls, and the rows its SQL statements read and wrote. */
+  readonly methods: Readonly<Record<string, { readonly calls: number; readonly rowsRead: number; readonly rowsWritten: number; readonly statements: number }>>;
+  /** A table's listing pages, the rows they scanned, and the pages cut by their budget (ShardedTable only). */
+  readonly table?: { readonly pages: number; readonly scanned: number; readonly budgetStops: number };
 }
 
 /** The step timings of a split attempt, filled in as it goes. */
@@ -328,7 +354,18 @@ const ROUTE_SAMPLE = 16;
 /** A call reached its write past its caller's deadline: refused, nothing applied. */
 class Expired extends Error {}
 /** The routed call being served: its caller's deadline, checked just before its transaction. */
-const callContext = new AsyncLocalStorage<{ readonly deadline: number | null }>();
+const callContext = new AsyncLocalStorage<{ readonly deadline: number | null; readonly cursors?: SqlStorageCursor<Record<string, SqlStorageValue>>[] }>();
+/** Calls whose wait and time a shard keeps, for describe's percentiles. */
+const CALL_SAMPLES = 256;
+/** Marks the storage's exec once it records each call's statements (a new instance may get the same storage). */
+const MEASURED = Symbol("do-kit measured exec");
+
+/** The `q` quantile (0 to 1) of `samples`, or null if there are none. */
+function quantile(samples: readonly number[], q: number): number | null {
+  if (samples.length === 0) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]!;
+}
 /**
  * A write waited on a split for `holdWaitMs`: nothing was applied, the client retries later, until
  * the split is done or gives up at `until`.
@@ -410,7 +447,11 @@ interface Meta {
   /** The id of the object that started `splitting`: an object whose own id differs is its copy. */
   from?: string;
   /** A sibling to activate (the alarm retries until it confirms). */
-  activate: { bits: string; epoch: number } | null;
+  activate: { bits: string; epoch: number; at?: number } | null;
+  /** The split in progress, as its record would start: kept so a restart records it interrupted. */
+  splitStart?: { at: number; trigger: SplitTrigger; rows: number; rightRows: number } | null;
+  /** Rows the cleanup since the last split deleted. */
+  cleanedRows?: number;
   /** Hash ranges this object no longer owns, whose rows the alarm deletes. */
   cleanup: (readonly [string, string])[];
   /** The subclass still has rows for keys it no longer owns: the alarm calls `cleanupForeign`. */
@@ -537,6 +578,17 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       throw new Error(`${new.target.name} overrides alarm(): a sharded object's alarm belongs to the base class. Override onAlarm() and schedule it with scheduleAlarm() instead.`);
     }
     this.sql = ctx.storage.sql;
+    // Every statement a routed call runs is counted for its method (describe's counters.methods).
+    const sql = ctx.storage.sql as SqlStorage & { [MEASURED]?: true };
+    if (!sql[MEASURED]) {
+      const exec = sql.exec;
+      sql.exec = function (this: SqlStorage, query: string, ...bindings: unknown[]) {
+        const cursor = exec.call(sql, query, ...bindings);
+        callContext.getStore()?.cursors?.push(cursor as SqlStorageCursor<Record<string, SqlStorageValue>>);
+        return cursor;
+      } as SqlStorage["exec"];
+      sql[MEASURED] = true;
+    }
     // An object only visited (a lazy shard asked whether it exists, a wiped one) stays empty.
     this.schemaReady = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sharded_meta'").one().n > 0;
     this.meta = this.schemaReady ? this.loadMeta() : null;
@@ -1181,7 +1233,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   // ---- The routed call ----
 
   /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0, hashes: readonly string[] | null = null, deadline: number | null = null): Promise<CallAnswer<unknown>> {
+  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0, hashes: readonly string[] | null = null, deadline: number | null = null, sentAt: number | null = null): Promise<CallAnswer<unknown>> {
     this.assertNotWiped();
     this.callerStubOptions = stubOptions;
     // Routed by another routeOf: even where it would land here (the root owns every key), the
@@ -1200,7 +1252,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.countCall(keys.length);
     const fn = this.routedMethod(method);
     try {
-      const ok = await callContext.run({ deadline }, () => (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args));
+      const ok = await this.measured(method, deadline, sentAt, () => (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args));
       this.counters.ok++;
       return { ok };
     } catch (error) {
@@ -1238,7 +1290,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   /** A call to every shard: `method(...args)`, with no keys. */
-  async shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0): Promise<CallAnswer<unknown>> {
+  async shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0, sentAt: number | null = null): Promise<CallAnswer<unknown>> {
     this.assertNotWiped();
     this.callerStubOptions = stubOptions;
     // A presplit shard never called holds nothing: say so, rather than make it (and its schema).
@@ -1248,7 +1300,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.counters.calls++;
     const fn = this.routedMethod(method);
     try {
-      const ok = await (fn as (...a: unknown[]) => Promise<unknown>).call(this, ...args);
+      const ok = await this.measured(method, null, sentAt, () => (fn as (...a: unknown[]) => Promise<unknown>).call(this, ...args));
       this.counters.ok++;
       return { ok };
     } catch (error) {
@@ -1257,6 +1309,55 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
       throw error;
     }
+  }
+
+  /** Runs a routed method, counting what its statements read and wrote, and sampling its wait and time. */
+  private async measured<T>(method: string, deadline: number | null, sentAt: number | null, run: () => Promise<T>): Promise<T> {
+    const cursors: SqlStorageCursor<Record<string, SqlStorageValue>>[] = [];
+    const started = Date.now();
+    if (typeof sentAt === "number" && Number.isFinite(sentAt)) this.sample(this.waits, Math.max(0, started - sentAt));
+    try {
+      return await callContext.run({ deadline, cursors }, run);
+    } finally {
+      this.sample(this.handlerTimes, Date.now() - started);
+      const m = (this.methodCounters[method] ??= { calls: 0, rowsRead: 0, rowsWritten: 0, statements: 0 });
+      m.calls++;
+      m.statements += cursors.length;
+      for (const c of cursors) {
+        m.rowsRead += c.rowsRead;
+        m.rowsWritten += c.rowsWritten;
+      }
+    }
+  }
+  private sample(into: number[], value: number): void {
+    into.push(value);
+    if (into.length > CALL_SAMPLES) into.shift();
+  }
+  private readonly waits: number[] = [];
+  private readonly handlerTimes: number[] = [];
+  private readonly methodCounters: Record<string, { calls: number; rowsRead: number; rowsWritten: number; statements: number }> = {};
+
+  /** For `cleanupForeign`: rows (not other entries) it deleted, for describe's cleanup progress. */
+  protected countCleaned(rows: number): void {
+    this.cleanedForeign += rows;
+  }
+  private cleanedForeign = 0;
+
+  /** A layer's own counters for describe (a table's listings). */
+  protected layerCounters(): Pick<CallCounters, "table"> {
+    return {};
+  }
+
+  /**
+   * Rows this object owns, and stores (with those of keys given away), for describe; and of the
+   * owned ones, those in the right half `rightLo` up, for a split's record. A layer that keeps its
+   * rows elsewhere (a table) counts them there.
+   */
+  protected rowCounts(rightLo: string | null): { rows: number; storedRows: number; rightRows: number } {
+    const [lo, hi] = this.meta ? hashRange(this.meta.bits) : ["", "\uffff"];
+    const owned = this.sql.exec<{ rows: number; rightRows: number }>("SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM sharded_rows WHERE hash >= ? AND hash <= ?", rightLo ?? "\uffff", lo, hi).one();
+    const storedRows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows").one().n;
+    return { rows: owned.rows, storedRows, rightRows: owned.rightRows };
   }
 
   /**
@@ -1348,7 +1449,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     }
     // A split interrupted by a restart: abandoned (its copy is never activated).
     if (meta.splitting !== null && !this.hold) {
-      this.saveMeta({ ...meta, splitting: null });
+      const start = meta.splitStart;
+      const interrupted: SplitRecord | null = start
+        ? { at: start.at, ms: Date.now() - start.at, outcome: "interrupted", trigger: start.trigger, copy: null, rows: start.rows, rightRows: start.rightRows, held: 0, notReady: 0, heldMsMax: 0, steps: { warm: 0, handOut: 0, snapshot: 0, restore: 0, restoreInside: 0, copyRows: 0, claim: 0, claimAttempts: 0, claimError: null }, error: "the object restarted during the split" }
+        : null;
+      this.saveMeta({ ...meta, splitting: null, splitStart: null, ...(interrupted ? { splits: [...(meta.splits ?? []), interrupted].slice(-SPLIT_HISTORY) } : {}) });
       if (meta.activate || meta.cleanup.length > 0 || meta.foreign) void this.armAlarm(Date.now());
     }
     this.checkAlarm();
@@ -1399,7 +1504,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (this.calls.size > this.policy.windowSeconds + 2) {
       for (const s of this.calls.keys()) if (s < second - this.policy.windowSeconds - 1) this.calls.delete(s);
     }
-    if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond && this.splittable()) void this.split();
+    if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond && this.splittable()) void this.split("load");
     this.logLoad(second);
   }
 
@@ -1441,7 +1546,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   async shardedSplit(name: string, bits: string): Promise<boolean> {
     this.assertNotWiped();
     if (this.arrive(name, bits)) return false;
-    return this.split();
+    return this.split("operator");
   }
 
   /**
@@ -1449,7 +1554,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * and once the copy is claimed stops owning the right half and activates it. A copy that is not
    * claimed in time is abandoned, and the held writes go ahead here.
    */
-  private async split(): Promise<boolean> {
+  private async split(trigger: SplitTrigger): Promise<boolean> {
     const before = this.meta;
     // A shard holding keys for atomic calls stays whole until they end (milliseconds, or a hold's
     // deadline): a hold and the share it keeps belong to one object.
@@ -1475,9 +1580,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     let release!: () => void;
     const started = Date.now();
     const timeout = this.policy.splitTimeoutMs ?? 60_000;
-    const [lo, hi] = hashRange(meta.bits);
     const [rightLo] = hashRange(right);
-    const counted = this.sql.exec<{ rows: number; rightRows: number }>("SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM sharded_rows WHERE hash >= ? AND hash <= ?", rightLo, lo, hi).one();
+    const counted = this.rowCounts(rightLo);
     // Only the `finally` below releases the hold: nothing that can throw goes between the two.
     const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)), deadline: started + timeout, held: 0, notReady: 0, heldMsMax: 0 };
     this.hold = hold;
@@ -1485,11 +1589,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const steps = { warm, handOut: 0, snapshot: 0, restore: 0, restoreInside: 0, copyRows: 0, claim: 0, claimAttempts: 0, claimError: null as string | null };
     const record = (outcome: SplitRecord["outcome"], error: string | null): SplitRecord[] => [
       ...(this.meta?.splits ?? []),
-      { at: started, ms: Date.now() - started, outcome, copy, rows: counted.rows, rightRows: counted.rightRows, held: hold.held, notReady: hold.notReady, heldMsMax: hold.heldMsMax, steps: { ...steps }, error },
+      { at: started, ms: Date.now() - started, outcome, trigger, copy, rows: counted.rows, rightRows: counted.rightRows, held: hold.held, notReady: hold.notReady, heldMsMax: hold.heldMsMax, steps: { ...steps }, error },
     ].slice(-SPLIT_HISTORY);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString() });
+      this.saveMeta({ ...meta, epoch, splitting: epoch, from: this.ctx.id.toString(), splitStart: { at: started, trigger, rows: counted.rows, rightRows: counted.rightRows } });
       const live = () => this.hold === hold && Date.now() - started < timeout;
       const copied = this.copyAndClaim(right, epoch, live, steps, (method) => (copy = method));
       copied.catch(() => {}); // after a timeout nobody waits for it
@@ -1497,7 +1601,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       const method = await Promise.race([copied, expired]);
       // The copy is claimed: from this transaction on, the right half is the sibling's.
       const now = this.meta!;
-      this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, activate: { bits: right, epoch }, cleanup: [...now.cleanup, hashRange(right)], foreign: true, parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started }, splits: record("split", null) });
+      this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, splitStart: null, activate: { bits: right, epoch, at: Date.now() }, cleanup: [...now.cleanup, hashRange(right)], cleanedRows: 0, foreign: true, parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started }, splits: record("split", null) });
       this.calls.clear();
       this.quietUntil = Date.now();
       console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), copy: method, ms: Date.now() - started }));
@@ -1508,7 +1612,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       return true;
     } catch (error) {
       const now = this.meta;
-      if (now) this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, lastSplitError: String(error).slice(0, 500), splits: record("abandoned", String(error).slice(0, 500)) });
+      if (now) this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, splitStart: null, lastSplitError: String(error).slice(0, 500), splits: record("abandoned", String(error).slice(0, 500)) });
       this.quietUntil = Date.now();
       console.error(JSON.stringify({ event: "split-abandoned", node: nodeName(meta.name, meta.bits), error: String(error), ms: Date.now() - started }));
       return false;
@@ -1914,12 +2018,18 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const meta = this.meta!;
     const range = meta.cleanup[0];
     if (range) {
-      const deleted = this.sql.exec("DELETE FROM sharded_rows WHERE key IN (SELECT key FROM sharded_rows WHERE hash >= ? AND hash <= ? LIMIT ?)", range[0], range[1], DELETE_BATCH_ROWS).rowsWritten;
-      if (deleted === 0) this.saveMeta({ ...this.meta!, cleanup: this.meta!.cleanup.slice(1) });
+      // Rows, not rows written (each row's entry in the hash index is written too).
+      const deleted = this.sql.exec("DELETE FROM sharded_rows WHERE key IN (SELECT key FROM sharded_rows WHERE hash >= ? AND hash <= ? LIMIT ?) RETURNING 1", range[0], range[1], DELETE_BATCH_ROWS).toArray().length;
+      const now = this.meta!;
+      if (deleted === 0) this.saveMeta({ ...now, cleanup: now.cleanup.slice(1) });
+      else this.saveMeta({ ...now, cleanedRows: (now.cleanedRows ?? 0) + deleted });
     } else if (meta.foreign) {
       const bits = meta.bits;
       const deleted = this.ctx.storage.transactionSync(() => this.cleanupForeign((key) => ownsHash(bits, this.routeHash(key)), DELETE_BATCH_ROWS));
-      if (deleted === 0) this.saveMeta({ ...this.meta!, foreign: false });
+      const cleaned = this.cleanedForeign;
+      this.cleanedForeign = 0;
+      if (deleted === 0) this.saveMeta({ ...this.meta!, foreign: false, cleanedRows: (this.meta!.cleanedRows ?? 0) + cleaned });
+      else if (cleaned > 0) this.saveMeta({ ...this.meta!, cleanedRows: (this.meta!.cleanedRows ?? 0) + cleaned });
     }
   }
 
@@ -2161,15 +2271,23 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** The right half of an empty shard's initial split: empty, and serving at once. */
   async shardedDescribe(): Promise<NodeDescription> {
     const meta = this.meta;
-    if (!this.schemaReady) return { bits: "", presplit: 0, state: "new", rows: 0, storedRows: 0, callsPerSecond: 0, lastSplit: null, lastSplitError: null, splits: [], counters: { ...this.counters } };
-    const storedRows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows").one().n;
-    let rows = storedRows;
-    if (meta) {
-      const [lo, hi] = hashRange(meta.bits);
-      rows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows WHERE hash >= ? AND hash <= ?", lo, hi).one().n;
-    }
+    const counters: CallCounters = {
+      ...this.counters,
+      waitedMs: quantile(this.waits, 0.5),
+      waitedMsP99: quantile(this.waits, 0.99),
+      handlerMsP99: quantile(this.handlerTimes, 0.99),
+      methods: structuredClone(this.methodCounters),
+      ...(this.schemaReady ? this.layerCounters() : {}),
+    };
+    const alarmAt = await this.ctx.storage.getAlarm();
+    const alarm = alarmAt === null ? null : { at: alarmAt, overdueMs: Math.max(0, Date.now() - alarmAt) };
+    const databaseSize = this.ctx.storage.sql.databaseSize ?? null;
+    if (!this.schemaReady) return { bits: "", presplit: 0, state: "new", rows: 0, storedRows: 0, callsPerSecond: 0, lastSplit: null, lastSplitError: null, splits: [], counters, databaseSize, activatePendingMs: null, cleanup: { pendingRanges: 0, rows: 0 }, alarm };
+    const { rows, storedRows } = this.rowCounts(null);
     const state = !meta ? "new" : this.hold ? "splitting" : meta.state === "copy" || this.isUnclaimedCopy() ? "copy" : "shard";
-    return { bits: meta?.bits ?? "", presplit: meta?.presplit ?? 0, state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null, splits: meta?.splits ?? [], counters: { ...this.counters } };
+    const activatePendingMs = meta?.activate ? Date.now() - (meta.activate.at ?? meta.splitAt) : null;
+    const cleanup = { pendingRanges: (meta?.cleanup.length ?? 0) + (meta?.foreign ? 1 : 0), rows: meta?.cleanedRows ?? 0 };
+    return { bits: meta?.bits ?? "", presplit: meta?.presplit ?? 0, state, rows, storedRows, callsPerSecond: this.rate(), lastSplit: meta?.lastSplit ?? null, lastSplitError: meta?.lastSplitError ?? null, splits: meta?.splits ?? [], counters, databaseSize, activatePendingMs, cleanup, alarm };
   }
 }
 

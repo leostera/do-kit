@@ -205,14 +205,42 @@ call. A non-empty object splits by load only.
 - `update` writes only the keys it was given: a write to any other key was neither checked as
   this shard's nor held for a split, so it is refused.
 
+### Alarms
+
+One alarm per object, owned by the base class, set to the earliest of the work it serves:
+- a sibling a split made, until it is activated;
+- the cleanup of what splits gave away, a batch an alarm;
+- atomic holds, at their deadline, and atomic outcomes, when they expire (RFD0008);
+- the time `scheduleAlarm` asked for (`onAlarm`), and the layers' work on it (`layerAlarm`:
+  index builds, outbox deliveries).
+
+Work that needs the alarm asks for it before it stores what the alarm will serve, so a failure
+between the two leaves an alarm with nothing to do, never work with no alarm. An alarm that
+finds nothing due deletes itself.
+
+Alarms can still be lost, or stranded: set but never fired. A pending alarm more than 5 min past
+due counts as missing, and is armed again by the next routed call that reaches the shard (the
+backstop). A split's copy that receives calls before it is activated nudges its parent
+(`shardedNudge`, at most once a second), which arms its alarm at once. Failing work is retried with backoff:
+an `onAlarm` that throws is retried after 1 s, doubled up to a minute (the count is stored), and
+a sibling that refuses activation is asked after 1 s, 2 s, then every 3 s.
+
 ### Observability
 
 `shardedDescribe()` returns:
-- the shard's bits, state, owned and stored rows, and call rate;
-- its last 8 split attempts, each with step timings (warm, hand-out, snapshot, restore, copy,
-  claim), held writes, `notReady` answers and the longest hold;
-- counters since the object started: calls, `ok`, `moved`, `notReady` and `stale` answers, and
-  held writes.
+- the shard's bits, state, owned and stored rows (a table's from its counts), call rate, and
+  database size (`databaseSize`);
+- its last 8 split attempts, each with why it ran (`operator` or `load`), its outcome (`split`,
+  `abandoned`, or `interrupted` by a restart), step timings (warm, hand-out, snapshot, restore,
+  copy, claim), the rows it owned and of them the right half's, held writes, `notReady` answers
+  and the longest hold;
+- pending background work: how long a sibling has waited to be activated, the cleanup's ranges
+  left and rows deleted since the last split, and the alarm with how far past due it is;
+- counters since the object started: calls, `ok`, `moved`, `notReady` and `stale` answers, held
+  writes; the wait from a client's send to the method's start (median and p99; clients send
+  their clock, so it is approximate) and the method's time (p99), null before any call; rows read
+  and written and statements run per routed method; and a table's listing pages, rows scanned and
+  pages cut by their budget.
 
 Two structured logs are opt-in, off by default:
 - `ShardedClientOptions.logWideHops: n` logs a `sharded-wide-hop` line for each hop of a routed

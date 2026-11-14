@@ -74,7 +74,8 @@ test("describe reports activation pending by age, and nothing once the copy serv
   expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(true);
   await Bun.sleep(1_200);
   expect((await described("flaky", name, "")).activatePendingMs as number).toBeGreaterThan(1_000);
-  await post("/table", { cls: "flaky", name, op: "failActivations", args: [false, ""] });
+  // The copy carries the flag: it is the one that refuses.
+  await post("/table", { cls: "flaky", name, op: "failActivations", args: [false, "1"] });
   for (let i = 0; i < 50 && (await described("flaky", name, "")).activatePendingMs !== null; i++) await Bun.sleep(200);
   expect((await described("flaky", name, "")).activatePendingMs).toBeNull();
 }, 60_000);

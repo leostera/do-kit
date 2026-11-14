@@ -69,8 +69,7 @@ export async function shards(cls: string, name: string, bits = ""): Promise<stri
 /**
  * Waits until a tree is quiet: every shard serves, stores only its own rows, and has no alarm
  * armed (but those in `expectAlarms`, ones the test scheduled itself). Fails after `ms` with every
- * shard's state, rows and alarm: the shard that didn't settle, named. (A ShardedTable's describe
- * reports no rows, so for a table it checks states and alarms only.)
+ * shard's state, rows and alarm: the shard that didn't settle, named.
  */
 export async function settle(cls: string, name: string, { ms = 30_000, expectAlarms = [] as string[] } = {}): Promise<NodeDescription[]> {
   const until = Date.now() + ms;
@@ -78,11 +77,11 @@ export async function settle(cls: string, name: string, { ms = 30_000, expectAla
   let quiet = 0;
   for (;;) {
     const leaves = await shards(cls, name);
-    const nodes = await Promise.all(leaves.map(async (bits) => ({ ...(await describe(cls, name, bits)), alarm: await post<number | null>("/object", { cls, name, bits, method: "alarmAt", args: [] }) })));
+    const nodes = await Promise.all(leaves.map(async (bits) => describe(cls, name, bits)));
     const unsettled = nodes.filter((n) => n.state !== "shard" || n.storedRows !== n.rows || (n.alarm !== null && !expectAlarms.includes(n.bits)));
     quiet = unsettled.length === 0 ? quiet + 1 : 0;
     if (quiet === 3) return nodes;
-    if (Date.now() > until) throw new Error(`${cls} ${name} did not settle in ${ms} ms:\n${unsettled.map((n) => `  ${n.bits || "root"}: ${n.state}, ${n.rows} rows of ${n.storedRows} stored, alarm ${n.alarm === null ? "none" : `in ${n.alarm - Date.now()} ms`}`).join("\n")}`);
+    if (Date.now() > until) throw new Error(`${cls} ${name} did not settle in ${ms} ms:\n${unsettled.map((n) => `  ${n.bits || "root"}: ${n.state}, ${n.rows} rows of ${n.storedRows} stored, alarm ${n.alarm === null ? "none" : `in ${n.alarm.at - Date.now()} ms`}`).join("\n")}`);
     await new Promise((r) => setTimeout(r, 200));
   }
 }

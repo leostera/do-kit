@@ -63,6 +63,8 @@ bun run bench:plot
 
 Results depend on placement, load, runtime version and the day. Run more than once before drawing conclusions.
 
+The docs' tables come from the results too. A table between `<!-- bench:table <id> -->` and `<!-- /bench:table -->` is rendered by `bun run bench:tables` (see [`tables.ts`](tables.ts) for the ids); CI runs `bun bench/tables.ts --check`, which fails if a table differs from what the results say. To compare two runs, `bun run bench:compare before.json after.json` matches their points and lists every number that moved by more than 2% (`--tolerance 0.05` for 5%), exiting 1 if any did.
+
 ## Work graphs
 
 `bench/workgraph/` is a Worker of its own: a coordinator, runners and a results store (presplit to 16 shards), with units that burn SHA-256 rounds ([`src/graphs.ts`](workgraph/src/graphs.ts)). `bench/workgraph/run.ts` drives it, and saves every point to `results/workgraph.json`; `bun bench/workgraph/plot.ts` draws the `workgraph-*` graphs.

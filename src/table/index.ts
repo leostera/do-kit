@@ -417,7 +417,9 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       const part = gone.slice(i, i + 100);
       const marks = part.map(() => "?").join(", ");
       for (const keys of keyTables) this.db.exec(`DELETE FROM "${keys}" WHERE _pk IN (${marks})`, ...part);
-      deleted += this.db.exec(`DELETE FROM ${TABLE} WHERE ${pk} IN (${marks})`, ...part).rowsWritten;
+      const rows = this.db.exec(`DELETE FROM ${TABLE} WHERE ${pk} IN (${marks}) RETURNING 1`, ...part).toArray().length;
+      this.countCleaned(rows);
+      deleted += rows;
     }
     if (deleted === 0) {
       const [blo, bhi] = [lo.slice(0, BUCKET_DIGITS), hi.slice(0, BUCKET_DIGITS)];
@@ -459,11 +461,37 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       last = found._pos as string;
       if (found._m) {
         rows.push({ key: found[pk] as string, row: this.decode(found), version: found._version as number, position: last });
-        if (rows.length === request.limit) return { rows, frontier: last };
+        if (rows.length === request.limit) {
+          this.listings.pages++;
+          this.listings.scanned += scanned;
+          return { rows, frontier: last };
+        }
       }
     }
     // Out of budget: reported everything up to the last row scanned. Out of rows: the end.
+    this.listings.pages++;
+    this.listings.scanned += scanned;
+    if (scanned === request.budget) this.listings.budgetStops++;
     return { rows, frontier: scanned === request.budget ? last : null };
+  }
+
+  /** Listing pages served since this instance started, the rows they scanned, and those their budget cut. */
+  private readonly listings = { pages: 0, scanned: 0, budgetStops: 0 };
+
+  protected override layerCounters() {
+    return { table: { ...this.listings } };
+  }
+
+  /** Rows by the counts kept per hash prefix: exact to depth 16, and no row is read. */
+  protected override rowCounts(rightLo: string | null): { rows: number; storedRows: number; rightRows: number } {
+    this.migrate();
+    const [lo, hi] = this.ownedBuckets();
+    const right = rightLo === null ? null : rightLo.slice(0, BUCKET_DIGITS);
+    const n = this.db.exec<{ rows: number | null; rightRows: number | null; stored: number | null }>(
+      `SELECT SUM(CASE WHEN bucket >= ? AND bucket <= ? THEN n END) AS rows, SUM(CASE WHEN bucket >= ? AND bucket <= ? THEN n END) AS rightRows, SUM(n) AS stored FROM ${COUNTS}`,
+      lo, hi, right ?? "~", hi,
+    ).one();
+    return { rows: n.rows ?? 0, storedRows: n.stored ?? 0, rightRows: n.rightRows ?? 0 };
   }
 
   private indexes(): IndexDef[] {
