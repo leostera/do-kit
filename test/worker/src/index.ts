@@ -828,7 +828,15 @@ function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
 }
 
 /** POST /indexed {name, op, args}: one call of the indexed table client, or a test hook. */
+/** What a failed call tells its caller: its message, and any outcomes it carries. */
+function outcomeOf(error: unknown): unknown {
+  const e = error as { name?: string; settled?: unknown; unknown?: unknown; results?: unknown } | null;
+  return { threw: String(error), name: e?.name ?? null, settled: e?.settled ?? null, unknown: e?.unknown ?? null, results: e?.results ?? null };
+}
+
 async function indexedOp(env: Env, body: { name: string; op: string; args: unknown[]; cls?: "evolving"; version?: number }): Promise<unknown> {
+  // "try:<op>": the op, and what its error says if it throws.
+  if (body.op.startsWith("try:")) return indexedOp(env, { ...body, op: body.op.slice(4) }).then((ok) => ({ ok }), outcomeOf);
   // "evolving": the table that gains its unique index after `upgrade` (args: the shards' bits),
   // and (`version` 3) drops it and redefines the other. `version` is also the client's schema.
   if (body.cls === "evolving" && body.op === "upgrade") {
@@ -903,13 +911,15 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
   try {
     return { ok: await (t as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[body.op]!.call(t, ...body.args) };
   } catch (error) {
-    const e = error as Error & { key?: string; version?: number; index?: string };
-    return { error: e.name, message: e.message, ...(e.version === undefined ? {} : { version: e.version }), ...(e.index === undefined ? {} : { index: e.index }) };
+    const e = error as Error & { key?: string; version?: number; index?: string; results?: unknown[] };
+    return { error: e.name, message: e.message, ...(e.version === undefined ? {} : { version: e.version }), ...(e.index === undefined ? {} : { index: e.index }), ...(e.results === undefined ? {} : { results: e.results }) };
   }
 }
 
 /** POST /table {cls, name, op, args}: one call of the table client. */
 async function tableOp(env: Env, body: { cls: string; name: string; op: string; args: unknown[] }): Promise<unknown> {
+  // "try:<op>": the op, and what its error says if it throws.
+  if (body.op.startsWith("try:")) return tableOp(env, { ...body, op: body.op.slice(4) }).then((ok) => ({ ok }), outcomeOf);
   const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, { ...(body.cls === "routedTable" ? { routeOf: refRoute } : {}), commands: docCommands as never }) as unknown as Record<string, (...a: unknown[]) => unknown>;
   if (body.op === "all") {
     const rows: unknown[] = [];
@@ -967,6 +977,15 @@ export default {
           const out: unknown[] = new Array(body.keys.length);
           for (const shard of results) shard.positions.forEach((p, j) => (out[p] = (shard.result as unknown[])[j]));
           return Response.json(out);
+        }
+        case "/callSettled": {
+          // A call, and what its error says if it throws: which shards' answers it still carries.
+          const hint = (body as { presplitHint?: number }).presplitHint;
+          try {
+            return Response.json({ ok: await sharded(ns, body.name, hint === undefined ? {} : { presplitHint: hint }).call(body.keys, body.method as "get", (body.payloads ?? null) as null) });
+          } catch (error) {
+            return Response.json(outcomeOf(error));
+          }
         }
         case "/callKept": {
           // A client kept by the isolate and used by one request after another (an app's mistake:
