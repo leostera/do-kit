@@ -87,8 +87,9 @@ test("allRows refuses a shard past its row cap, and names ownedRowsPage", async 
 const columns = (n: number) => Object.fromEntries([["id", "text"], ...Array.from({ length: n }, (_, i) => [`c${i}`, "integer"])]) as Record<string, "text" | "integer">;
 
 test("defineTable refuses a schema past SQLite's 100 columns, counting the hidden ones", () => {
-  expect(() => defineTable({ primaryKey: "id", columns: columns(96) } as never)).not.toThrow();
-  expect(() => defineTable({ primaryKey: "id", columns: columns(97) } as never)).toThrow(/100/);
+  // id and 97 more, with _hash and _version: 100, as many as SQLite takes (measured in workerd).
+  expect(() => defineTable({ primaryKey: "id", columns: columns(97) } as never)).not.toThrow();
+  expect(() => defineTable({ primaryKey: "id", columns: columns(98) } as never)).toThrow(/100/);
   expect(() => defineTable({ primaryKey: "id", columns: columns(96), indexes: { a: ["c0"], b: ["c1"], c: ["c2"] } } as never)).toThrow(/100/);
 });
 

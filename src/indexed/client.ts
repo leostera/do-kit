@@ -2,7 +2,7 @@
 // and looks up and lists through global indexes (RFD0003).
 import { sharded, type ShardedClientOptions } from "../sharded/client.js";
 import { TableClient, type Untyped } from "../table/client.js";
-import { decodeCursor, encodeCursor, encodeValue, pageRequest, queryFingerprint, type Condition, type ListPage, type ListQuery, type RowShape, type TableSchema, type Versioned, type WriteResult } from "../table/schema.js";
+import { assertRowFits, decodeCursor, encodeCursor, encodeValue, pageRequest, queryFingerprint, type Condition, type ListPage, type ListQuery, type RowShape, type TableSchema, type Versioned, type WriteResult } from "../table/schema.js";
 import { entryOf, globalIndexes, routeOf, type EntryAddress, type GlobalIndexInfo, type IndexPage, type IndexStatus, type ReserveAnswer } from "./entries.js";
 import type { IndexedShardResult } from "./table.js";
 
@@ -51,7 +51,6 @@ type Write<Row> = { readonly row: Row; readonly ifVersion?: number };
 
 export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
   private readonly index: Untyped;
-  private readonly schema: TableSchema<Row>;
   private readonly globals: GlobalIndexInfo[];
 
   constructor(
@@ -64,7 +63,6 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
     // Index shards reach row shards with a client of their own, which knows no routeOf.
     if (options.routeOf) throw new Error(`indexed table ${name}: routeOf is not supported on an indexed table`);
     super(namespace, name, schema, options);
-    this.schema = schema;
     this.globals = globalIndexes(schema);
     this.index = sharded(indexNamespace as never, name, options) as unknown as Untyped;
   }
@@ -82,6 +80,7 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
    * it because one changes, it is reserved and sent again.
    */
   override async putMany(writes: readonly Write<Row>[]): Promise<IndexedWriteResult[]> {
+    for (const w of writes) assertRowFits(this.schema, w.row);
     const out = new Array<IndexedWriteResult>(writes.length);
     const reserve = new Set(writes.flatMap((w, i) => (w.ifVersion === 0 ? [i] : [])));
     let todo = writes.map((_, i) => i);

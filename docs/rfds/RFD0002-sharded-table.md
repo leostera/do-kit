@@ -86,6 +86,14 @@ const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 81
   total and a cursor names one position.
 - Rows are stored in real SQLite columns, in table `sharded_table`, with `_hash` (the routing
   hash of the key) and `_version`.
+- A value comes back as it went in, or the write is refused, naming the column: NaN, an integer
+  past 2^53, text that is not well-formed UTF-16 (SQLite would store U+FFFD, and a key read back
+  would route elsewhere), and in `json` columns anything `JSON.stringify` changes (non-finite
+  numbers, `undefined`, functions, bigints, a `Date` or other non-plain object, at any depth).
+- **Limits.** A table has at most 100 columns with its hidden ones (`_hash`, `_version`, one per
+  index): SQLite's limit in a Durable Object, checked by `defineTable`. A listing takes at most 32
+  conditions. A row is at most `maxRowBytes` (default and maximum 2 MB, SQLite's row limit), text
+  counted as UTF-8: a larger one throws `RowTooLarge` and writes nothing.
 
 **Schema changes.** Each shard brings its storage up to the schema the first time it runs code
 of that version. It adds missing columns, creates declared indexes and fills in their keys a page

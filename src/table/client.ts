@@ -1,6 +1,7 @@
 // The client of a sharded table: routes rows by key and merges listing pages from every shard.
 import { sharded, type ShardedClient, type ShardedClientOptions } from "../sharded/client.js";
 import {
+  assertRowFits,
   mergePages,
   decodeCursor,
   decodeShardCursor,
@@ -76,6 +77,7 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
   protected readonly primaryKey: keyof Row & string;
   private readonly indexes: Readonly<Record<string, readonly string[]>>;
   private readonly commands: C | null;
+  protected readonly schema: TableSchema<Row>;
 
   constructor(
     namespace: DurableObjectNamespace<Rpc.DurableObjectBranded>,
@@ -83,6 +85,7 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
     schema: TableSchema<Row>,
     options: TableClientOptions<C> = {},
   ) {
+    this.schema = schema;
     this.primaryKey = schema.primaryKey;
     this.indexes = schema.indexes ?? {};
     const { commands, ...sharding } = options;
@@ -113,12 +116,16 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
     return this.byPosition<Versioned<Row> | null>(keys, "tableGet", null);
   }
 
-  /** Writes a whole row; `ifVersion: 0` only if absent, `ifVersion: n` only if at version n. */
+  /**
+   * Writes a whole row; `ifVersion: 0` only if absent, `ifVersion: n` only if at version n. A row
+   * past the table's maxRowBytes throws RowTooLarge before anything is sent.
+   */
   async put(row: Row, options: { ifVersion?: number } = {}): Promise<WriteResult> {
     return (await this.putMany([{ row, ...options }]))[0]!;
   }
 
   async putMany(writes: readonly { row: Row; ifVersion?: number }[]): Promise<WriteResult[]> {
+    for (const w of writes) assertRowFits(this.schema, w.row);
     return this.byPosition<WriteResult>(writes.map((w) => this.keyOf(w.row)), "tablePut", writes);
   }
 

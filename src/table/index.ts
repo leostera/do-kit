@@ -1,11 +1,12 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
 import { ShardedObject } from "../sharded/index.js";
-import { encodeIndexKey, encodeValue, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
+import { DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
 
 export * from "./schema.js";
 export { table, TableClient, type TableClientOptions } from "./client.js";
 
+const UTF8 = new TextEncoder();
 const TABLE = "sharded_table";
 const COUNTS = "sharded_table_counts";
 /** Rows per value of a count group's column, per hash prefix like COUNTS; and which groups are kept. */
@@ -200,6 +201,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     if (options.ifVersion !== undefined && options.ifVersion !== current) return { ok: false, version: current };
     const stored: Record<string, SqlValue> = {};
     for (const name of Object.keys(this.table.columns)) stored[name] = this.encode(name, row[name]);
+    this.assertFits(key, stored);
     const watched = this.watchesRows() ? { before: current === 0 ? null : this.getRow(key)!.row, after: this.decode(stored) } : null;
     if (watched) {
       const refused = this.refuseRowWrite(key, watched.before, watched.after);
@@ -223,6 +225,17 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   }
 
   /** Changes some columns of an existing row if its version is `ifVersion`. Call inside `transact`. */
+  /** Throws RowTooLarge unless a row's stored values fit the table's maxRowBytes. */
+  private assertFits(key: string, stored: Readonly<Record<string, SqlValue>>): void {
+    let bytes = 0;
+    for (const name of Object.keys(this.table.columns)) {
+      const v = stored[name];
+      bytes += typeof v === "string" ? UTF8.encode(v).length : v === null || v === undefined ? 0 : 8;
+    }
+    const max = this.table.maxRowBytes ?? DEFAULT_MAX_ROW_BYTES;
+    if (bytes > max) throw new RowTooLarge(key, bytes, max);
+  }
+
   protected patchRow(key: string, changes: Partial<Row>, options: PutOptions = {}): WriteResult {
     this.migrate();
     const current = this.version(key);
@@ -233,6 +246,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     const before = { ...stored };
     const updates: Record<string, SqlValue> = {};
     for (const name of changed) updates[name] = stored[name] = this.encode(name, (changes as RowShape)[name]);
+    this.assertFits(key, stored);
     const watched = this.watchesRows() ? { before: this.decode(before), after: this.decode(stored) } : null;
     if (watched) {
       const refused = this.refuseRowWrite(key, watched.before, watched.after);

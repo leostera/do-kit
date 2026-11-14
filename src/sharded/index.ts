@@ -20,6 +20,7 @@ import { DurableObject } from "cloudflare:workers";
 import { ATOMIC_OUTCOME_TTL_MS, olderTx, type AtomicAnswer, type AtomicMethod, type AtomicStep, type Outcome } from "./atomic.js";
 import { sharded, type ShardedClient } from "./client.js";
 import { hashBit, keyHash } from "./hash.js";
+import { storedJson } from "./values.js";
 
 export { ATOMIC_HOLD_MS, ATOMIC_OUTCOME_TTL_MS, type AtomicMethod, type AtomicOutcome, type AtomicShardResult, type Prepared } from "./atomic.js";
 export { hashBit, keyHash } from "./hash.js";
@@ -74,6 +75,9 @@ export interface SplitPolicy {
  */
 export const DEFAULT_SPLIT_POLICY: SplitPolicy = { callsPerSecond: 400, windowSeconds: 5, maxDepth: 12, keysPerCall: 25 };
 
+/** The longest delay setTimeout keeps: past it, a timer fires at once. */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /** The deepest a shard can be: ownership is decided on 64 bits of the key's hash. */
 export const MAX_SPLIT_DEPTH = 64;
 
@@ -89,8 +93,9 @@ export function checkSplitPolicy(policy: SplitPolicy): SplitPolicy {
   const initial = policy.initialDepth ?? 0;
   if (!Number.isInteger(initial) || initial < 0 || initial > policy.maxDepth) fail("initialDepth must be an integer from 0 to maxDepth");
   if (policy.copy !== undefined && !["auto", "native", "logical"].includes(policy.copy)) fail('copy must be "auto", "native" or "logical"');
-  if (policy.splitTimeoutMs !== undefined && !(policy.splitTimeoutMs > 0)) fail("splitTimeoutMs must be a positive number");
-  if (policy.holdWaitMs !== undefined && !(policy.holdWaitMs >= 0)) fail("holdWaitMs must be zero or more");
+  // setTimeout fires at once for a delay past 2^31 - 1 ms (about 24.8 days).
+  if (policy.splitTimeoutMs !== undefined && !(policy.splitTimeoutMs > 0 && policy.splitTimeoutMs <= MAX_TIMER_MS)) fail(`splitTimeoutMs must be a positive number of ms, at most ${MAX_TIMER_MS}`);
+  if (policy.holdWaitMs !== undefined && !(policy.holdWaitMs >= 0 && policy.holdWaitMs <= MAX_TIMER_MS)) fail(`holdWaitMs must be from 0 to ${MAX_TIMER_MS} ms`);
   return policy;
 }
 
@@ -534,7 +539,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
         // An unlisted key was neither checked as this shard's nor held for a split: its write could be lost.
         if (!fenced.has(key)) throw new Error(`update wrote ${JSON.stringify(key)}, which is not one of its keys: list every key it writes`);
         if (value === null) this.sql.exec("DELETE FROM sharded_rows WHERE key = ?", key);
-        else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), JSON.stringify(value));
+        else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), storedJson(value, `the value of ${JSON.stringify(key)}`));
       }
       return result;
     });
@@ -737,7 +742,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     for (const [key, value] of writes) {
       if (!fenced.has(key)) throw new Error(`atomic apply wrote ${JSON.stringify(key)}, which it neither holds nor lists in holdKeys`);
       if (value === null) this.sql.exec("DELETE FROM sharded_rows WHERE key = ?", key);
-      else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), JSON.stringify(value));
+      else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), storedJson(value, `the value of ${JSON.stringify(key)}`));
     }
   }
 

@@ -2,6 +2,7 @@
 // knows, learns new ones from "moved" answers, and shares what it learned in the isolate and the
 // colo (Cache API). Splits are final, so stale knowledge costs hops, never correctness.
 import { ATOMIC_HOLD_MS, atomicTxId, type AtomicAnswer, type AtomicOutcome, type AtomicShardResult, type AtomicStep, type Outcome } from "./atomic.js";
+import { assertKey } from "./values.js";
 import { hashBit, keyHash } from "./hash.js";
 import { hostBits, shardObjectName, nodeName, type CallAnswer, type NodeDescription, type ShardedObject, type StubOptions } from "./index.js";
 
@@ -238,6 +239,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   /** The hash a key is routed by: of its route, which is the key itself by default. */
   private routeHash(key: string): string {
+    assertKey(key);
     if (!this.routeOf) return keyHash(key);
     const route = this.routeOf(key);
     if (typeof route !== "string") throw new Error(`sharded ${this.name}: routeOf(${JSON.stringify(key)}) is not a string`);

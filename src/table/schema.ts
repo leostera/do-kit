@@ -2,6 +2,7 @@
 // shards (SQLite) and the client that merges their pages (here): they must agree exactly.
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { isWellFormed, storedJson } from "../sharded/values.js";
 
 /** How a column is stored: `boolean` as 0/1, `json` as text (not indexable). */
 export type ColumnType = "text" | "integer" | "real" | "boolean" | "json";
@@ -20,6 +21,11 @@ export interface TableSchema<Row extends RowShape> {
    * write, so `countBy` (and a listing's `withCount`) is exact without reading rows.
    */
   readonly counts?: Readonly<Record<string, keyof Row & string>>;
+  /**
+   * The largest row a write may store, as do-kit counts it (text as UTF-8, numbers as 8 bytes),
+   * up to SQLite's 2 MB, the default: a larger one throws `RowTooLarge` and writes nothing.
+   */
+  readonly maxRowBytes?: number;
   /**
    * IndexedTable only: index name to a global index, kept apart from the rows on its own shards
    * (see RFD0003). A write returns once its entries are written.
@@ -47,6 +53,47 @@ export interface GroupCount {
 }
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
+
+/**
+ * Columns a table may have, with its hidden ones (`_hash`, `_version`, one per index): SQLite in a
+ * Durable Object takes 100 (measured: ALTER TABLE adds the 100th, not the 101st). A put binds a
+ * value per column, and a statement takes 100 values too.
+ */
+export const MAX_TABLE_COLUMNS = 100;
+/** Conditions a listing takes: it sends them to every shard, each bound once, with 4 of its own. */
+export const MAX_CONDITIONS = 32;
+/** The largest row SQLite in a Durable Object stores: 2 MB. */
+export const DEFAULT_MAX_ROW_BYTES = 2_000_000;
+
+/** A row's size as `maxRowBytes` counts it: its stored values, text as UTF-8, numbers as 8 bytes. */
+export function rowBytes<Row extends RowShape>(schema: TableSchema<Row>, row: Row): number {
+  let bytes = 0;
+  for (const column of Object.keys(schema.columns)) {
+    const v = encodeValue(schema, column, row[column as keyof Row]);
+    bytes += typeof v === "string" ? UTF8.encode(v).length : v === null ? 0 : 8;
+  }
+  return bytes;
+}
+const UTF8 = new TextEncoder();
+
+/** Throws RowTooLarge unless `row` fits its table's `maxRowBytes`. */
+export function assertRowFits<Row extends RowShape>(schema: TableSchema<Row>, row: Row): void {
+  const bytes = rowBytes(schema, row);
+  const max = schema.maxRowBytes ?? DEFAULT_MAX_ROW_BYTES;
+  if (bytes > max) throw new RowTooLarge(String(row[schema.primaryKey]), bytes, max);
+}
+
+/** A row larger than its table's `maxRowBytes`: nothing was written. */
+export class RowTooLarge extends Error {
+  constructor(
+    readonly key: string,
+    readonly bytes: number,
+    readonly max: number,
+  ) {
+    super(`RowTooLarge: row ${JSON.stringify(key).slice(0, 80)} is ${bytes} bytes, more than maxRowBytes ${max}`);
+    this.name = "RowTooLarge";
+  }
+}
 
 /** Checks a schema and returns it: names are plain identifiers, the key is text, indexes name columns. */
 export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): TableSchema<Row> {
@@ -79,6 +126,9 @@ export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): Tab
     if (!Number.isInteger(partition) || partition < 1 || partition > def.columns.length) throw new Error(`global index ${name}: partition must be from 1 to ${def.columns.length}`);
     if (def.unique && partition !== def.columns.length) throw new Error(`global index ${name}: a unique index is partitioned by all its columns`);
   }
+  const width = columns.length + 2 + Object.keys(schema.indexes ?? {}).length;
+  if (width > MAX_TABLE_COLUMNS) throw new Error(`a table of ${columns.length} columns and ${Object.keys(schema.indexes ?? {}).length} indexes has ${width} columns with its hidden ones (_hash, _version, one per index); SQLite in a Durable Object takes ${MAX_TABLE_COLUMNS}`);
+  if (schema.maxRowBytes !== undefined && (!Number.isInteger(schema.maxRowBytes) || schema.maxRowBytes < 1 || schema.maxRowBytes > DEFAULT_MAX_ROW_BYTES)) throw new Error(`maxRowBytes must be an integer from 1 to ${DEFAULT_MAX_ROW_BYTES}`);
   for (const [name, col] of Object.entries(schema.counts ?? {})) {
     if (!IDENTIFIER.test(name)) throw new Error(`count group ${JSON.stringify(name)}: a plain identifier`);
     const type = schema.columns[col];
@@ -90,7 +140,9 @@ export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): Tab
 
 /**
  * A column's value as SQLite stores it, checked against the column's type: `boolean` as 0/1,
- * `json` as text. NaN is refused: SQLite would store it as null.
+ * `json` as text. A value that would not come back as it went in is refused: NaN (SQLite stores
+ * null), an integer past 2^53 (it lost precision already), text that is not well-formed UTF-16
+ * (SQLite stores U+FFFD), and JSON that JSON.stringify would change (see storedJson).
  */
 export function encodeValue<Row extends RowShape>(schema: TableSchema<Row>, column: string, value: unknown): SqlValue {
   const type = schema.columns[column as keyof Row & string];
@@ -102,9 +154,10 @@ export function encodeValue<Row extends RowShape>(schema: TableSchema<Row>, colu
   switch (type) {
     case "text":
       if (typeof value !== "string") throw new Error(`${column}: expected text`);
+      if (!isWellFormed(value)) throw new Error(`${column}: text that is not well-formed UTF-16 (a lone surrogate): SQLite would store another string`);
       return value;
     case "integer":
-      if (typeof value !== "number" || !Number.isInteger(value)) throw new Error(`${column}: expected an integer`);
+      if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error(`${column}: expected an integer from -(2^53 - 1) to 2^53 - 1`);
       return value;
     case "real":
       if (typeof value !== "number" || Number.isNaN(value)) throw new Error(`${column}: expected a number (not NaN)`);
@@ -112,11 +165,8 @@ export function encodeValue<Row extends RowShape>(schema: TableSchema<Row>, colu
     case "boolean":
       if (typeof value !== "boolean") throw new Error(`${column}: expected a boolean`);
       return value ? 1 : 0;
-    case "json": {
-      const text = JSON.stringify(value);
-      if (text === undefined) throw new Error(`${column}: not representable as JSON`);
-      return text;
-    }
+    case "json":
+      return storedJson(value, column);
   }
 }
 
@@ -265,6 +315,7 @@ export const MAX_BUDGET = 10_000;
 
 /** The request for a query, with defaults and bounds applied. */
 export function pageRequest(query: ListQuery, after: Position | null): ShardPageRequest {
+  if ((query.where ?? []).length > MAX_CONDITIONS) throw new Error(`a listing takes at most ${MAX_CONDITIONS} conditions`);
   const limit = query.limit ?? 50;
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) throw new Error(`limit must be an integer from 1 to ${MAX_LIMIT}`);
   const budget = query.budget ?? Math.max(1_000, limit * 10);
