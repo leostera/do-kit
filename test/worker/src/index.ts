@@ -344,6 +344,24 @@ const docsV2 = defineTable<DocV2>({
 export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   /** A new index is built over a few hundred rows a call, so tests see it take several. */
   protected override indexBuildRows = 300;
+  /** Every SQL cursor since the last `resetRowsRead`: what this instance read, summed on demand. */
+  private cursors: { rowsRead: number }[] = [];
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    const sql = ctx.storage.sql;
+    const exec = sql.exec.bind(sql);
+    sql.exec = ((query: string, ...bindings: unknown[]) => {
+      const cursor = exec(query, ...bindings);
+      this.cursors.push(cursor);
+      return cursor;
+    }) as typeof sql.exec;
+  }
+  /** Rows this instance read since the last reset, and starts counting again. */
+  async rowsRead(): Promise<number> {
+    const n = this.cursors.reduce((sum, c) => sum + c.rowsRead, 0);
+    this.cursors = [];
+    return n;
+  }
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
   protected get table(): TableSchema<DocV2> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
@@ -921,6 +939,10 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
   if (body.op === "indexNames") {
     const ns = env.EVOLVING;
     return ns.get(ns.idFromName(shardObjectName(body.name, ""))).indexNames();
+  }
+  if (body.op === "rowsRead") { // [bits]: of an evolving or flaky shard
+    const ns = body.cls === "flaky" ? env.FLAKY : env.EVOLVING;
+    return ns.get(ns.idFromName(shardObjectName(body.name, (body.args[0] as string) ?? ""))).rowsRead();
   }
   if (body.op === "scan") return (sharded(namespace(env, body.cls) as never, body.name, body.cls === "routedTable" ? { routeOf: refRoute } : {}).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(...(body.args as [string, ...unknown[]]));
   return t[body.op]!.call(t, ...body.args);
