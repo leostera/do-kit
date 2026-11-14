@@ -98,6 +98,7 @@
     "src/table/index.ts#ShardedTable.countGroups": "b406cdc50552",
     "src/table/index.ts#ShardedTable.migrateCountGroups": "b288fdcd1dd0",
     "src/table/index.ts#ShardedTable.page": "a4dc147f1802",
+    "src/table/index.ts#ShardedTable.putRow": "0c17bdb0a578",
     "src/table/index.ts#ShardedTable.tablePage": "4c3f95575761",
     "src/table/schema.ts#mergePages": "1d7e64ea8e52",
     "src/table/schema.ts#pageRequest": "c129ce2d7ccb",
