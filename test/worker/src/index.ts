@@ -378,12 +378,15 @@ function countSetAlarm(storage: DurableObjectStorage): { sets: number } {
   return count;
 }
 
-/** The next SQL statement on `storage` containing `text` throws, once, as a storage error would. */
-function failStatementOnce(storage: DurableObjectStorage, text: string): void {
+/**
+ * The next SQL statement on `storage` containing `text` throws, once, as a storage error would;
+ * with `binding`, only one of whose bound values contains that too.
+ */
+function failStatementOnce(storage: DurableObjectStorage, text: string, binding?: string): void {
   const sql = storage.sql;
   const exec = sql.exec.bind(sql);
   sql.exec = ((query: string, ...bindings: unknown[]) => {
-    if (!query.includes(text)) return exec(query, ...bindings);
+    if (!query.includes(text) || (binding !== undefined && !bindings.some((b) => typeof b === "string" && b.includes(binding)))) return exec(query, ...bindings);
     sql.exec = exec;
     throw new Error("test: storage error");
   }) as typeof sql.exec;
@@ -850,6 +853,10 @@ export class OldAlarm extends ShardedObject<Env, number> {
 }
 
 class CounterBase extends ShardedObject<Env, number> {
+  /** The next statement containing `text`, with a bound value containing `binding`, throws once. */
+  async failStatementWithOnce(text: string, binding: string): Promise<void> {
+    failStatementOnce(this.ctx.storage, text, binding);
+  }
   /** The next setAlarm throws, once, as a storage error would. */
   async failSetAlarmOnce(): Promise<void> {
     const storage = this.ctx.storage;

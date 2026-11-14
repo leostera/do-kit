@@ -90,6 +90,24 @@ test("a storage error after a split commits does not give the split up: the new 
   expect((left as unknown as { lastSplit: unknown }).lastSplit).not.toBeNull();
 }, 60_000);
 
+test("a split whose commit fails to store is given up whole: the shard keeps both halves, and nothing of them is lost", async () => {
+  const name = `split-commit-fails-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  // The commit is the meta write that hands the right half over (it names the sibling to activate).
+  await post("/object", { cls: "m", name, bits: "", method: "failStatementWithOnce", args: ["sharded_meta", '"activate":{"bits":"1"'] });
+  expect(await post("/split", { cls: "m", name, bits: "" })).toBe(false);
+  const root = await describe("m", name, "");
+  expect(root.state).toBe("shard");
+  expect(root.bits).toBe("");
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  const values = await post<number[]>("/call", { cls: "m", name, method: "get", keys: KEYS, payloads: null, notReadyWaitMs: 5_000 });
+  expect(values).toEqual(KEYS.map(() => 2));
+  // Split again, and both halves serve.
+  expect(await post("/split", { cls: "m", name, bits: "" })).toBe(true);
+  const again = await post<number[]>("/call", { cls: "m", name, method: "get", keys: KEYS, payloads: null, notReadyWaitMs: 5_000 });
+  expect(again).toEqual(KEYS.map(() => 2));
+}, 60_000);
+
 test("load splits a node by itself, and nothing is lost", async () => {
   const name = `auto-${Date.now()}`;
   const expected = new Map<string, number>();

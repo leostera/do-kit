@@ -1764,8 +1764,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   private saveMeta(meta: Meta): void {
     this.ensureSchema();
-    this.meta = meta;
+    // Stored first: a write that fails leaves the meta in memory as it is in storage. Set first,
+    // a failed split commit read back as committed, and its failure path stored it so.
     this.sql.exec("INSERT INTO sharded_meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", JSON.stringify(meta));
+    this.meta = meta;
   }
 
   // ---- Load and splitting ----

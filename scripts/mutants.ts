@@ -289,6 +289,13 @@ const MUTANTS: Mutant[] = [
     test: "test/sharded.test.ts",
     pattern: "after a split commits",
   },
+  {
+    name: "meta-set-before-stored",
+    breaks: "a meta write that fails leaves the meta in memory as stored, so a failed split commit is not read back as committed",
+    edits: [{ file: "src/sharded/index.ts", find: "    this.sql.exec(\"INSERT INTO sharded_meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value\", JSON.stringify(meta));\n    this.meta = meta;", replace: "    this.meta = meta;\n    this.sql.exec(\"INSERT INTO sharded_meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value\", JSON.stringify(meta));" }],
+    test: "test/sharded.test.ts",
+    pattern: "commit fails to store",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

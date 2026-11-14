@@ -133,6 +133,9 @@ and 1.50 MB.
   sibling) is logged and retried by the alarm or the next call, never taken for a split given up.
   Taken for one, it discarded the shard that owned the right half, with the writes it had
   acknowledged.
+- The meta in memory follows storage, never leads it: a meta write that fails leaves both as they
+  were. A commit that failed to store, read back from memory as committed, was stored so by the
+  failure path, with the copy discarded.
 - After n automatic attempts given up in a row, the next starts no sooner than `2^n` split
   timeouts after the last one started, capped at 30 minutes. A size split given up asks the alarm
   for that time, so it is tried again with no write to start it.
