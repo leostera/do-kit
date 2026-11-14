@@ -81,6 +81,31 @@ export async function applyTypes(t: TableClient<Doc, typeof docCommands>): Promi
 
 export class Docs extends ShardedTable<Env, Doc> {
   protected table = docs;
+  /** The logical-copy batches this instance took: their table, rows, and bytes on the heap (2 a UTF-16 unit). */
+  private batches: { table: string; rows: number; heapBytes: number }[] = [];
+  override async shardedReceive(name: string, bits: string, epoch: number, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void> {
+    const heapBytes = rows.reduce((sum, row) => sum + row.reduce<number>((n, v) => n + (typeof v === "string" ? 2 * v.length : v instanceof ArrayBuffer ? v.byteLength : 8), 0), 0);
+    this.batches.push({ table, rows: rows.length, heapBytes });
+    return super.shardedReceive(name, bits, epoch, first, table, columns, rows);
+  }
+  async receivedBatches(): Promise<{ table: string; rows: number; heapBytes: number }[]> {
+    return this.batches;
+  }
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    usePolicyOverride(ctx, () => this.splitPolicy, (p) => (this.splitPolicy = p));
+  }
+  /** Changes this object's split policy (merged over the class's), as a deploy would; kept across restarts. */
+  async setPolicy(change: Record<string, unknown>): Promise<void> {
+    savePolicyOverride(this.ctx.storage, change);
+    this.splitPolicy = { ...this.splitPolicy, ...change } as SplitPolicy;
+  }
+  /** This object's database size, as the runtime counts it. */
+  async databaseSize(): Promise<number> {
+    return this.ctx.storage.sql.databaseSize;
+  }
+
   protected override commands = docCommands;
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6, holdWaitMs: 0 };
   /** Tests hold cleanup back, to list while shards still store rows they gave away. */
@@ -241,6 +266,29 @@ class StatementLog {
       return [];
     }
   }
+}
+
+/**
+ * A split policy a test set on this object (`setPolicy`), stored so it outlasts a restart, and
+ * merged over the class's once the instance is built (after the subclass's own fields are set).
+ * It may name fields the library does not have yet, such as size limits.
+ */
+function usePolicyOverride(ctx: DurableObjectState, policy: () => SplitPolicy, apply: (policy: SplitPolicy) => void): void {
+  void ctx.blockConcurrencyWhile(async () => {
+    await null;
+    const stored = loadPolicyOverride(ctx.storage);
+    if (stored) apply({ ...policy(), ...stored });
+  });
+}
+function loadPolicyOverride(storage: DurableObjectStorage): Record<string, unknown> | null {
+  storage.sql.exec("CREATE TABLE IF NOT EXISTS test_policy (policy TEXT NOT NULL)");
+  const row = storage.sql.exec<{ policy: string }>("SELECT policy FROM test_policy").toArray()[0];
+  return row ? (JSON.parse(row.policy) as Record<string, unknown>) : null;
+}
+function savePolicyOverride(storage: DurableObjectStorage, change: Record<string, unknown>): void {
+  const merged = { ...(loadPolicyOverride(storage) ?? {}), ...change };
+  storage.sql.exec("DELETE FROM test_policy");
+  storage.sql.exec("INSERT INTO test_policy (policy) VALUES (?)", JSON.stringify(merged));
 }
 
 /** The next SQL statement on `storage` containing `text` throws, once, as a storage error would. */
@@ -430,7 +478,18 @@ export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.log = new StatementLog(ctx.storage);
+    usePolicyOverride(ctx, () => this.splitPolicy, (p) => (this.splitPolicy = p));
   }
+  /** Changes this object's split policy (merged over the class's), as a deploy would; kept across restarts. */
+  async setPolicy(change: Record<string, unknown>): Promise<void> {
+    savePolicyOverride(this.ctx.storage, change);
+    this.splitPolicy = { ...this.splitPolicy, ...change } as SplitPolicy;
+  }
+  /** This object's database size, as the runtime counts it. */
+  async databaseSize(): Promise<number> {
+    return this.ctx.storage.sql.databaseSize;
+  }
+
   /** Rows this instance read since the last reset, and starts counting again. */
   async rowsRead(): Promise<number> {
     const n = this.log.rowsRead();
@@ -453,6 +512,10 @@ export class EvolvingDocs extends ShardedTable<Env, DocV2> {
     } catch {
       return false;
     }
+  }
+  /** What this object holds (tables, keys, alarm). */
+  async storage(): Promise<StorageReport> {
+    return storageReport(this.ctx.storage);
   }
   /** The local index builds not finished yet, read without migrating. */
   async buildsLeft(): Promise<number> {
@@ -581,6 +644,32 @@ export class OldAlarm extends ShardedObject<Env, number> {
 }
 
 class CounterBase extends ShardedObject<Env, number> {
+  /** The logical-copy batches this instance took: their table, rows, and bytes on the heap (2 a UTF-16 unit). */
+  private batches: { table: string; rows: number; heapBytes: number }[] = [];
+  override async shardedReceive(name: string, bits: string, epoch: number, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void> {
+    const heapBytes = rows.reduce((sum, row) => sum + row.reduce<number>((n, v) => n + (typeof v === "string" ? 2 * v.length : v instanceof ArrayBuffer ? v.byteLength : 8), 0), 0);
+    this.batches.push({ table, rows: rows.length, heapBytes });
+    return super.shardedReceive(name, bits, epoch, first, table, columns, rows);
+  }
+  async receivedBatches(): Promise<{ table: string; rows: number; heapBytes: number }[]> {
+    return this.batches;
+  }
+
+  /** Stores text values (the class's values are numbers; the base table takes any JSON). */
+  async putText(keys: readonly string[], payloads: readonly string[]): Promise<null[]> {
+    return this.update(keys, () => ({ writes: new Map(keys.map((k, i) => [k, payloads[i] as unknown as number])), result: keys.map(() => null) }));
+  }
+
+  /** Changes this object's split policy (merged over the class's), as a deploy would; kept across restarts. */
+  async setPolicy(change: Record<string, unknown>): Promise<void> {
+    savePolicyOverride(this.ctx.storage, change);
+    this.splitPolicy = { ...this.splitPolicy, ...change } as SplitPolicy;
+  }
+  /** This object's database size, as the runtime counts it. */
+  async databaseSize(): Promise<number> {
+    return this.ctx.storage.sql.databaseSize;
+  }
+
   private readonly log = new StatementLog(this.ctx.storage);
   /** The statements this instance ran whose text contains `filter`, since the last reset. */
   async statements(filter: string, reset: boolean): Promise<StatementCost[]> {
@@ -656,6 +745,7 @@ class CounterBase extends ShardedObject<Env, number> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    usePolicyOverride(ctx, () => this.splitPolicy, (p) => (this.splitPolicy = p));
     const failHoldsLoad = ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'test_fail_holds_load'").one().n > 0;
     if (failHoldsLoad) {
       ctx.storage.sql.exec("DROP TABLE test_fail_holds_load");
