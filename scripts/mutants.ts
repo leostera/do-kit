@@ -394,6 +394,27 @@ const MUTANTS: Mutant[] = [
     test: "test/schema.test.ts",
     pattern: "then doubles them",
   },
+  {
+    name: "put-reads-whole-row",
+    breaks: "a put reads of the row it replaces only its version and the columns its indexes and counts use",
+    edits: [{ file: "src/table/index.ts", find: "    if (this.watchesRows()) return \"*\";\n", replace: "    return \"*\";\n" }],
+    test: "test/cost.test.ts",
+    pattern: "a put reads of the row",
+  },
+  {
+    name: "shard-fits-encodes",
+    breaks: "a put copies no text to UTF-8 to check a row's size, in the shard",
+    edits: [{ file: "src/table/index.ts", find: "    if (bound <= max) return;\n", replace: "" }],
+    test: "test/cost.test.ts",
+    pattern: "copies no text",
+  },
+  {
+    name: "client-fits-encodes-on-put",
+    breaks: "a put copies no text to UTF-8 to check a row's size, in the client",
+    edits: [{ file: "src/table/schema.ts", find: "  if (rowBytesAtMost(schema, row) <= max) return;\n", replace: "" }],
+    test: "test/cost.test.ts",
+    pattern: "copies no text",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

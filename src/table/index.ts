@@ -330,8 +330,9 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   protected putRow(row: Row, options: PutOptions = {}): WriteResult {
     this.migrate();
     const key = row[this.table.primaryKey] as string;
-    // One read of the row: its version, and what its indexes and counts had.
-    const existing = this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).toArray()[0] ?? null;
+    // One read of the row: its version, and what its indexes and counts had. Only those columns
+    // (all of them for a class that watches rows): a large value is not copied out to be replaced.
+    const existing = this.db.exec<Record<string, SqlValue>>(`SELECT ${this.putReads()} FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).toArray()[0] ?? null;
     const current = (existing?._version as number | undefined) ?? 0;
     if (options.ifVersion !== undefined && options.ifVersion !== current) return { ok: false, version: current };
     const stored: Record<string, SqlValue> = {};
@@ -366,15 +367,34 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     return { ok: true, version };
   }
 
+  /** What a put reads of the row it replaces: its version, and the columns its indexes and counts use. */
+  private putReads(): string {
+    const schema = this.table;
+    if (this.watchesRows()) return "*";
+    if (this.putReadsOf?.schema !== schema) {
+      const columns = new Set<string>([schema.primaryKey, ...Object.values(schema.indexes ?? {}).flat(), ...Object.values(schema.counts ?? {})]);
+      this.putReadsOf = { schema, columns: [...[...columns].map((c) => this.q(c)), "_version"].join(", ") };
+    }
+    return this.putReadsOf.columns;
+  }
+  private putReadsOf: { schema: unknown; columns: string } | null = null;
+
   /** Changes some columns of an existing row if its version is `ifVersion`. Call inside `transact`. */
   /** Throws RowTooLarge unless a row's stored values fit the table's maxRowBytes. */
   private assertFits(key: string, stored: Readonly<Record<string, SqlValue>>): void {
+    const max = this.table.maxRowBytes ?? DEFAULT_MAX_ROW_BYTES;
+    // A bound first, 3 bytes per UTF-16 unit, as the client's check: most rows fit it unencoded.
+    let bound = 0;
+    for (const name of Object.keys(this.table.columns)) {
+      const v = stored[name];
+      bound += typeof v === "string" ? 3 * v.length : v === null || v === undefined ? 0 : 8;
+    }
+    if (bound <= max) return;
     let bytes = 0;
     for (const name of Object.keys(this.table.columns)) {
       const v = stored[name];
       bytes += typeof v === "string" ? UTF8.encode(v).length : v === null || v === undefined ? 0 : 8;
     }
-    const max = this.table.maxRowBytes ?? DEFAULT_MAX_ROW_BYTES;
     if (bytes > max) throw new RowTooLarge(key, bytes, max);
   }
 

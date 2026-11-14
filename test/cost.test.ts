@@ -57,6 +57,26 @@ test("a global index's page reads about the entries it answers", async () => {
   expect(statements.reduce((n, s) => n + s.rowsRead, 0)).toBeLessThanOrEqual(2 * 4 + 2);
 }, 60_000);
 
+test("a put reads of the row it replaces only its version and the columns its indexes and counts use", async () => {
+  const name = `cost-put-reads-${unique()}`;
+  await table("evolving", name, "put", doc("a", 0, { big: "x".repeat(10_000) }));
+  const { statements } = await costOf("evolving", name, () => table("evolving", name, "put", doc("a", 1, { big: "y".repeat(10_000) })));
+  const read = statements.find((s) => s.query.startsWith("SELECT ") && s.query.includes("FROM sharded_table WHERE"));
+  expect(read?.query).toBeDefined();
+  // Not the row's values: a large one is not copied out of SQLite only to be replaced.
+  expect(read!.query).not.toContain("*");
+  expect(read!.query).not.toContain('"meta"');
+  expect(read!.query).toContain("_version");
+}, 30_000);
+
+test("a put copies no text to UTF-8 to check a row's size, in the client or the shard", async () => {
+  const name = `cost-put-encodes-${unique()}`;
+  await table("evolving", name, "put", doc("a"));
+  await post("/encodes", { name });
+  await table("evolving", name, "put", doc("a", 1, { body: "é".repeat(1_000) }));
+  expect(await post<number>("/encodes", { name })).toBe(0);
+}, 30_000);
+
 test("a count reads at most a row after the first, and stays exact through writes and a command that throws", async () => {
   const name = `cost-count-${unique()}`;
   await seed(name, 5_000);

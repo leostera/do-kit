@@ -624,7 +624,25 @@ const docsV2 = defineTable<DocV2>({
   counts: { deletedAgain: "deleted", byStars: "stars" },
 });
 
+/**
+ * TextEncoder.encode calls on text longer than 100 characters made in this isolate (the Worker's
+ * and its objects'), for tests that check a hot path copies no values to UTF-8 (keys it hashes are
+ * shorter).
+ */
+let encodes = 0;
+const encode = TextEncoder.prototype.encode;
+TextEncoder.prototype.encode = function (this: TextEncoder, input?: string) {
+  if ((input?.length ?? 0) > 100) encodes++;
+  return encode.call(this, input);
+};
+
 export class EvolvingDocs extends ShardedTable<Env, DocV2> {
+  /** encodes in this object's isolate: reset with `reset`. */
+  async encodes(reset: boolean): Promise<number> {
+    const n = encodes;
+    if (reset) encodes = 0;
+    return n;
+  }
   /** A new index is built over a few hundred rows a call, so tests see it take several. */
   protected override indexBuildRows = 300;
   /** Flooded at 20,000 rows a second: a few full-budget listings in a second, however fast the machine. */
@@ -1599,6 +1617,14 @@ export default {
           return Response.json((await indexedOp(env, body as never)) ?? null);
         case "/table":
           return Response.json((await tableOp(env, body as never)) ?? null);
+        case "/encodes": {
+          // This isolate's, then the object's (the same isolate, or another): both reset.
+          const here = encodes;
+          encodes = 0;
+          const docs = env.EVOLVING;
+          const there = await docs.get(docs.idFromName(shardObjectName(body.name, ""))).encodes(true);
+          return Response.json(here + there);
+        }
         case "/wipeAll":
           return Response.json(await sharded(ns, body.name).wipe());
         case "/object": {
