@@ -307,6 +307,24 @@ export function shardObjectName(name: string, bits: string): string {
 
 /** Thrown inside a method when its keys left this shard; the dispatcher answers "moved". */
 class Moved extends Error {}
+
+/**
+ * The tree was written with another routeOf than this object's: its rows are where the old one
+ * put them, so a call routed by the new one would read them as missing, or write them twice.
+ */
+export class RouteChanged extends Error {
+  constructor(
+    readonly key: string,
+    readonly was: string,
+    readonly now: string,
+  ) {
+    super(`routeOf changed: key ${JSON.stringify(key)} was routed by ${was} when written, and is ${now} now. A tree is readable only with the routeOf it was written with: deploy the old one, or move the rows to a tree of a new name`);
+    this.name = "RouteChanged";
+  }
+}
+
+/** Keys a shard keeps with their route hash, to tell a changed routeOf. */
+const ROUTE_SAMPLE = 16;
 /** A call reached its write past its caller's deadline: refused, nothing applied. */
 class Expired extends Error {}
 /** The routed call being served: its caller's deadline, checked just before its transaction. */
@@ -397,6 +415,11 @@ interface Meta {
   /** The shard this one split from and when (null for the root). */
   parent: string | null;
   splitAt: number;
+  /**
+   * Keys this tree was written with, and the route hash each had then (up to ROUTE_SAMPLE): the
+   * tree's routeOf, as far as a check can tell. Copied to a split's new shard.
+   */
+  routes?: [string, string][];
   lastSplit?: { copy: "native" | "logical"; ms: number };
   /** Why the last abandoned split attempt was abandoned. */
   lastSplitError?: string;
@@ -651,6 +674,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.receiving = null;
     this.calls.clear();
     this.alarmCheckedAt = 0;
+    this.routesChecked = false;
   }
 
   protected cleanupForeign(_owns: (key: string) => boolean, _limit: number): number {
@@ -1140,6 +1164,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (answer) return this.answered(answer);
     this.counters.calls++;
     for (const key of keys) if (!ownsHash(bits, this.routeHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);
+    this.sampleRoutes(keys);
     this.countCall(keys.length);
     const fn = this.routedMethod(method);
     try {
@@ -1283,6 +1308,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // Storage copied from another object and not claimed yet: it keeps that object's meta.
     if (this.isUnclaimedCopy()) return { notReady: bits };
     if (meta.name !== name || hostBits(meta.bits) !== hostBits(bits)) throw new Error(`${nodeName(name, bits)} reached ${nodeName(meta.name, meta.bits)}`);
+    this.checkRoutes(meta);
     if (meta.state === "copy") {
       // Calls may reach only this half: they are the backstop for a parent whose alarm was lost.
       this.nudgeParent(meta);
@@ -1300,6 +1326,27 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // storage that is gone.
     return { stale: bits };
   }
+
+  /** Keeps the first ROUTE_SAMPLE keys called here with their route hash (see Meta.routes). */
+  private sampleRoutes(keys: readonly string[]): void {
+    const meta = this.meta!;
+    const kept = meta.routes ?? [];
+    if (kept.length >= ROUTE_SAMPLE || keys.length === 0) return;
+    const known = new Set(kept.map(([k]) => k));
+    const added = [...new Set(keys)].filter((k) => !known.has(k)).slice(0, ROUTE_SAMPLE - kept.length);
+    if (added.length > 0) this.saveMeta({ ...meta, routes: [...kept, ...added.map((k): [string, string] => [k, this.routeHash(k)])] });
+  }
+
+  /** Once an instance: refuses a tree whose sampled keys route elsewhere now (RouteChanged). */
+  private checkRoutes(meta: Meta): void {
+    if (this.routesChecked) return;
+    for (const [key, was] of meta.routes ?? []) {
+      const now = this.routeHash(key);
+      if (now !== was) throw new RouteChanged(key, was, now);
+    }
+    this.routesChecked = true;
+  }
+  private routesChecked = false;
 
   private loadMeta(): Meta | null {
     const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_meta WHERE key = 'meta'").toArray()[0];
@@ -1933,7 +1980,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       this.afterClone((key) => ownsHash(bits, this.routeHash(key)));
       this.dropForeignHolds(bits);
       // The parent's meta (copied with its storage) gives the tree's presplit depth.
-      this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, ...(meta.presplit ? { presplit: meta.presplit } : {}), parent, splitAt: Date.now() });
+      this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, ...(meta.presplit ? { presplit: meta.presplit } : {}), ...(meta.routes ? { routes: meta.routes } : {}), parent, splitAt: Date.now() });
     });
     await this.armAlarm(Date.now());
     return true;

@@ -102,6 +102,14 @@ new tree leaves the root new. This matters at the root: the root owns every hash
 check it would accept a key routed the wrong way, and the mismatch would only show (as missing
 keys) after the first split.
 
+That check compares a client and its shard, so it can't see a deploy that changes `routeOf` on
+both: the rows stay where the old routes put them, and calls routed by the new ones would read
+them as missing, or write them a second time elsewhere. So `routeOf` is part of a tree, like its
+name. Each shard keeps the first 16 keys called on it with their route hash (in its meta, which a
+split copies), and each instance checks them once, on its first call: a key that routes
+elsewhere now refuses every call with `RouteChanged`. A tree is readable only with the `routeOf`
+it was written with; a new one needs a tree of a new name.
+
 The default route costs nothing new: `routeHash` is `keyHash(key)`, and the stored hashes are those
 of every tree written before. The hashes sent with each call cost 16 bytes a key.
 
@@ -116,7 +124,8 @@ it is idle. The split policy can tell, as for one key, with `splittable()`.
 2. **One transaction per route:** `update`, `transact` and `callOneShard` over keys of one route
    never span shards.
 3. **Default unchanged:** without a `routeOf`, every stored hash is `keyHash(key)`.
-4. **No silent misroutes:** a call routed by another function than the shard's runs nothing.
+4. **No silent misroutes:** a call routed by another function than the shard's runs nothing,
+   and a shard whose function changed since its keys were written refuses every call.
 
 Routing is the same function the specs already model: they decide ownership by hash, and a route
 hash is a hash. The specs' sources (`route`, `shardedCall`, `holding`, `shardedClaim`, `owns`) were
