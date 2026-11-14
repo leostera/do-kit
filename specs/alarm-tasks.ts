@@ -38,7 +38,7 @@ export const Shard = defineActor({
   transitions: {
     alarm: {
       description: "The alarm fires: the app's onAlarm, and the delivery (with the rule, each on its own; without, the delivery inside the app's chain, after super).",
-      sources: ["src/sharded/index.ts#ShardedObject.alarm", "src/indexed/table.ts#IndexedTable.onAlarm"],
+      sources: ["src/sharded/index.ts#ShardedObject.alarm", "src/indexed/table.ts#IndexedTable.layerAlarm"],
       when: (s) => s.delivery || s.appDue,
       run(s) {
         const appThrows = s.appDue && s.appBroken;

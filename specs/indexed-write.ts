@@ -367,7 +367,7 @@ function makeShard(name: string, key: Key) {
       },
       deliver: {
         description: "The alarm: delivers what is left in the outbox.",
-        sources: ["src/indexed/table.ts#IndexedTable.onAlarm", "src/indexed/table.ts#IndexedTable.onTheWire"],
+        sources: ["src/indexed/table.ts#IndexedTable.layerAlarm", "src/indexed/table.ts#IndexedTable.onTheWire"],
         routine: true,
         when: (s) => s.outbox.some((op) => !s.sending.has(op.id)),
         sends: [Apply, WriteDone],
@@ -497,7 +497,7 @@ export const Index = defineActor({
     },
     resolveStale: {
       description: "The alarm: asks the row shard about a reservation that has waited too long. It always comes: the index shard asks for it before it stores a reservation, and re-arms it on later calls if it was lost.",
-      sources: ["src/indexed/global-index.ts#GlobalIndex.onAlarm"],
+      sources: ["src/indexed/global-index.ts#GlobalIndex.layerAlarm"],
       after: "30 seconds",
       when: (s) => VALUES.some((v) => s.entries[v]?.pending != null && !s.resolving.has(v)),
       sends: [Resolve],

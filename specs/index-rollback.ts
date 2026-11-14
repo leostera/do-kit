@@ -139,7 +139,7 @@ export const RowShard = defineActor({
     },
     deliver: {
       description: "Delivers the next entry of byEmail in its outbox (the build, and later writes).",
-      sources: ["src/indexed/table.ts#IndexedTable.onAlarm"],
+      sources: ["src/indexed/table.ts#IndexedTable.layerAlarm"],
       when: (s) => s.outbox.length > 0 && s.recorded !== null,
       sends: [Entry],
       run(s, _, ctx) {

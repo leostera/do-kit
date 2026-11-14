@@ -181,6 +181,21 @@ async function leftAfterRestart(run: string, runners: number, results?: string):
   return left(run, runners, results);
 }
 
+/**
+ * What the run's objects hold once a wiped results store's refusal window is over: a wipe keeps a
+ * tombstone (and its alarm) for 5 s, so calls still in flight to the store are refused, then the
+ * alarm drops it.
+ */
+async function leftOnceSettled(run: string, runners: number): Promise<Left> {
+  const settled = (l: Left) => [l.coordinator, ...l.runners, ...l.results].every((r) => r.tables.length === 0 && r.keys === 0 && r.alarm === null);
+  let l = await left(run, runners);
+  for (let i = 0; i < 40 && !settled(l); i++) {
+    await Bun.sleep(250);
+    l = await left(run, runners);
+  }
+  return l;
+}
+
 function expectNothingLeft(l: Left) {
   expect(l.coordinator).toEqual(empty);
   for (const r of l.runners) expect(r).toEqual(empty);
@@ -215,17 +230,17 @@ test("a done run keeps only its status, then nothing: not a lost runner, nor its
   expect(kept.coordinator.alarm).not.toBeNull();
   for (const r of kept.runners) expect(r).toEqual(empty);
   await gone(run);
-  expectNothingLeft(await left(run, 2));
+  expectNothingLeft(await leftOnceSettled(run, 2));
   expectNothingLeft(await leftAfterRestart(run, 2));
 }, 90_000);
 
-test("a failed run leaves nothing once its status time is up", async () => {
+test("a failed run leaves nothing once its status time is up, and its wiped store's refusal window", async () => {
   const run = `boom-tidy-${unique()}`;
   const shape: Shape = { trees: 4, size: 3, chainy: 0, joins: 0, seed: 1, boom: true };
   await post("/workgraph", { op: "start", run, shape, runners: 2, chunkMs: 1_000, tickMs: 300, keepStatusMs: 500 });
   expect((await finished(run)).state).toBe("failed");
   await gone(run);
-  expectNothingLeft(await left(run, 2));
+  expectNothingLeft(await leftOnceSettled(run, 2));
 }, 60_000);
 
 test("delete cancels a run partway, runners evicted mid-chunk included, and leaves nothing", async () => {
