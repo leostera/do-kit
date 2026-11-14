@@ -1078,7 +1078,24 @@ class CounterBase extends ShardedObject<Env, number> {
   }
 
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, number>> {
-    return this.env.COUNTERS as never;
+    // Counted: how many stubs this shard makes for others of its object.
+    this.countedNodes ??= new Proxy(this.env.COUNTERS, {
+      get: (target, prop, receiver) => {
+        if (prop === "get") return (...args: unknown[]) => {
+          this.stubsMade++;
+          return (target.get as (...a: unknown[]) => unknown).apply(target, args);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    return this.countedNodes as never;
+  }
+  private countedNodes: DurableObjectNamespace | null = null;
+  private stubsMade = 0;
+  /** Stubs this instance made for other shards of its object (namespace.get calls). */
+  async stubCount(): Promise<number> {
+    return this.stubsMade;
   }
 
   /**

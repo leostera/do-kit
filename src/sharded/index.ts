@@ -1336,13 +1336,23 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return { applied: m.applied ? await m.applied(h.keys, result) : result };
   }
 
-  /** A client of this sharded object, from a shard: for recovery, and for the calls a primary coordinates. */
+  /**
+   * A client of this sharded object, from a shard: for recovery, and for the calls a primary
+   * coordinates. Kept for the instance's life, with its map and stubs (an object may keep its
+   * stubs); made again only when the callers' stub options change.
+   */
   private atomicClient(): ShardedClient<ShardedObject<Env, V>> {
-    return sharded(this.nodes() as DurableObjectNamespace<ShardedObject<Env, V>>, this.objectName(), {
+    // By value: the options come over RPC, a new object every call.
+    const options = JSON.stringify(this.callerStubOptions);
+    if (this.atomicClientFor?.options === options) return this.atomicClientFor.client;
+    const client = sharded(this.nodes() as DurableObjectNamespace<ShardedObject<Env, V>>, this.objectName(), {
       ...(this.routesByKey() ? {} : { routeOf: (key: string) => this.routeOf(key) }),
       ...(this.callerStubOptions ? { stubOptions: this.callerStubOptions } : {}),
     });
+    this.atomicClientFor = { options, client };
+    return client;
   }
+  private atomicClientFor: { options: string; client: ShardedClient<ShardedObject<Env, V>> } | null = null;
 
   /** Holds past their deadline: asks each one's primary for the outcome, and resolves it. */
   private recovering: Promise<void> | null = null;

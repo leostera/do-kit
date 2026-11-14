@@ -4,7 +4,9 @@
 // numbers honest, and the alarm rules written down.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadClient } from "./fake-tree.ts";
 import { call, describe, post, useWorker } from "./harness.ts";
 
@@ -173,6 +175,23 @@ test("bench/compare.ts passes a result file against itself", () => {
   expect(existsSync("bench/compare.ts")).toBe(true);
   const file = `bench/results/${readdirSync("bench/results").filter((f) => f.endsWith(".json")).sort().at(-1)}`;
   expect(spawnSync("bun", ["bench/compare.ts", file, file]).status).toBe(0);
+});
+
+test("bench/compare.ts fails when a measured number moved more than 2%, or a point went missing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "compare-"));
+  const point = { target: "table", operation: "put", concurrency: 64, throughput: 1_000, p99Ms: 50 };
+  const write = (name: string, points: object[]) => {
+    const file = join(dir, name);
+    writeFileSync(file, JSON.stringify({ points }));
+    return file;
+  };
+  const before = write("before.json", [point, { ...point, concurrency: 128 }]);
+  const run = (after: string) => spawnSync("bun", ["bench/compare.ts", before, after]).status;
+  expect(run(write("same.json", [point, { ...point, concurrency: 128 }]))).toBe(0);
+  expect(run(write("within.json", [{ ...point, throughput: 1_015 }, { ...point, concurrency: 128 }]))).toBe(0);
+  expect(run(write("slower.json", [{ ...point, throughput: 970 }, { ...point, concurrency: 128 }]))).toBe(1);
+  expect(run(write("tail.json", [{ ...point, p99Ms: 52 }, { ...point, concurrency: 128 }]))).toBe(1);
+  expect(run(write("missing.json", [point]))).toBe(1);
 });
 
 test("the docs' benchmark tables are generated from results and current", () => {

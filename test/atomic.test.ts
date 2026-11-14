@@ -393,3 +393,16 @@ test("many calls over the same keys in three shards all commit, and keep the tot
   await Promise.all(rounds);
   expect(await call("presplit", name, "get", keys)).toEqual([1000, 1000, 1000]);
 }, 120_000);
+
+test("a primary keeps its client and stubs across the calls it coordinates", async () => {
+  const name = `atomic-stubs-${unique()}`;
+  const { left, right } = keysByHalf(1);
+  const [a, b] = [left[0]!, right[0]!];
+  await twoShards(name, { [a]: 100, [b]: 5 });
+  const stubs = async () => (await Promise.all(["0", "1"].map((bits) => post<number>("/object", { cls: "counters", name, bits, method: "stubCount", args: [] })))).reduce((x, y) => x + y, 0);
+  expect((await atomically(name, [a, b], [-1, 1])).committed).toBe(true);
+  const afterFirst = await stubs();
+  for (let i = 0; i < 3; i++) expect((await atomically(name, [a, b], [-1, 1])).committed).toBe(true);
+  // A new client a call would make a stub of the other shard again, every call.
+  expect(await stubs()).toBe(afterFirst);
+}, 30_000);
