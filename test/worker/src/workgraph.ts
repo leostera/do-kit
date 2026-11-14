@@ -103,6 +103,8 @@ export class GraphRunners extends WorkGraphRunner<GraphEnv> {
   /** "nostart": the start's own call never reaches the runners; only the coordinator's alarm does. */
   override async graphRun(run: string, index: number, results: string, ensure = false): Promise<void> {
     if (run.includes("nostart") && !ensure) throw new Error("test: the start did not reach this runner");
+    // "idle": the runner never starts; the test calls graphNext itself, as the runners it names.
+    if (run.includes("idle")) return;
     return super.graphRun(run, index, results, ensure);
   }
   /** "strand": after its first alarm, this runner's alarm is stranded (getAlarm answers a past time that never fires). */
@@ -151,7 +153,10 @@ export class GraphResults extends WorkGraphResults<GraphEnv> {
 const RESULT_SHARDS = ["", "01", "10", "11"];
 
 export interface GraphRequest {
-  op: "start" | "status" | "results" | "delete" | "storage" | "restart" | "ops" | "dropCoordinatorAlarm";
+  op: "start" | "status" | "results" | "delete" | "storage" | "restart" | "ops" | "dropCoordinatorAlarm" | "next";
+  /** For "next": the runner that calls, and what it reports. */
+  runner?: number;
+  finished?: unknown;
   run: string;
   /** A shared results store; without it, the run's own. */
   results?: string;
@@ -168,6 +173,7 @@ export interface GraphRequest {
   maxLeases?: number;
   tickMs?: number;
   wakeAfterMs?: number;
+  maxAttempts?: number;
 }
 
 export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unknown> {
@@ -183,6 +189,11 @@ export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unk
     ];
     await Promise.allSettled(stubs.map((stub) => stub.restart()));
     return null;
+  }
+  if (body.op === "next") {
+    const answer = await env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).graphNext(body.runner ?? 0, (body.finished ?? null) as never);
+    // The body is bytes: only whether there is one.
+    return { ...answer, ...("body" in answer ? { body: answer.body.byteLength } : {}) };
   }
   if (body.op === "dropCoordinatorAlarm") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).dropAlarm().then(() => null);
   if (body.op === "ops") return Promise.all(Array.from({ length: body.runners ?? 4 }, (_, i) => env.GRAPH_RUNNERS.get(env.GRAPH_RUNNERS.idFromName(runnerName(body.run, i))).opLog()));
@@ -201,6 +212,6 @@ export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unk
     return Object.fromEntries(keys.map((k, i) => [k, values[i] ?? null]));
   }
   await run.submit(plan);
-  const status = await run.start({ runners: body.runners ?? 4, ...(body.results ? { results: body.results } : {}), ...(body.deadlineMs ? { deadlineMs: body.deadlineMs } : {}), ...(body.keepStatusMs !== undefined ? { keepStatusMs: body.keepStatusMs } : {}), ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}), ...(body.maxLeases ? { maxLeases: body.maxLeases } : {}), ...(body.tickMs ? { tickMs: body.tickMs } : {}), ...(body.wakeAfterMs ? { wakeAfterMs: body.wakeAfterMs } : {}) });
+  const status = await run.start({ runners: body.runners ?? 4, ...(body.results ? { results: body.results } : {}), ...(body.deadlineMs ? { deadlineMs: body.deadlineMs } : {}), ...(body.keepStatusMs !== undefined ? { keepStatusMs: body.keepStatusMs } : {}), ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}), ...(body.maxLeases ? { maxLeases: body.maxLeases } : {}), ...(body.tickMs ? { tickMs: body.tickMs } : {}), ...(body.wakeAfterMs ? { wakeAfterMs: body.wakeAfterMs } : {}), ...(body.maxAttempts ? { maxAttempts: body.maxAttempts } : {}) });
   return { chunks: plan.chunks.length, work: plan.work, span: plan.span, units: g.units.length, bodyBytes: plan.chunks.map((c) => encodeBody(c).byteLength), status };
 }
