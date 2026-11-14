@@ -97,6 +97,30 @@ export class OutcomeUnknown extends Error {
 }
 
 /** A shard got to a call past its deadline, and refused it: nothing was applied there. */
+/**
+ * A shard refused a write that would grow its database past `refuseAtBytes`: nothing was applied.
+ * Deletes, and writes that change rows in place, are still served. The shard splits by size well
+ * before its cap; this is what a shard that cannot split (its rows share one route, or it is at
+ * maxDepth) answers once full. Not retried.
+ */
+export class ShardFull extends Error {
+  constructor(
+    readonly shard: string,
+    readonly bytes: number,
+    readonly cap: number,
+  ) {
+    super(`shard ${JSON.stringify(shard)} is full: ${bytes} bytes, at its cap of ${cap} (refuseAtBytes)`);
+    this.name = "ShardFull";
+  }
+}
+
+/** A shard's answer that is none of the expected ones: ShardFull, or UnknownAnswer. */
+function unexpected(bits: string, answer: unknown): Error {
+  const a = answer as { full?: unknown; bytes?: number; cap?: number } | null;
+  if (a && typeof a === "object" && "full" in a) return new ShardFull(bits, a.bytes ?? 0, a.cap ?? 0);
+  return new UnknownAnswer(bits, answer);
+}
+
 export class DeadlineExpired extends Error {
   constructor(
     readonly bits: string,
@@ -705,7 +729,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
             if (answer.until !== undefined) held = true;
             backoff.extend(answer.until);
             retry.push(...positions);
-          } else throw new UnknownAnswer(bits, answer);
+          } else throw unexpected(bits, answer);
         }),
       );
       [...groups.values()].forEach((positions, g) => {
@@ -773,7 +797,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           backoff.extend(answer.until);
           await backoff.next();
           await visit(bits, depth, backoff);
-        } else throw new UnknownAnswer(bits, answer);
+        } else throw unexpected(bits, answer);
       };
       await visit("", 0);
       if (!stale) return out;
@@ -806,7 +830,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       } else if ("notReady" in answer) {
         backoff.extend(answer.until);
         await backoff.next();
-      } else throw new UnknownAnswer(bits, answer);
+      } else throw unexpected(bits, answer);
     }
   }
 

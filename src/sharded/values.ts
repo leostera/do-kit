@@ -58,3 +58,17 @@ function checkJson(value: unknown, path: string, seen: Set<object>): void {
       throw new TypeError(`${path}: ${typeof value === "undefined" ? "undefined" : `a ${typeof value}`} is not JSON`);
   }
 }
+
+/** Code point order: the order of UTF-8 bytes, which is how SQLite compares text. */
+export function compareText(a: string, b: string): number {
+  if (a === b) return 0;
+  const ia = a[Symbol.iterator]();
+  const ib = b[Symbol.iterator]();
+  for (;;) {
+    const ca = ia.next();
+    const cb = ib.next();
+    if (ca.done || cb.done) return ca.done ? (cb.done ? 0 : -1) : 1;
+    const d = ca.value.codePointAt(0)! - cb.value.codePointAt(0)!;
+    if (d !== 0) return d;
+  }
+}

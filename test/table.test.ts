@@ -145,8 +145,11 @@ test("listings match a reference sort, before, across and after splits", async (
     expect(await split(name, "")).toBe(true);
   };
   expect(await walk(name, QUERIES[1]!, splitOnce)).toEqual(expected(rows, QUERIES[1]!));
-  // Cleanup is held back: both shards store every row, and each must be listed once.
-  expect(await op<number[]>(name, "scan", "storedRows")).toEqual([rows.length, rows.length]);
+  // Cleanup is held back: the parent stores every row (a logical copy is sent its half only, a
+  // snapshot every row), and each must be listed once.
+  const [left, right] = await op<number[]>(name, "scan", "storedRows");
+  expect(left).toBe(rows.length);
+  expect(right!).toBeLessThanOrEqual(rows.length);
   for (const query of QUERIES) expect(await walk(name, query)).toEqual(expected(rows, query));
   expect(await op(name, "count")).toBe(rows.length);
 

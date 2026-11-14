@@ -18,3 +18,4 @@ that capability belongs in it rather than in a layer above, or in the app.
 | [RFD0008](RFD0008-atomic-calls-across-shards.md) | Atomic calls across shards | Implemented |
 | [RFD0009](RFD0009-walks-in-shard-order.md) | Walks in shard order | Implemented |
 | [RFD0010](RFD0010-table-commands.md) | Table commands: conditional updates inside the shard | Implemented |
+| [RFD0011](RFD0011-size-splits.md) | Size splits: shards that split before they get big, and a cap they never pass | Implemented |

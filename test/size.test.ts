@@ -28,7 +28,8 @@ async function putTexts(name: string, count: number, bytes: number, from = 0): P
 test("a quiet shard splits once its database passes splitAtBytes", async () => {
   const name = `size-split-${unique()}`;
   await call("counters", name, "get", ["a"]);
-  await object("counters", name, "", "setPolicy", { splitAtBytes: 256 * KIB });
+  // The trigger, not the cap: the fill outruns the splits, so the cap is set out of its way.
+  await object("counters", name, "", "setPolicy", { splitAtBytes: 256 * KIB, refuseAtBytes: 64 * 1024 * KIB });
   const keys = await putTexts(name, 600, 1_000);
   for (let i = 0; i < 50 && (await leaves("counters", name)).length < 2; i++) await Bun.sleep(100);
   expect((await leaves("counters", name)).length).toBeGreaterThanOrEqual(2);
@@ -39,7 +40,7 @@ test("a quiet shard splits once its database passes splitAtBytes", async () => {
 test("lowering splitAtBytes on a live shard splits it on its next write", async () => {
   const name = `size-lowered-${unique()}`;
   await putTexts(name, 200, 1_000);
-  await object("counters", name, "", "setPolicy", { splitAtBytes: 64 * KIB });
+  await object("counters", name, "", "setPolicy", { splitAtBytes: 64 * KIB, refuseAtBytes: 64 * 1024 * KIB });
   await putTexts(name, 1, 100, 1_000);
   for (let i = 0; i < 50 && (await leaves("counters", name)).length < 2; i++) await Bun.sleep(100);
   expect((await leaves("counters", name)).length).toBeGreaterThanOrEqual(2);
@@ -59,11 +60,37 @@ test("a shard past refuseAtBytes refuses writes that grow it, and still deletes"
   expect(shrink.threw).toBeUndefined();
 }, 120_000);
 
+test("a shard past both caps at once refuses the write, and the refusal splits it", async () => {
+  const name = `size-refused-split-${unique()}`;
+  const keys = await putTexts(name, 200, 1_000);
+  // Both lowered under its size on a live shard (a deploy): the next write is refused, not applied.
+  await object("counters", name, "", "setPolicy", { splitAtBytes: 64 * KIB });
+  const refused = await post<{ name?: string | null }>("/callSettled", { cls: "counters", name, method: "putText", keys: ["more"], payloads: [text(1_000, 9)] });
+  expect(refused.name).toBe("ShardFull");
+  // ...and that refusal started the split no write could start.
+  for (let i = 0; i < 50 && (await leaves("counters", name)).length < 2; i++) await Bun.sleep(100);
+  expect((await leaves("counters", name)).length).toBeGreaterThanOrEqual(2);
+  const values = await call<(string | null)[]>("counters", name, "get", keys);
+  expect(values.every((v, i) => v === text(1_000, i))).toBe(true);
+}, 120_000);
+
+test("refuseAtBytes defaults to 1.1 times splitAtBytes", async () => {
+  const name = `size-default-cap-${unique()}`;
+  await call("counters", name, "get", ["a"]);
+  // Splitting can't help (maxDepth 0): at 1.1 × 128 KiB the shard refuses, well before the platform.
+  await object("counters", name, "", "setPolicy", { maxDepth: 0, splitAtBytes: 128 * KIB });
+  const filled = await putTexts(name, 300, 1_000).then(() => "all of it", (e: Error) => e.message);
+  expect(filled).toContain("ShardFull");
+  const size = await object<number>("counters", name, "", "databaseSize");
+  expect(size).toBeLessThanOrEqual(1.1 * 128 * KIB);
+}, 120_000);
+
 test("a shard whose rows all share one route stays one shard, however big it gets", async () => {
   const name = `size-floor-${unique()}`;
   const doc = (i: number) => ({ name: `refs/heads/a/${i}`, id: `${i}`, createdAt: i, lastEditAt: null, deleted: false, meta: text(500, i) });
   await post("/table", { cls: "routedTable", name, op: "put", args: [doc(0)] });
-  await object("routedTable", name, "", "setPolicy", { splitAtBytes: 64 * KIB });
+  // The floor, not the cap: the route's rows grow past both.
+  await object("routedTable", name, "", "setPolicy", { splitAtBytes: 64 * KIB, refuseAtBytes: 64 * 1024 * KIB });
   for (let i = 1; i < 300; i++) await post("/table", { cls: "routedTable", name, op: "put", args: [doc(i)] });
   await Bun.sleep(2_000);
   expect((await leaves("routedTable", name)).length).toBe(1);
@@ -187,3 +214,27 @@ test("the README says what a shard holds as do-kit counts it, and that a shard i
     restore: /point-in-time/i.test(readme),
   }).toEqual({ noTenGbPerShard: true, splitAtBytes: true, restore: true });
 });
+
+test("a shard of the first layout reads its rows where they are, writes move them, and its alarm moves the rest and drops the old table", async () => {
+  const name = `size-layout-${unique()}`;
+  await call("counters", name, "get", ["a"]);
+  // The first release's rows table, WITHOUT ROWID, holding 600 rows.
+  const keys = Array.from({ length: 600 }, (_, i) => `k${i}`);
+  const rows = keys.map((k, i) => ({ query: "INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?)", bindings: [k, keyHash(k), JSON.stringify(i)] }));
+  await object("counters", name, "", "sqlRun", [
+    { query: "DROP TABLE sharded_rows" },
+    { query: "CREATE TABLE sharded_rows (key TEXT PRIMARY KEY, hash TEXT NOT NULL, value TEXT NOT NULL) WITHOUT ROWID" },
+    { query: "CREATE INDEX sharded_rows_by_hash ON sharded_rows (hash, key)" },
+    ...rows,
+  ]);
+  await post("/evict", { cls: "counters", name, bits: "" });
+  expect(await call<(number | null)[]>("counters", name, "get", keys)).toEqual(keys.map((_, i) => i));
+  await call("counters", name, "add", ["k1", "new"], [10, 1]);
+  await call("counters", name, "remove", ["k2"], null);
+  const tableNames = async () => (await object<{ tables: { name: string; rows: number }[] }>("counters", name, "", "storage")).tables;
+  for (let i = 0; i < 100 && (await tableNames()).some((t) => t.name === "sharded_rows_legacy"); i++) await Bun.sleep(100);
+  expect((await tableNames()).some((t) => t.name === "sharded_rows_legacy")).toBe(false);
+  expect((await tableNames()).find((t) => t.name === "sharded_rows")?.rows).toBe(600);
+  const expected = keys.map((_, i) => (i === 1 ? 11 : i === 2 ? null : i));
+  expect(await call<(number | null)[]>("counters", name, "get", [...keys, "new"])).toEqual([...expected, 1]);
+}, 60_000);

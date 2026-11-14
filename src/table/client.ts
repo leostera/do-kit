@@ -185,6 +185,30 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
   }
 
   /**
+   * Recounts every shard's row counts from its rows, and repairs those that drifted: one shard at
+   * a time, `budget` rows a call. For an operator after a subclass wrote the table directly, or a
+   * migration went wrong; `count()` reads the counts it repairs. Returns how many buckets were set.
+   */
+  async verifyCounts(budget = 10_000): Promise<{ shards: number; repaired: number }> {
+    const queue: { leaf: string; after: string | null }[] = (await this.client.knownLeaves()).map((leaf) => ({ leaf, after: null }));
+    let shards = 0;
+    let repaired = 0;
+    while (queue.length > 0) {
+      const at = queue.shift()!;
+      const answer = await this.client.scanShard(at.leaf, "tableVerifyCounts", at.after, budget);
+      // Split since: its shards, from the start (a recount is idempotent).
+      if ("split" in answer) queue.unshift(...answer.split.map((leaf) => ({ leaf, after: null })));
+      else if ("ok" in answer) {
+        const report = answer.ok as { repaired: number; next: string | null };
+        repaired += report.repaired;
+        if (report.next === null) shards++;
+        else queue.unshift({ leaf: at.leaf, after: report.next });
+      } else shards++;
+    }
+    return { shards, repaired };
+  }
+
+  /**
    * Rows of the whole table per value of a count group's column (values with no rows left out),
    * kept with every write: as exact as `count()`.
    */

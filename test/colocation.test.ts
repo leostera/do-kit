@@ -148,7 +148,10 @@ test("a routed table lists and counts every row once through a split, before and
   // Both shards still store every row; each lists and counts only the routes it owns.
   const listed = async () => (await op<{ row: { name: string } }[]>("all", {})).map((r) => r.row.name);
   for (let i = 0; i < 100 && (await describe("routedTable", name, "1")).state !== "shard"; i++) await Bun.sleep(100);
-  expect(await op<number[]>("scan", "storedRows")).toEqual([names.length, names.length]);
+  // The parent stores every row until cleanup; a logical copy is sent its own half only, a snapshot all.
+  const [left, right] = await op<number[]>("scan", "storedRows");
+  expect(left).toBe(names.length);
+  expect(right!).toBeLessThanOrEqual(names.length);
   expect(await listed()).toEqual([...names].sort());
   expect(await op("count")).toBe(names.length);
   await op("scan", "pauseCleanup", false);

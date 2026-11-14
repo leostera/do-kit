@@ -105,6 +105,10 @@ export class Docs extends ShardedTable<Env, Doc> {
     this.splitPolicy = { ...this.splitPolicy, ...change } as SplitPolicy;
   }
   /** This object's database size, as the runtime counts it. */
+  /** This object's tables and their rows, its keys and its alarm. */
+  async storage(): Promise<StorageReport> {
+    return storageReport(this.ctx.storage);
+  }
   async databaseSize(): Promise<number> {
     return this.ctx.storage.sql.databaseSize;
   }
@@ -282,6 +286,9 @@ export interface StatementCost {
  * Logs every statement an object runs (the last 20,000), with its cursor, so a test can ask what
  * each cost and how SQLite planned it. Installed first, under any fault a test adds later.
  */
+/** Marks a fixture's own statement: StatementLog leaves it out. */
+const FIXTURE_SQL = "/* fixture */ ";
+
 class StatementLog {
   private entries: { query: string; bindings: unknown[]; cursor: { rowsRead: number; rowsWritten: number } }[] = [];
   private readonly exec: SqlStorage["exec"];
@@ -291,6 +298,8 @@ class StatementLog {
     this.exec = exec;
     sql.exec = ((query: string, ...bindings: unknown[]) => {
       const cursor = exec(query, ...bindings);
+      // The fixtures' own bookkeeping (marked so) is not the library's cost.
+      if (query.startsWith(FIXTURE_SQL)) return cursor;
       if (this.entries.length >= 20_000) this.entries.shift();
       this.entries.push({ query, bindings, cursor });
       return cursor;
@@ -890,7 +899,7 @@ class CounterBase extends ShardedObject<Env, number> {
   // Wrapped on the instance (the class may not override alarm): what each run deleted.
   private readonly countsAlarmDeletes = (() => {
     const alarm = this.alarm.bind(this);
-    const stored = () => (this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'sharded_rows'").one().n ? this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows").one().n : 0);
+    const stored = () => (this.ctx.storage.sql.exec<{ n: number }>(`${FIXTURE_SQL}SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'sharded_rows'`).one().n ? this.ctx.storage.sql.exec<{ n: number }>(`${FIXTURE_SQL}SELECT COUNT(*) AS n FROM sharded_rows`).one().n : 0);
     this.alarm = async (...args: Parameters<typeof alarm>) => {
       const before = stored();
       try {

@@ -19,7 +19,7 @@ One Durable Object can't keep up. With what?
 │       ├─ they can live in one shard                  → routeOf: one transaction, as before
 │       └─ they can't                                  → atomically: all or nothing across shards
 │
-├─ Data: more than 10 GB                               → ShardedObject: 10 GB per shard
+├─ Data: more than one object should hold            → ShardedObject: a shard splits at 1 GiB
 │
 ├─ Reads of one key (a flag, a config, a ref)         → Leased reads: readers cache it, the source
 │                                                         still sees about one read per isolate a second
@@ -38,7 +38,7 @@ Measured on Cloudflare's network on 2026-11-12. Each point is 10 s of calls from
 | Write 1 KiB values to many keys, 2,048 in flight | 2,483 writes/s, p99 1,493 ms | **9,295 writes/s, p99 816 ms** (16 shards) | `ShardedObject` |
 | Read many keys, 2,048 in flight | 1,778 reads/s, p99 1,943 ms | **7,024 reads/s, p99 728 ms** | `ShardedObject` |
 | Ten hot config objects, 95% reads, 2,048 in flight | 1,890 calls/s, **41,713 failed** in 10 s | **4,780 calls/s, none failed** (16 shards) | `ShardedObject` |
-| Store more than 10 GB | not possible | 10 GB per shard: 160 GB on 16 | `ShardedObject` |
+| Store more than one object holds | not possible: one object stops at 10 GB | a shard splits at 1 GiB of database (`splitAtBytes`), up to 2^maxDepth shards | `ShardedObject` |
 | Write a table row with two indexes, 1,024 in flight | 1,604 writes/s, 9,089 failed | **8,117 writes/s, none failed** (64 shards) | `ShardedTable` |
 | Get a table row by key, 1,024 in flight | 2,136 reads/s, 1,327 failed | **8,846 reads/s, none failed** (16 shards) | `ShardedTable` |
 | List one team's rows, newest first, 1,024 in flight | 340 pages/s, 2,931 failed | **9,778 pages/s, p50 67 ms** (16 + 16 shards) | `IndexedTable` |
@@ -84,7 +84,7 @@ At 2,048 writes in flight, one Durable Object is past its limit: it completes 2,
 | **Reads**, 2,048 in flight | 1,778 reads/s, median 895 ms | **7,024 reads/s, median 112 ms** |
 | **Data written**, 2,048 in flight | 2.4 MiB/s | **9.1 MiB/s** |
 | **p99 latency**, 2,048 writes in flight | 1,493 ms | **816 ms** |
-| **Storage ceiling** | 10 GB | **160 GB** (10 GB per shard) |
+| **Storage** | one object, up to 10 GB | **a shard splits at 1 GiB**, up to 2^maxDepth shards |
 
 ![Write latency p99 vs concurrency](docs/bench/latency-p99.svg)
 
@@ -490,10 +490,22 @@ protected override splitPolicy: SplitPolicy = {
   copy: "auto",        // "native" snapshots, "logical" row copy, or auto-detect
   splitTimeoutMs: 60_000,
   holdWaitMs: 2_000,   // a write to the half being copied waits this long, then the client backs off and retries until the split ends
+  splitAtBytes: 1024 ** 3,     // a shard splits at this much database, whatever its load
+  refuseAtBytes: 1.1 * 1024 ** 3, // default 1.1 × splitAtBytes: a write that adds a row or grows the database is refused here (ShardFull)
 };
 ```
 
 The default threshold is about half of what one object handles on the edge, which leaves headroom for real work and for the split itself. Tune it with your own workload.
+
+### Splits by size
+
+- **What a shard holds, as do-kit counts it:** the bytes of its database, `ctx.storage.sql.databaseSize`, which is what the platform bills and caps. A 1 KiB value takes about 1.4 KiB there, with its key, hash and index entries; a table row takes its columns plus an entry in each index.
+- **The trigger:** a shard at `splitAtBytes` (1 GiB by default) splits, checked after every write and by its alarm, until a split takes. A split's copy and cleanup take seconds at that size; at 10 GB they would take minutes.
+- **The floor:** a split that would move none of a shard's rows, or all of them, is not started. Rows that share one route (`routeOf`) never part, so such a shard grows past `splitAtBytes`.
+- **The cap:** at `refuseAtBytes` (1.1 × `splitAtBytes` by default, so about 1.1 GiB) a write that adds a row or grows the database is refused with `ShardFull`, and nothing is applied. Deletes, writes that fit in place, and atomic outcomes already decided still go through, so a full shard can drain. Once refused, it stays full until deletes take it 5% under the size it was refused at. A refused write also runs the split decision, so a shard at its cap splits if it can. A shard reaches its cap when it can't split: its rows share one route, or it is at `maxDepth`. A table whose routes hold more than about a gigabyte raises `refuseAtBytes`, up to under the platform's 10 GB.
+- **Splits given up** (a copy that fails or times out) leave nothing behind: the sibling's copy is deleted. Automatic splits then wait twice the split timeout, doubling with each one given up in a row, up to 30 minutes. An operator's `shardedSplit` does not wait.
+- **The space a split frees:** rows lie on disk in the order of their key's hash, and a table's index keys are copied into dense new tables after a split, so each half ends near half the size. Rows written by an earlier release keep their place until rewritten.
+- **Restores:** point-in-time recovery of a Durable Object restores one object. A shard is never restored on its own: its tree (the other shards, and the splits since) would no longer match it. do-kit has no restore of a whole tree: keep backups of your own where you need them.
 
 ## Writing a subclass
 

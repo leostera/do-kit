@@ -494,7 +494,7 @@ test("a shard keeps a record of its splits, and counts what it answered", async 
   const root = await describe("m", name, "");
   expect(root.splits).toHaveLength(1);
   const [record] = root.splits;
-  expect(record).toMatchObject({ outcome: "split", copy: deployed ? "native" : "logical", rows: KEYS.length, rightRows: KEYS.filter((k) => firstBit(k) === 1).length, error: null });
+  expect(record).toMatchObject({ outcome: "split", copy: deployed ? "native" : "logical", rows: null, rightRows: null, error: null });
   expect(record!.ms).toBeGreaterThanOrEqual(500);
   // The slow hand-out is where the time went. Locally the copy is logical: the runtime refuses the
   // snapshot (its attempt is the snapshot step's time, a millisecond or so under load) and nothing is

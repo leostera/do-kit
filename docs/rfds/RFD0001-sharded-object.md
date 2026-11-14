@@ -36,7 +36,8 @@ completes 1,435 writes/s and refuses 26,816 calls in 10 s. The same object in 16
 ## Goals
 
 - Write the class as if it were one object: methods that read and update keys.
-- Split by load, without a shard count chosen up front, and optionally presplit an empty object.
+- Split by load, and by size (RFD0011), without a shard count chosen up front, and optionally
+  presplit an empty object.
 - Keep serving during a split: reads everywhere, and writes to the half that stays.
 - Never lose an acknowledged write, apply one twice, or let two objects serve one key.
 - Route with no directory: the object for a shard is computed from its prefix.
@@ -177,12 +178,13 @@ headroom for the split itself.
    shard gave away are invisible from the commit onward: every read filters by ownership.
 
 A split that has not finished after `splitTimeoutMs` (60 s) is abandoned. The held writes then go
-ahead on the original, and the copy is never activated. Each attempt has an epoch, and only the
+ahead on the original, the copy is never activated, and the sibling is told to delete it
+(RFD0011). Each attempt has an epoch, and only the
 attempt that made a copy can claim or activate it.
 
 `initialDepth` presplits an empty object on its first call. The root adopts every shard up to 6
 levels below it in one round of at most 63 calls. Each adopted shard goes deeper on its own first
-call. A non-empty object splits by load only.
+call. A non-empty object splits by load, and by size at `splitAtBytes` (RFD0011).
 
 ### Hooks and alarms
 

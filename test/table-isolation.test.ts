@@ -45,3 +45,20 @@ test("verifyCounts recounts a table's counts from its rows, and repairs those th
   expect(report.threw).toBeUndefined();
   expect(await post<number>("/table", { cls: "table", name, op: "count", args: [] })).toBe(50);
 }, 60_000);
+
+test("verifyCounts walks every shard a slice at a time, and repairs each drifted bucket", async () => {
+  const name = `verify-walk-${unique()}`;
+  // 15 routes of 20 rows: a route's rows share its hash, so a bucket holds 20 rows, more than a slice reads.
+  const rows = Array.from({ length: 300 }, (_, i) => ({ row: doc(`refs/r${i % 15}/x/${i}`, i) }));
+  await post("/table", { cls: "routedTable", name, op: "putMany", args: [rows] });
+  expect(await post<boolean>("/split", { cls: "routedTable", name, bits: "" })).toBe(true);
+  // A bucket too high on one shard, one missing on the other (its row count deleted).
+  await post("/object", { cls: "routedTable", name, bits: "0", method: "sqlRun", args: [[{ query: "UPDATE sharded_table_counts SET n = n + 3 WHERE bucket = (SELECT MAX(bucket) FROM sharded_table_counts WHERE bucket < '8000')" }]] });
+  await post("/object", { cls: "routedTable", name, bits: "1", method: "sqlRun", args: [[{ query: "DELETE FROM sharded_table_counts WHERE bucket = (SELECT MIN(bucket) FROM sharded_table_counts WHERE bucket >= '8000')" }]] });
+  expect(await post<number>("/table", { cls: "routedTable", name, op: "count", args: [] })).not.toBe(300);
+  // 7 rows a call: a slice ends inside a bucket, and a bucket is read in several.
+  const report = await post<{ shards: number; repaired: number }>("/table", { cls: "routedTable", name, op: "verifyCounts", args: [7] });
+  expect(report).toEqual({ shards: 2, repaired: 2 });
+  expect(await post<number>("/table", { cls: "routedTable", name, op: "count", args: [] })).toBe(300);
+  expect(await post<{ shards: number; repaired: number }>("/table", { cls: "routedTable", name, op: "verifyCounts", args: [30] })).toEqual({ shards: 2, repaired: 0 });
+}, 60_000);

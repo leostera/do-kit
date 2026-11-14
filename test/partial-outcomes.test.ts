@@ -47,7 +47,7 @@ test("a table write of many rows over two shards, one of which fails, reports ea
   await post("/table", { cls: "flaky", name, op: "put", args: [rows[0]] });
   expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(true);
   const right = (key: string) => hashBit(keyHash(key), 0) === "1";
-  await post("/table", { cls: "flaky", name, op: "failStatementOnce", args: ["INSERT INTO sharded_table ", "1"] });
+  await post("/table", { cls: "flaky", name, op: "failStatementOnce", args: ["INTO sharded_table (_rowid_", "1"] });
   const fresh = rows.slice(1);
   const outcome = await post<Outcome>("/table", { cls: "flaky", name, op: "try:putMany", args: [fresh.map((row) => ({ row, ifVersion: 0 }))] });
   expect(outcome.threw).toBeDefined();

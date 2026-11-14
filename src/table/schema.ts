@@ -2,7 +2,7 @@
 // shards (SQLite) and the client that merges their pages (here): they must agree exactly.
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { isWellFormed, storedJson } from "../sharded/values.js";
+import { compareText, isWellFormed, storedJson } from "../sharded/values.js";
 
 /** How a column is stored: `boolean` as 0/1, `json` as text (not indexable). */
 export type ColumnType = "text" | "integer" | "real" | "boolean" | "json";
@@ -357,19 +357,7 @@ export function comparePositions(a: Position, b: Position, direction: "asc" | "d
   return direction === "asc" ? d : -d;
 }
 
-/** Code point order: the order of UTF-8 bytes, which is how SQLite compares text. */
-export function compareText(a: string, b: string): number {
-  if (a === b) return 0;
-  const ia = a[Symbol.iterator]();
-  const ib = b[Symbol.iterator]();
-  for (;;) {
-    const ca = ia.next();
-    const cb = ib.next();
-    if (ca.done || cb.done) return ca.done ? (cb.done ? 0 : -1) : 1;
-    const d = ca.value.codePointAt(0)! - cb.value.codePointAt(0)!;
-    if (d !== 0) return d;
-  }
-}
+export { compareText };
 
 /**
  * The index key of these values, as hex: byte order is the values' order. Null (0x00) sorts

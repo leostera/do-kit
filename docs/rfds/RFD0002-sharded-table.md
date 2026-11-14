@@ -208,6 +208,10 @@ in an order-preserving encoding, as hex.
 - A number is `01` and an order-preserving float64.
 - Text is `02`, its UTF-8 with `00` escaped as `00 FF`, then `00`.
 
+After a split, each key table is copied in key order into a dense one that takes its place, so
+the half given away frees its pages (RFD0011). Rows are stored at a rowid from their route hash,
+for the same reason.
+
 A page is one range seek in the key table (`_key > cursor`), and a lookup of each row by its
 primary key. A write changes an index's keys only if the row's key in it changed. Comparing the index columns one by one with null-aware `OR`s could
 not seek, and got slower as the table grew. A property test checks the encoding against SQLite's
@@ -230,6 +234,11 @@ order on random tuples.
   `counts`, from the shards' first-round pages: one call per shard for a page and its total.
 - **During a split.** The object's count is the sum over shards. It may count a row twice, or not
   at all, at the instant a split commits.
+- **Repairs.** Counts are kept by the library's writes only. A subclass that writes the table
+  directly, or a migration gone wrong, can make them drift. `client.verifyCounts(budget)` recounts
+  each shard's buckets from its rows, a slice of at most `budget` rows a call by the hash's index
+  (a bucket holding more, as a route's can, is counted whole), and sets each drifted bucket to
+  what its rows say. Group counts are not recounted.
 
 ### Invariants
 

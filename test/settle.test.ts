@@ -27,5 +27,9 @@ test("a split's cleanup of 2,000 rows runs in alarms of at most 250 rows each, a
   expect(nodes.reduce((n, s) => n + s.rows, 0)).toBe(2_000);
   const perAlarm = (await Promise.all(nodes.map((n) => post<number[]>("/object", { cls: "counters", name, bits: n.bits, method: "cleanupPerAlarm", args: [] })))).flat();
   expect(Math.max(...perAlarm)).toBeLessThanOrEqual(250);
-  expect(perAlarm.length).toBeGreaterThanOrEqual(8);
+  // The half given away, about 1,000 rows, in alarms of 250 (a logical copy is sent its half
+  // only, so it has nothing to delete; a snapshot has the other half to delete too).
+  const deleted = perAlarm.reduce((a, b) => a + b, 0);
+  expect(deleted).toBeGreaterThan(800);
+  expect(perAlarm.length).toBeGreaterThanOrEqual(Math.ceil(deleted / 250));
 }, 120_000);

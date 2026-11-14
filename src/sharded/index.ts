@@ -22,12 +22,12 @@ import { ATOMIC_OUTCOME_TTL_MS, olderTx, type AtomicAnswer, type AtomicMethod, t
 import { sharded, type ShardedClient } from "./client.js";
 import { hashBit, keyHash } from "./hash.js";
 import { pendingAlarm } from "./alarms.js";
-import { storedJson } from "./values.js";
+import { compareText, storedJson } from "./values.js";
 
 export { ATOMIC_HOLD_MS, ATOMIC_OUTCOME_TTL_MS, type AtomicMethod, type AtomicOutcome, type AtomicShardResult, type Prepared } from "./atomic.js";
 export { hashBit, keyHash } from "./hash.js";
 export { pendingAlarm, STRANDED_ALARM_MS } from "./alarms.js";
-export { RouteMismatch, SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
+export { RouteMismatch, ShardFull, SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 
 declare global {
   /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */
@@ -70,7 +70,25 @@ export interface SplitPolicy {
    * (which the runtime sheds as overloaded). Default 2 s.
    */
   readonly holdWaitMs?: number;
+  /**
+   * Bytes of database (`ctx.storage.sql.databaseSize`) at which a shard splits, whatever its load:
+   * checked after every write, and by the alarm. Default 1 GiB, where a split's copy and cleanup
+   * still take seconds.
+   */
+  readonly splitAtBytes?: number;
+  /**
+   * Bytes of database at which a write that grows it is refused (ShardFull), and one that does not
+   * (a delete, a change in place) is served: the platform refuses every write at its cap, deletes
+   * too, and a shard must still be able to drain. Default 1.1 × `splitAtBytes`: a shard that can't
+   * split (its rows share one route, or it is at maxDepth) stops growing just past where it would
+   * have split. Raise it for a table whose routes hold more.
+   */
+  readonly refuseAtBytes?: number;
 }
+
+export const DEFAULT_SPLIT_AT_BYTES = 1024 ** 3;
+/** The default `refuseAtBytes`, as a multiple of `splitAtBytes`. */
+export const REFUSE_MARGIN = 1.1;
 
 /**
  * Split at half of what one object takes: about 800 calls/s on the edge, so 400, sustained for
@@ -99,6 +117,8 @@ export function checkSplitPolicy(policy: SplitPolicy): SplitPolicy {
   // setTimeout fires at once for a delay past 2^31 - 1 ms (about 24.8 days).
   if (policy.splitTimeoutMs !== undefined && !(policy.splitTimeoutMs > 0 && policy.splitTimeoutMs <= MAX_TIMER_MS)) fail(`splitTimeoutMs must be a positive number of ms, at most ${MAX_TIMER_MS}`);
   if (policy.holdWaitMs !== undefined && !(policy.holdWaitMs >= 0 && policy.holdWaitMs <= MAX_TIMER_MS)) fail(`holdWaitMs must be from 0 to ${MAX_TIMER_MS} ms`);
+  if (policy.splitAtBytes !== undefined && !(Number.isSafeInteger(policy.splitAtBytes) && policy.splitAtBytes > 0)) fail("splitAtBytes must be a positive whole number of bytes");
+  if (policy.refuseAtBytes !== undefined && !(Number.isSafeInteger(policy.refuseAtBytes) && policy.refuseAtBytes > 0)) fail("refuseAtBytes must be a positive whole number of bytes");
   return policy;
 }
 
@@ -125,7 +145,9 @@ export type CallAnswer<R> =
   /** A scan of a presplit shard never called: it holds nothing, and was not made to answer. */
   | { readonly absent: string }
   /** The client routed `key` by another `routeOf` than this object's: nothing was called. */
-  | { readonly routeMismatch: { readonly key: string; readonly client: string; readonly object: string } };
+  | { readonly routeMismatch: { readonly key: string; readonly client: string; readonly object: string } }
+  /** The write would grow the shard past `refuseAtBytes`: refused, nothing applied. */
+  | { readonly full: string; readonly bytes: number; readonly cap: number };
 
 /** An object's state, for tests and operators. */
 export interface NodeDescription {
@@ -159,7 +181,7 @@ export interface NodeDescription {
 }
 
 /** Why a split ran. */
-export type SplitTrigger = "operator" | "load";
+export type SplitTrigger = "operator" | "load" | "size";
 
 /** One split attempt of a shard. */
 export interface SplitRecord {
@@ -168,13 +190,16 @@ export interface SplitRecord {
   readonly ms: number;
   /** "interrupted": the object restarted partway through (the copy is never activated). */
   readonly outcome: "split" | "abandoned" | "interrupted";
-  /** Why it ran: an operator's `shardedSplit`, or the call rate. */
+  /** Why it ran: an operator's `shardedSplit`, the call rate, or the database's size. */
   readonly trigger: SplitTrigger;
   /** How the right half was copied; null if abandoned before it was. */
   readonly copy: "native" | "logical" | null;
-  /** Rows this shard owned when it started, and of them the right half's (what was copied). */
-  readonly rows: number;
-  readonly rightRows: number;
+  /**
+   * Rows this shard owned when it started, and of them the right half's (what was copied); null
+   * where the layer keeps no count (counting would read every row): ShardedObject's own rows.
+   */
+  readonly rows: number | null;
+  readonly rightRows: number | null;
   /** Writes that waited on it; of them, the ones answered "not ready" after `holdWaitMs`. */
   readonly held: number;
   readonly notReady: number;
@@ -353,6 +378,15 @@ export class RouteChanged extends Error {
 const ROUTE_SAMPLE = 16;
 /** A call reached its write past its caller's deadline: refused, nothing applied. */
 class Expired extends Error {}
+/** A write would grow the database past `refuseAtBytes`: refused, nothing applied. */
+class Full extends Error {
+  constructor(
+    readonly bytes: number,
+    readonly cap: number,
+  ) {
+    super(`shard full: ${bytes} bytes, at its cap of ${cap}`);
+  }
+}
 /** The routed call being served: its caller's deadline, checked just before its transaction. */
 const callContext = new AsyncLocalStorage<{ readonly deadline: number | null; readonly cursors?: SqlStorageCursor<Record<string, SqlStorageValue>>[] }>();
 /** Calls whose wait and time a shard keeps, for describe's percentiles. */
@@ -401,11 +435,44 @@ const WARM_WAIT_MS = 5_000;
 /** How often a busy shard logs its load (`shard-load`). */
 const LOAD_LOG_S = 10;
 
+/**
+ * Rows live in a rowid table: in a WITHOUT ROWID one a row over about a kilobyte spills to a page
+ * of its own, so a 1 KB value took 4.7 KB of disk; here it takes 1.4 KB. The first layout's table
+ * is renamed at wake (LEGACY_ROWS), read until empty, and moved over by the alarm.
+ */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS sharded_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS sharded_rows (key TEXT PRIMARY KEY, hash TEXT NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS sharded_rows_by_hash ON sharded_rows (hash, key);
+CREATE TABLE IF NOT EXISTS sharded_rows (key TEXT PRIMARY KEY, hash TEXT NOT NULL, value TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS sharded_rows_hash ON sharded_rows (hash, key);
 `;
+/** The rows of the first layout (WITHOUT ROWID), being moved to sharded_rows. */
+const LEGACY_ROWS = "sharded_rows_legacy";
+/** Rows of the first layout the alarm moves a turn. */
+const LEGACY_MOVE_ROWS = 250;
+/** A shard refused at its cap takes writes that grow it again under this share of the size it was refused at. */
+const FULL_UNTIL = 0.95;
+/** The longest automatic splits wait after attempts given up, one after another. */
+const MAX_SPLIT_BACKOFF_MS = 30 * 60_000;
+
+/** Rowids of one 32-bit route-hash prefix: the slot a key's row goes in (see clusteredRowid). */
+const ROWID_SLOT = 2 ** 21;
+
+/**
+ * The rowid that lays a row out on disk in the order of its route hash: the hash's first 32 bits,
+ * then 21 bits of the key's own hash (2^53 in all, exact as a number). The rows a split gives away
+ * then lie together, and deleting them frees whole pages: rows in the order they were written
+ * leave every page half full, and the database no smaller.
+ */
+function clusteredRowid(routeHash: string, key: string): number {
+  return Number.parseInt(routeHash.slice(0, 8), 16) * ROWID_SLOT + (Number.parseInt(keyHash(key).slice(8, 14), 16) % ROWID_SLOT);
+}
+
+/** What a value takes on the heap: two bytes a character of text, its length for bytes, 8 otherwise. */
+function heapBytes(value: SqlStorageValue): number {
+  if (typeof value === "string") return 2 * value.length;
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  return 8;
+}
 
 /** Bytes of rows per logical-copy call, well under the RPC limit; a call always carries one row. */
 const COPY_BATCH_BYTES = 4 * 1024 * 1024;
@@ -449,7 +516,9 @@ interface Meta {
   /** A sibling to activate (the alarm retries until it confirms). */
   activate: { bits: string; epoch: number; at?: number } | null;
   /** The split in progress, as its record would start: kept so a restart records it interrupted. */
-  splitStart?: { at: number; trigger: SplitTrigger; rows: number; rightRows: number } | null;
+  splitStart?: { at: number; trigger: SplitTrigger; rows: number | null; rightRows: number | null } | null;
+  /** The copy of a split given up, which the alarm tells the sibling to delete until it has. */
+  discard?: { bits: string; epoch: number } | null;
   /** Rows the cleanup since the last split deleted. */
   cleanedRows?: number;
   /** Hash ranges this object no longer owns, whose rows the alarm deletes. */
@@ -556,6 +625,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private meta: Meta | null;
   private readonly calls = new Map<number, number>();
   private quietUntil = Date.now();
+  /** When this instance's last split attempt ended, or the floor stopped one: size splits wait a window after. */
+  private splitEndedAt = 0;
   /** The split in progress here: writes to `right` wait for `released`. */
   private hold: Hold | null = null;
   /** A split is starting its new object, before it holds anything. */
@@ -590,7 +661,16 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       sql[MEASURED] = true;
     }
     // An object only visited (a lazy shard asked whether it exists, a wiped one) stays empty.
-    this.schemaReady = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sharded_meta'").one().n > 0;
+    // One read: whether the schema is there, and in which layout (see SCHEMA).
+    const tables = this.sql.exec<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('sharded_meta', 'sharded_rows', ?)", LEGACY_ROWS).toArray();
+    const firstLayout = tables.some((t) => t.name === "sharded_rows" && /WITHOUT ROWID/i.test(t.sql));
+    this.legacyRows = firstLayout || tables.some((t) => t.name === LEGACY_ROWS);
+    // The first layout's table is renamed (no row moves), and the new one made, at once.
+    if (firstLayout) {
+      this.sql.exec(`ALTER TABLE sharded_rows RENAME TO ${LEGACY_ROWS}`);
+      this.sql.exec(SCHEMA);
+    }
+    this.schemaReady = tables.some((t) => t.name === "sharded_meta");
     this.meta = this.schemaReady ? this.loadMeta() : null;
     // Wiped, then evicted: the refusal outlives the instance.
     const tombstone = !this.schemaReady && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?", WIPED_TABLE).one().n > 0;
@@ -601,6 +681,66 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (this.schemaReady) return;
     this.sql.exec(SCHEMA);
     this.schemaReady = true;
+  }
+
+  /** Rows of the first layout are still to move (see SCHEMA). */
+  private legacyRows = false;
+  private legacyAsked = false;
+  /** The attempt whose first batch of the logical copy this instance took. */
+  private receivedFirst: number | null = null;
+  /** A restore is scheduled: the next start replaces the storage. */
+  private restoring = false;
+
+  /** A key's stored value: in sharded_rows, or still in the first layout's table. */
+  private storedValue(key: string): string | undefined {
+    const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_rows WHERE key = ?", key).toArray()[0];
+    if (row || !this.legacyRows) return row?.value;
+    return this.sql.exec<{ value: string }>(`SELECT value FROM ${LEGACY_ROWS} WHERE key = ?`, key).toArray()[0]?.value;
+  }
+
+  /** Writes a key's value (null deletes it), moving it out of the first layout's table. A new key is growth. */
+  private storeValue(key: string, value: V | null, existed: boolean): void {
+    if (value !== null && !existed) this.markGrowth();
+    // A key still in the first layout's table is moved: deleted there, inserted here.
+    const moved = this.legacyRows && this.sql.exec(`DELETE FROM ${LEGACY_ROWS} WHERE key = ? RETURNING 1`, key).toArray().length > 0;
+    if (value === null) return void this.sql.exec("DELETE FROM sharded_rows WHERE key = ?", key);
+    const json = storedJson(value, `the value of ${JSON.stringify(key)}`);
+    if (existed && !moved) this.sql.exec("UPDATE sharded_rows SET value = ? WHERE key = ?", json, key);
+    else this.insertClustered("sharded_rows", ["key", "hash", "value"], [key, this.routeHash(key), json], key);
+  }
+
+  /**
+   * Inserts a new row of `key` at its clustered rowid (see clusteredRowid). Taken (two keys of
+   * one route that share their 21 bits): the next free rowid of the route's slot; the slot full,
+   * any rowid. The table's columns must not include `_rowid_`.
+   */
+  protected insertClustered(table: string, columns: readonly string[], values: readonly SqlStorageValue[], key: string): void {
+    const insert = (or: string) => `INSERT ${or}INTO ${table} (_rowid_, ${columns.join(", ")}) VALUES (?, ${columns.map(() => "?").join(", ")})`;
+    const at = clusteredRowid(this.routeHash(key), key);
+    const first = this.sql.exec(insert("OR IGNORE "), at, ...values);
+    first.toArray();
+    if (first.rowsWritten > 0) return;
+    const slot = at - (at % ROWID_SLOT);
+    const last = this.sql.exec<{ n: number | null }>(`SELECT max(_rowid_) AS n FROM ${table} WHERE _rowid_ >= ? AND _rowid_ < ?`, slot, slot + ROWID_SLOT).one().n;
+    const free = last === null ? slot : last + 1;
+    if (free < slot + ROWID_SLOT) this.sql.exec(insert(""), free, ...values);
+    else this.sql.exec(`INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`, ...values);
+  }
+
+  /** Moves a batch of the first layout's rows over; drops its table once empty. True once done. */
+  private moveLegacyRows(): boolean {
+    if (!this.legacyRows) return true;
+    const rows = this.sql.exec<{ key: string; hash: string; value: string }>(`SELECT key, hash, value FROM ${LEGACY_ROWS} LIMIT ?`, LEGACY_MOVE_ROWS).toArray();
+    this.ctx.storage.transactionSync(() => {
+      // A key is in one table or the other (a write moves it): each goes in at its clustered rowid.
+      for (const r of rows) {
+        this.sql.exec(`DELETE FROM ${LEGACY_ROWS} WHERE key = ?`, r.key);
+        this.insertClustered("sharded_rows", ["key", "hash", "value"], [r.key, r.hash, r.value], r.key);
+      }
+      if (rows.length === 0) this.sql.exec(`DROP TABLE ${LEGACY_ROWS}`);
+    });
+    if (rows.length === 0) this.legacyRows = false;
+    return !this.legacyRows;
   }
 
   private assertNotWiped(): void {
@@ -626,8 +766,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.assertOwner(keys);
     const out = new Map<string, V>();
     for (const key of keys) {
-      const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_rows WHERE key = ?", key).toArray()[0];
-      if (row) out.set(key, JSON.parse(row.value) as V);
+      const value = this.storedValue(key);
+      if (value !== undefined) out.set(key, JSON.parse(value) as V);
     }
     return out;
   }
@@ -645,16 +785,15 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return this.writeTransaction(() => {
       const current = new Map<string, V>();
       for (const key of keys) {
-        const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_rows WHERE key = ?", key).toArray()[0];
-        if (row) current.set(key, JSON.parse(row.value) as V);
+        const value = this.storedValue(key);
+        if (value !== undefined) current.set(key, JSON.parse(value) as V);
       }
       const { writes, result } = decide(current);
       const fenced = new Set(keys);
       for (const [key, value] of writes) {
         // An unlisted key was neither checked as this shard's nor held for a split: its write could be lost.
         if (!fenced.has(key)) throw new Error(`update wrote ${JSON.stringify(key)}, which is not one of its keys: list every key it writes`);
-        if (value === null) this.sql.exec("DELETE FROM sharded_rows WHERE key = ?", key);
-        else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), storedJson(value, `the value of ${JSON.stringify(key)}`));
+        this.storeValue(key, value, current.has(key));
       }
       return result;
     });
@@ -679,14 +818,77 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * A transaction of the subclass's writes: if it throws, it is rolled back, and `afterRollback`
    * tells the layers to drop what they kept in memory of it.
    */
-  private writeTransaction<R>(fn: () => R): R {
+  private writeTransaction<R>(fn: () => R, admit = true): R {
+    let result: R;
     try {
-      return this.ctx.storage.transactionSync(fn);
+      result = this.ctx.storage.transactionSync(() => {
+        this.grew = false;
+        const before = this.sql.databaseSize;
+        const out = fn();
+        // At the cap, refused if it added a row or grew the database (the size moves inside the
+        // transaction, a page at a time): a delete, or a change in place that fits, which a shard
+        // needs to drain, is served. Once refused, the shard stays full until deletes take it 5%
+        // under the size it was refused at: the write refused rolled back, and the next must not
+        // take the room it left.
+        const after = this.sql.databaseSize;
+        const cap = this.refuseAtBytes();
+        if (this.fullAt !== null && after < this.fullAt * FULL_UNTIL) this.fullAt = null;
+        if (admit && (after > before || this.grew) && (after >= cap || this.fullAt !== null)) {
+          this.fullAt ??= before;
+          throw new Full(after, cap);
+        }
+        return out;
+      });
     } catch (error) {
       this.afterRollback();
+      // Refused at the cap: the split decision runs here too. Only after a write that applies, a
+      // shard at its cap would refuse every write and never split.
+      if (error instanceof Full) this.checkSize();
       throw error;
     }
+    this.checkSize();
+    return result;
   }
+
+  private refuseAtBytes(): number {
+    return this.policy.refuseAtBytes ?? Math.floor(REFUSE_MARGIN * (this.policy.splitAtBytes ?? DEFAULT_SPLIT_AT_BYTES));
+  }
+
+  /**
+   * After a write: a shard at `splitAtBytes` splits (level-triggered: every write past it asks,
+   * and the alarm does, until one split takes). Not while it still deletes what it gave away
+   * (its size counts those rows), nor sooner than an earlier split's quiet window, or the wait
+   * after splits given up.
+   */
+  private checkSize(): void {
+    const meta = this.meta;
+    if (!meta || meta.state !== "shard" || this.hold || this.warming) return;
+    if (this.sql.databaseSize < (this.policy.splitAtBytes ?? DEFAULT_SPLIT_AT_BYTES)) return;
+    if (meta.cleanup.length > 0 || meta.foreign || meta.bits.length >= this.policy.maxDepth) return;
+    if (Date.now() - this.splitEndedAt <= this.policy.windowSeconds * 1000 || Date.now() < this.splitAllowedAt()) return;
+    if (this.splittable()) void this.split("size");
+  }
+
+  /**
+   * When an automatic split may start again: after n attempts given up one after another, no
+   * sooner than 2^n split timeouts after the last one started (capped at 30 min). A copy that keeps
+   * failing is not tried again every few seconds; an operator's split does not wait.
+   */
+  private splitAllowedAt(): number {
+    const splits = this.meta?.splits ?? [];
+    let failed = 0;
+    for (let i = splits.length - 1; i >= 0 && splits[i]!.outcome !== "split"; i--) failed++;
+    if (failed === 0) return 0;
+    return splits.at(-1)!.at + Math.min(MAX_SPLIT_BACKOFF_MS, (this.policy.splitTimeoutMs ?? 60_000) * 2 ** failed);
+  }
+
+  /** The write transaction under way adds a row: at `refuseAtBytes` it is refused. A layer that stores rows of its own calls it. */
+  protected markGrowth(): void {
+    this.grew = true;
+  }
+  private grew = false;
+  /** The size a write was refused at, at the cap; null once deletes took the shard 5% under it. */
+  private fullAt: number | null = null;
 
   /** After a write transaction rolled back: a layer that keeps what it wrote in memory (a table's row count) drops it. */
   protected afterRollback(): void {}
@@ -711,10 +913,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const [lo, hi] = hashRange(this.meta!.bits);
     const out: [string, V][] = [];
     // In key order, seeking to `afterKey`: by the hash's index SQLite would sort the whole range.
-    // `+hash` keeps SQLite off the hash's index, on the key: the table's own order (WITHOUT ROWID).
-    const rows = afterKey === null
-      ? this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM sharded_rows WHERE +hash >= ? AND +hash <= ? ORDER BY key LIMIT ?", lo, hi, limit)
-      : this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM sharded_rows WHERE key > ? AND +hash >= ? AND +hash <= ? ORDER BY key LIMIT ?", afterKey, lo, hi, limit);
+    // `+hash` keeps SQLite off the hash's index, on the key's.
+    const page = (table: string) =>
+      (afterKey === null
+        ? this.sql.exec<{ key: string; value: string }>(`SELECT key, value FROM ${table} WHERE +hash >= ? AND +hash <= ? ORDER BY key LIMIT ?`, lo, hi, limit)
+        : this.sql.exec<{ key: string; value: string }>(`SELECT key, value FROM ${table} WHERE key > ? AND +hash >= ? AND +hash <= ? ORDER BY key LIMIT ?`, afterKey, lo, hi, limit)
+      ).toArray();
+    // A key is in one table or the other: the first `limit` of both, merged.
+    const rows = this.legacyRows ? [...page("sharded_rows"), ...page(LEGACY_ROWS)].sort((a, b) => compareText(a.key, b.key)).slice(0, limit) : page("sharded_rows");
     for (const r of rows) out.push([r.key, JSON.parse(r.value) as V]);
     return out;
   }
@@ -897,19 +1103,18 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private rowsOf(keys: readonly string[]): Map<string, V> {
     const current = new Map<string, V>();
     for (const key of keys) {
-      const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_rows WHERE key = ?", key).toArray()[0];
-      if (row) current.set(key, JSON.parse(row.value) as V);
+      const value = this.storedValue(key);
+      if (value !== undefined) current.set(key, JSON.parse(value) as V);
     }
     return current;
   }
 
   /** Writes rows, inside a transaction; only `keys` (what was fenced and checked). */
-  private writeRows(keys: readonly string[], writes: ReadonlyMap<string, V | null>): void {
+  private writeRows(keys: readonly string[], writes: ReadonlyMap<string, V | null>, current: ReadonlyMap<string, V>): void {
     const fenced = new Set(keys);
     for (const [key, value] of writes) {
       if (!fenced.has(key)) throw new Error(`atomic apply wrote ${JSON.stringify(key)}, which it neither holds nor lists in holdKeys`);
-      if (value === null) this.sql.exec("DELETE FROM sharded_rows WHERE key = ?", key);
-      else this.sql.exec("INSERT INTO sharded_rows (key, hash, value) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, this.routeHash(key), storedJson(value, `the value of ${JSON.stringify(key)}`));
+      this.storeValue(key, value, current.has(key));
     }
   }
 
@@ -994,7 +1199,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       const p = this.checkOf(m, current, keys, payloads, gathered, args);
       if ("refused" in p) return { refused: p.refused };
       const { writes, result } = m.apply(current, p.staged);
-      this.writeRows(hold, writes);
+      this.writeRows(hold, writes, current);
       return { applied: result };
     });
     return "applied" in done && m.applied ? { applied: await m.applied(keys, done.applied) } : done;
@@ -1070,7 +1275,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       }
       this.recordOutcome(tx, "commit");
       const { writes, result } = m.apply(current, p.staged);
-      this.writeRows(hold, writes);
+      this.writeRows(hold, writes, current);
       return { applied: result };
     }
   }
@@ -1114,16 +1319,18 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const h = this.loadHold(tx);
     if (!h) return { gone: true };
     const m = this.atomicMethod(h.method);
+    // A decided outcome is applied whatever the size: refusing it would keep its keys held.
     const result = this.writeTransaction(() => {
       let applied: unknown = undefined;
       if (outcome === "commit") {
-        const { writes, result } = m.apply(this.rowsOf(h.keys), h.staged);
-        this.writeRows(h.keys, writes);
+        const current = this.rowsOf(h.keys);
+        const { writes, result } = m.apply(current, h.staged);
+        this.writeRows(h.keys, writes, current);
         applied = result;
       }
       this.sql.exec("DELETE FROM sharded_atomic_holds WHERE tx = ?", tx);
       return applied;
-    });
+    }, false);
     this.releaseInMemory(tx);
     if (outcome === "abort") return { outcome: "abort" };
     return { applied: m.applied ? await m.applied(h.keys, result) : result };
@@ -1275,6 +1482,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     } catch (error) {
       if (error instanceof Moved) return this.answered(this.moved(bits));
       if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
+      if (error instanceof Full) return { full: bits, bytes: error.bytes, cap: error.cap };
       if (error instanceof Expired) return { expired: bits };
       throw error;
     }
@@ -1302,6 +1510,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     } catch (error) {
       if (error instanceof Moved) return this.answered(this.moved(bits));
       if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
+      if (error instanceof Full) return { full: bits, bytes: error.bytes, cap: error.cap };
       throw error;
     }
   }
@@ -1324,6 +1533,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       if (error instanceof Moved) return this.answered(this.moved(bits));
       // A scan method that writes waits on a split as a call does; the client backs off and visits again.
       if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
+      if (error instanceof Full) return { full: bits, bytes: error.bytes, cap: error.cap };
       throw error;
     }
   }
@@ -1372,9 +1582,31 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    */
   protected rowCounts(rightLo: string | null): { rows: number; storedRows: number; rightRows: number } {
     const [lo, hi] = this.meta ? hashRange(this.meta.bits) : ["", "\uffff"];
-    const owned = this.sql.exec<{ rows: number; rightRows: number }>("SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM sharded_rows WHERE hash >= ? AND hash <= ?", rightLo ?? "\uffff", lo, hi).one();
-    const storedRows = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows").one().n;
-    return { rows: owned.rows, storedRows, rightRows: owned.rightRows };
+    const out = { rows: 0, storedRows: 0, rightRows: 0 };
+    for (const table of this.rowTables()) {
+      const owned = this.sql.exec<{ rows: number; rightRows: number }>(`SELECT COUNT(*) AS rows, COALESCE(SUM(hash >= ?), 0) AS rightRows FROM ${table} WHERE hash >= ? AND hash <= ?`, rightLo ?? "\uffff", lo, hi).one();
+      out.rows += owned.rows;
+      out.rightRows += owned.rightRows;
+      out.storedRows += this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n;
+    }
+    return out;
+  }
+
+  /** The tables of ShardedObject's own rows: one, and the first layout's while it is moved. */
+  private rowTables(): string[] {
+    return this.legacyRows ? ["sharded_rows", LEGACY_ROWS] : ["sharded_rows"];
+  }
+
+  /**
+   * What a split at `rightLo` would leave and move: whether each half holds a row, and the counts
+   * where the layer keeps them (a table does). ShardedObject's own rows are not counted, which would
+   * read them all: a row of each half is looked for, by the hash's index.
+   */
+  protected splitHalves(rightLo: string): { rows: number | null; rightRows: number | null; left: boolean; right: boolean } {
+    const [lo, hi] = hashRange(this.meta!.bits);
+    const any = (from: string, to: string) => this.rowTables().some((t) => this.sql.exec(`SELECT 1 FROM ${t} WHERE hash >= ? AND hash < ? LIMIT 1`, from, to).toArray().length > 0);
+    const right = this.rowTables().some((t) => this.sql.exec(`SELECT 1 FROM ${t} WHERE hash >= ? AND hash <= ? LIMIT 1`, rightLo, hi).toArray().length > 0);
+    return { rows: null, rightRows: null, left: any(lo, rightLo), right };
   }
 
   /**
@@ -1394,7 +1626,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const [lo, hi] = hashRange(this.meta!.bits);
     const out = new Map<string, V>();
     // At most allRowsCap: past it one call would read, hold and return more than it should.
-    for (const r of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM sharded_rows WHERE hash >= ? AND hash <= ? LIMIT ?", lo, hi, this.allRowsCap + 1)) out.set(r.key, JSON.parse(r.value) as V);
+    for (const table of this.rowTables()) {
+      for (const r of this.sql.exec<{ key: string; value: string }>(`SELECT key, value FROM ${table} WHERE hash >= ? AND hash <= ? LIMIT ?`, lo, hi, this.allRowsCap + 1 - out.size)) out.set(r.key, JSON.parse(r.value) as V);
+      if (out.size > this.allRowsCap) break;
+    }
     if (out.size > this.allRowsCap) throw new Error(`allRows: this shard owns more than ${this.allRowsCap} rows; page them with ownedRowsPage(afterKey, limit)`);
     return out;
   }
@@ -1462,6 +1697,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const meta = this.meta!;
     // Storage copied from another object and not claimed yet: it keeps that object's meta.
     if (this.isUnclaimedCopy()) return { notReady: bits };
+    // Rows of the first layout to move: the alarm moves them, once asked (see SCHEMA).
+    if (this.legacyRows && !this.legacyAsked) {
+      this.legacyAsked = true;
+      void this.armAlarm(Date.now() + DELETE_PAUSE_MS);
+    }
     if (meta.name !== name || hostBits(meta.bits) !== hostBits(bits)) throw new Error(`${nodeName(name, bits)} reached ${nodeName(meta.name, meta.bits)}`);
     this.checkRoutes(meta);
     if (meta.state === "copy") {
@@ -1526,7 +1766,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (this.calls.size > this.policy.windowSeconds + 2) {
       for (const s of this.calls.keys()) if (s < second - this.policy.windowSeconds - 1) this.calls.delete(s);
     }
-    if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond && this.splittable()) void this.split("load");
+    if (Date.now() - this.quietUntil > this.policy.windowSeconds * 1000 && this.rate() > this.policy.callsPerSecond && Date.now() >= this.splitAllowedAt() && this.splittable()) void this.split("load");
     this.logLoad(second);
   }
 
@@ -1545,6 +1785,22 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   private loadLoggedAt = 0;
+
+  /** Whether an atomic call holds a key of the shard `bits`. */
+  private holdsIn(bits: string): boolean {
+    for (const key of this.heldKeys().keys()) if (ownsHash(bits, this.routeHash(key))) return true;
+    return false;
+  }
+
+  /** Tells the sibling of a split given up to delete its copy; forgets it once the sibling has. */
+  private async discardCopy(): Promise<void> {
+    const meta = this.meta;
+    const discard = meta?.discard;
+    if (!meta || !discard) return;
+    const done = await this.node(discard.bits).shardedDiscard(meta.name, discard.bits, discard.epoch);
+    const now = this.meta!;
+    if (done && now.discard?.epoch === discard.epoch) this.saveMeta({ ...now, discard: null });
+  }
 
   /**
    * Whether a split would spread this shard's load (asked only once the load calls for one). A
@@ -1578,10 +1834,20 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    */
   private async split(trigger: SplitTrigger): Promise<boolean> {
     const before = this.meta;
-    // A shard holding keys for atomic calls stays whole until they end (milliseconds, or a hold's
-    // deadline): a hold and the share it keeps belong to one object.
-    if (!before || this.hold || this.warming || before.state !== "shard" || before.bits.length >= this.policy.maxDepth || this.heldKeys().size > 0) return false;
+    if (!before || this.hold || this.warming || before.state !== "shard" || before.bits.length >= this.policy.maxDepth) return false;
     const right = `${before.bits}1`;
+    // A key of the half that moves held for an atomic call keeps the shard whole until the call
+    // ends (milliseconds, or a hold's deadline): a hold and the share it keeps belong to one
+    // object. Holds of the half that stays stay here, and the copy drops them.
+    if (this.holdsIn(right)) return false;
+    const [rightLo] = hashRange(right);
+    const counted = this.splitHalves(rightLo);
+    // The floor: an automatic split that would move none of the rows, or all of them, frees
+    // nothing (rows that share one route never part). An operator's split goes ahead.
+    if (trigger !== "operator" && !(counted.left && counted.right)) {
+      this.quietUntil = this.splitEndedAt = Date.now();
+      return false;
+    }
     // Start the new object before holding writes: a first call to an object can take seconds.
     this.warming = true;
     const warmStarted = Date.now();
@@ -1597,13 +1863,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const warm = Date.now() - warmStarted;
     // Meanwhile the meta may have been saved (cleanup progress): split from the current one.
     const meta = this.meta;
-    if (!meta || meta.bits !== before.bits || meta.state !== "shard" || meta.epoch !== before.epoch || this.hold || this.heldKeys().size > 0) return false;
+    if (!meta || meta.bits !== before.bits || meta.state !== "shard" || meta.epoch !== before.epoch || this.hold || this.holdsIn(right)) return false;
     const epoch = meta.epoch + 1;
     let release!: () => void;
     const started = Date.now();
     const timeout = this.policy.splitTimeoutMs ?? 60_000;
-    const [rightLo] = hashRange(right);
-    const counted = this.rowCounts(rightLo);
     // Only the `finally` below releases the hold: nothing that can throw goes between the two.
     const hold = { epoch, right, released: new Promise<void>((resolve) => (release = resolve)), deadline: started + timeout, held: 0, notReady: 0, heldMsMax: 0 };
     this.hold = hold;
@@ -1625,7 +1889,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       const now = this.meta!;
       this.saveMeta({ ...now, bits: `${meta.bits}0`, splitting: null, splitStart: null, activate: { bits: right, epoch, at: Date.now() }, cleanup: [...now.cleanup, hashRange(right)], cleanedRows: 0, foreign: true, parent: meta.bits, splitAt: Date.now(), lastSplit: { copy: method, ms: Date.now() - started }, splits: record("split", null) });
       this.calls.clear();
-      this.quietUntil = Date.now();
+      this.quietUntil = this.splitEndedAt = Date.now();
       console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), copy: method, ms: Date.now() - started }));
       this.hold = null;
       release();
@@ -1634,9 +1898,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       return true;
     } catch (error) {
       const now = this.meta;
-      if (now) this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, splitStart: null, lastSplitError: String(error).slice(0, 500), splits: record("abandoned", String(error).slice(0, 500)) });
-      this.quietUntil = Date.now();
+      // The copy goes: the alarm tells the sibling until it has (a copy left behind is billed,
+      // in an object nothing routes to).
+      if (now) this.saveMeta({ ...now, splitting: now.splitting === epoch ? null : now.splitting, splitStart: null, discard: { bits: right, epoch }, lastSplitError: String(error).slice(0, 500), splits: record("abandoned", String(error).slice(0, 500)) });
+      this.quietUntil = this.splitEndedAt = Date.now();
       console.error(JSON.stringify({ event: "split-abandoned", node: nodeName(meta.name, meta.bits), error: String(error), ms: Date.now() - started }));
+      await this.discardCopy().catch(() => {}); // the alarm retries
+      // A size split is tried again once its wait is over, with or without writes.
+      if (this.sql.databaseSize >= (this.policy.splitAtBytes ?? DEFAULT_SPLIT_AT_BYTES)) await this.armAlarm(this.splitAllowedAt());
       return false;
     } finally {
       clearTimeout(timer);
@@ -1736,29 +2005,42 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       .map(({ name, sql }) => ({ name, sql }));
     await target.shardedReceiveSchema(meta.name, right, epoch, schema);
     let first = true;
+    const [rightLo, rightHi] = hashRange(right);
     for (const { name: table, withoutRowid } of tables) {
       const order = this.pageOrder(table, withoutRowid);
       const columns = order.columns.join(", ");
       const select = `SELECT ${order.rowid ? `${columns}, ` : ""}* FROM ${quoteIdentifier(table)}`;
+      // A table whose rows carry their key's hash sends the right half's only: the rest would be
+      // sent, written, and deleted again by the copy's cleanup.
+      const hash = this.copiedHash(table);
+      const half = hash === null ? [] : [`+${quoteIdentifier(hash)} >= ?`, `+${quoteIdentifier(hash)} <= ?`];
       let after: SqlStorageValue[] | null = null;
       for (;;) {
         if (!live()) throw new Error("split timed out copying rows");
-        const where = after ? ` WHERE (${columns}) > (${after.map(() => "?").join(", ")})` : "";
-        const cursor: SqlStorageCursor<Record<string, SqlStorageValue>> = this.sql.exec(`${select}${where} ORDER BY ${columns} LIMIT ?`, ...(after ?? []), COPY_PAGE_ROWS);
+        const conditions = [...(after ? [`(${columns}) > (${after.map(() => "?").join(", ")})`] : []), ...half];
+        const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+        const cursor: SqlStorageCursor<Record<string, SqlStorageValue>> = this.sql.exec(`${select}${where} ORDER BY ${columns} LIMIT ?`, ...(after ?? []), ...(hash === null ? [] : [rightLo, rightHi]), COPY_PAGE_ROWS);
         const names: string[] = cursor.columnNames;
         const keyAt: number[] = order.rowid ? [0] : order.columns.map((c) => names.indexOf(unquoteIdentifier(c)));
         const rows: SqlStorageValue[][] = [];
         let bytes = 0;
+        let cut = false;
         for (const row of cursor.raw()) {
+          // Bytes as the batch takes them on the heap (two a character): a batch carries at least
+          // one row, and stops before the row that would take it past COPY_BATCH_BYTES.
+          const size = row.reduce<number>((n, value) => n + heapBytes(value), 0);
+          if (rows.length > 0 && bytes + size > COPY_BATCH_BYTES) {
+            cut = true;
+            break;
+          }
           after = keyAt.map((i): SqlStorageValue => row[i]!);
           rows.push(order.rowid ? row.slice(1) : row);
-          for (const value of row) bytes += value instanceof ArrayBuffer ? value.byteLength : String(value).length;
-          if (bytes >= COPY_BATCH_BYTES) break;
+          bytes += size;
         }
         if (rows.length === 0 && !first) break;
         await target.shardedReceive(meta.name, right, epoch, first, table, order.rowid ? names.slice(1) : names, rows);
         first = false;
-        if (rows.length === 0 || (rows.length < COPY_PAGE_ROWS && bytes < COPY_BATCH_BYTES)) break;
+        if (rows.length === 0 || (rows.length < COPY_PAGE_ROWS && !cut)) break;
       }
     }
     // Views and triggers last, once the rows are in: a trigger made first would fire on every
@@ -1769,6 +2051,15 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       .filter((o): o is { type: string; name: string; tbl_name: string; sql: string } => o.sql !== null && !o.name.startsWith("_cf_") && !o.name.startsWith("sqlite_"))
       .map(({ name, sql }) => ({ name, sql }));
     if (!(await target.shardedReceiveDone(meta.name, right, epoch, late))) throw new Error("the copy did not take this split's meta");
+  }
+
+  /**
+   * The column holding the route hash of each row's key, in a table whose rows a split's copy
+   * sends for the half that moves only; null sends every row. ShardedObject's own rows by default;
+   * a layer adds its tables, and calls super.
+   */
+  protected copiedHash(table: string): string | null {
+    return table === "sharded_rows" || table === LEGACY_ROWS ? "hash" : null;
   }
 
   /**
@@ -1979,6 +2270,20 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       failed = true;
       console.error(JSON.stringify({ event: "split-cleanup-failed", node: this.nodeLabel(), error: String(error) }));
     }
+    try {
+      this.moveLegacyRows();
+    } catch (error) {
+      failed = true;
+      console.error(JSON.stringify({ event: "legacy-rows-move-failed", node: this.nodeLabel(), error: String(error) }));
+    }
+    if (meta.discard) {
+      try {
+        await this.discardCopy();
+      } catch (error) {
+        failed = true;
+        console.error(JSON.stringify({ event: "split-discard-failed", node: this.nodeLabel(), sibling: meta.discard.bits, error: String(error).slice(0, 200) }));
+      }
+    }
     // Atomic holds past their deadline ask their primary, and outcomes past their TTL go (RFD0008).
     // Each on its own: a purge that fails must not keep holds past their deadline from recovering.
     try {
@@ -2031,7 +2336,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const times: number[] = [];
     if (now.activate) times.push(Math.max(this.activateAgainAt, Date.now() + ALARM_RETRY_MS));
     if (failed) times.push(Date.now() + ALARM_RETRY_MS);
-    if (now.cleanup.length > 0 || now.foreign) times.push(Date.now() + DELETE_PAUSE_MS);
+    if (now.cleanup.length > 0 || now.foreign || this.legacyRows) times.push(Date.now() + DELETE_PAUSE_MS);
+    if (now.discard) times.push(Date.now() + ALARM_RETRY_MS);
+    // A size split given up is tried again once its wait is over, with or without writes.
+    if (serving) {
+      this.checkSize();
+      const again = this.splitAllowedAt();
+      if (again > Date.now() && this.sql.databaseSize >= (this.policy.splitAtBytes ?? DEFAULT_SPLIT_AT_BYTES)) times.push(again);
+    }
     const next = this.loadWake();
     if (serving && next !== null) times.push(next);
     const holdDue = this.nextHoldDeadline();
@@ -2049,7 +2361,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const range = meta.cleanup[0];
     if (range) {
       // Rows, not rows written (each row's entry in the hash index is written too).
-      const deleted = this.sql.exec("DELETE FROM sharded_rows WHERE key IN (SELECT key FROM sharded_rows WHERE hash >= ? AND hash <= ? LIMIT ?) RETURNING 1", range[0], range[1], DELETE_BATCH_ROWS).toArray().length;
+      let deleted = 0;
+      for (const t of this.rowTables()) if (deleted === 0) deleted = this.sql.exec(`DELETE FROM ${t} WHERE key IN (SELECT key FROM ${t} WHERE hash >= ? AND hash <= ? LIMIT ?) RETURNING 1`, range[0], range[1], DELETE_BATCH_ROWS).toArray().length;
       const now = this.meta!;
       if (deleted === 0) this.saveMeta({ ...now, cleanup: now.cleanup.slice(1) });
       else this.saveMeta({ ...now, cleanedRows: (now.cleanedRows ?? 0) + deleted });
@@ -2075,6 +2388,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.refuseOlderAttempt(epoch);
     const started = Date.now();
     try {
+      this.restoring = true;
       await this.ctx.storage.onNextSessionRestore!(snapshot);
     } catch (error) {
       // One pending restore per object: an earlier attempt's. Claiming tells which it was.
@@ -2117,6 +2431,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       for (const o of objects) this.sql.exec(o.sql);
     });
     this.schemaReady = true;
+    // The source's rows may still be partly in the first layout's table.
+    this.legacyRows = objects.some((o) => o.name === LEGACY_ROWS);
   }
 
   /**
@@ -2128,6 +2444,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   async shardedReceive(_name: string, _bits: string, epoch: number, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void> {
     if (this.serving()) throw new Error("refusing to overwrite a serving shard");
     if (this.receiving !== epoch) throw new Error(`refusing a batch of split attempt ${epoch}: this object takes attempt ${this.receiving ?? "none"}`);
+    // A first batch sent again after later ones (a retry overtaken) would wipe what they wrote.
+    if (first && this.receivedFirst === epoch) throw new Error(`refusing the first batch of split attempt ${epoch} again: it would wipe the batches after it`);
+    if (first) this.receivedFirst = epoch;
     this.ctx.storage.transactionSync(() => {
       if (first) {
         for (const t of this.tables()) this.sql.exec(`DELETE FROM ${quoteIdentifier(t)}`);
@@ -2163,6 +2482,32 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (epoch === undefined || !meta) return;
     if (meta.state === "copy" && meta.epoch >= epoch) throw new Error(`refusing the copy of split attempt ${epoch}: this object holds the claimed copy of attempt ${meta.epoch}`);
     if (this.isUnclaimedCopy() && meta.splitting! > epoch) throw new Error(`refusing the copy of split attempt ${epoch}: this object holds the copy of attempt ${meta.splitting}`);
+  }
+
+  /**
+   * Deletes the copy of split attempt `epoch`, given up by its parent, or any older one's: claimed
+   * or not, it never serves (only a parent whose split took activates its copy). A newer attempt's
+   * copy stays, as does a serving shard. True once nothing of that attempt is left here.
+   */
+  async shardedDiscard(name: string, bits: string, epoch: number): Promise<boolean> {
+    const meta = this.meta;
+    if (this.restoring) return false; // a restore still to apply would bring the copy back
+    if (this.receiving !== null && this.receiving > epoch) return true;
+    if (meta) {
+      if (meta.name !== name) return true;
+      if (this.serving()) return true;
+      if (meta.state === "copy" && (meta.bits !== bits || meta.epoch > epoch)) return true;
+      if (this.isUnclaimedCopy() && meta.splitting! > epoch) return true;
+    } else if (this.receiving === null && this.tables().length === 0) {
+      return true;
+    }
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    this.meta = null;
+    this.schemaReady = false;
+    this.legacyRows = false;
+    this.forgetStorage();
+    return true;
   }
 
   /** Storage copied verbatim from a splitting object and not claimed yet: it is not this object's. */

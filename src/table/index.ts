@@ -1,7 +1,7 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
 import { ShardedObject } from "../sharded/index.js";
-import { DEFAULT_MAX_COUNT_VALUES, DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
+import { compareText, DEFAULT_MAX_COUNT_VALUES, DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
 
 export * from "./schema.js";
 export { table, TableClient, type TableClientOptions } from "./client.js";
@@ -33,6 +33,12 @@ const DIRTY = "sharded_table_dirty";
 const KEY_CLEARS = "sharded_table_legacy_clears";
 /** Key tables of dropped indexes, renamed out of the way, emptied a batch at a time, then dropped. */
 const KEY_DROPS = "sharded_table_key_drops";
+/**
+ * Key tables being compacted after a split (`keys`: the serving one; `into`: its compact copy;
+ * `after`: the last key copied), and the row `keys = '#'` naming the shard they were started for.
+ */
+const COMPACTIONS = "sharded_table_compactions";
+const COMPACT_PREFIX = "sharded_table_compact_";
 /**
  * One row once a migration has nothing left to build: the schema it applied, and what the
  * migration found. A shard that wakes with the same schema reads it, and nothing else.
@@ -261,6 +267,49 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     return this.count();
   }
 
+  /**
+   * Recounts this shard's row counts from its rows, a slice at a time: the buckets (16-bit hash
+   * prefixes) after `after`, reading at most `budget` rows by the hash's index (a bucket that holds
+   * more, as a route's can, is counted whole). A bucket whose count drifted (a subclass wrote the
+   * table directly, a bad migration) is set to what its rows say. `next`: the last bucket counted,
+   * to pass back; null when the shard is done. Group counts are not recounted.
+   */
+  async tableVerifyCounts(after: string | null, budget = 10_000): Promise<{ buckets: number; repaired: number; next: string | null }> {
+    this.ready();
+    this.assertOwns([]);
+    if (!Number.isInteger(budget) || budget < 1) throw new Error("verifyCounts budget must be a positive integer");
+    const [lo, hi] = this.ownedHashRange();
+    const [, bhi] = this.ownedBuckets();
+    // The first hash of the bucket after `after`, or the shard's first.
+    const start = after === null ? lo : (Number.parseInt(after, 16) + 1).toString(16).padStart(BUCKET_DIGITS, "0").padEnd(16, "0");
+    if (after !== null && (after >= bhi || start > hi)) return { buckets: 0, repaired: 0, next: null };
+    return this.ctx.storage.transactionSync(() => {
+      const hashes = this.db.exec<{ h: string }>(`SELECT _hash AS h FROM ${TABLE} INDEXED BY ${TABLE}_hash WHERE _hash >= ? AND _hash <= ? ORDER BY _hash LIMIT ?`, start, hi, budget + 1).toArray();
+      const tally = new Map<string, number>();
+      for (const { h } of hashes) tally.set(h.slice(0, BUCKET_DIGITS), (tally.get(h.slice(0, BUCKET_DIGITS)) ?? 0) + 1);
+      const cut = hashes.length > budget;
+      let last = cut ? hashes.at(-1)!.h.slice(0, BUCKET_DIGITS) : bhi;
+      if (cut) {
+        // The last bucket read may go on past the budget: counted next time, unless it is the only one.
+        if (tally.size > 1) tally.delete(last);
+        else tally.set(last, this.db.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${TABLE} INDEXED BY ${TABLE}_hash WHERE _hash >= ? AND _hash <= ?`, last.padEnd(16, "0"), last.padEnd(16, "f")).one().n);
+        if (tally.size > 0) last = [...tally.keys()].sort().at(-1)!;
+      }
+      const from = start.slice(0, BUCKET_DIGITS);
+      const stored = new Map(this.db.exec<{ bucket: string; n: number }>(`SELECT bucket, n FROM ${COUNTS} WHERE bucket >= ? AND bucket <= ?`, from, last).toArray().map((r) => [r.bucket, r.n]));
+      let repaired = 0;
+      for (const bucket of new Set([...tally.keys(), ...stored.keys()])) {
+        const n = tally.get(bucket) ?? 0;
+        if ((stored.get(bucket) ?? 0) === n) continue;
+        repaired++;
+        if (n === 0) this.db.exec(`DELETE FROM ${COUNTS} WHERE bucket = ?`, bucket);
+        else this.db.exec(`INSERT INTO ${COUNTS} (bucket, n) VALUES (?, ?) ON CONFLICT (bucket) DO UPDATE SET n = excluded.n`, bucket, n);
+      }
+      if (repaired > 0) this.counted = null;
+      return { buckets: tally.size, repaired, next: cut && last < bhi ? last : null };
+    });
+  }
+
   /** Rows this shard owns, per value of a count group's column (values with no rows left out). */
   async tableCountBy(group: string): Promise<GroupCount[]> {
     this.ready();
@@ -304,13 +353,11 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
         version,
         key,
       );
-    else
-      this.db.exec(
-        `INSERT INTO ${TABLE} (${names.map((n) => this.q(n)).join(", ")}, _hash, _version) VALUES (${names.map(() => "?").join(", ")}, ?, ?)`,
-        ...names.map((n) => stored[n]!),
-        this.routeHash(key),
-        version,
-      );
+    else {
+      this.markGrowth();
+      // In route-hash order on disk: a split's cleanup then frees whole pages.
+      this.insertClustered(TABLE, [...names.map((n) => this.q(n)), "_hash", "_version"], [...names.map((n) => stored[n]!), this.routeHash(key), version], key);
+    }
     if (current === 0) this.countRow(key, 1);
     this.countGroups(key, before, stored);
     this.updateKeys(key, before, stored);
@@ -418,6 +465,8 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.counted = null;
     this.deletedAt = null;
     this.indexDefs = null;
+    this.compacting = new Map();
+    this.compactedFor = undefined;
     super.forgetStorage();
   }
 
@@ -429,7 +478,10 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     // A batch of rows given away, with their keys in every key table (by the table's index on _pk).
     const gone = this.db.exec<{ k: string }>(`SELECT ${pk} AS k FROM ${TABLE} WHERE _hash < ? OR _hash > ? LIMIT ?`, lo, hi, Math.min(limit, CLEANUP_BATCH)).toArray().map((r) => r.k);
     let deleted = 0;
-    const keyTables = gone.length > 0 ? this.keyTables() : [];
+    // The first batch: the key tables of the indexes built are compacted, which drops what they
+    // hold of the half given away with the rest.
+    if (gone.length > 0) this.startCompactions();
+    const keyTables = gone.length > 0 ? this.keyTables().filter((t) => !this.compacting.has(t)) : [];
     // A statement binds at most 100 values.
     for (let i = 0; i < gone.length; i += 100) {
       const part = gone.slice(i, i + 100);
@@ -527,6 +579,19 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     return { rows: n.rows ?? 0, storedRows: n.stored ?? 0, rightRows: n.rightRows ?? 0 };
   }
 
+  /** A split's halves from the same counts: no row is read. */
+  protected override splitHalves(rightLo: string): { rows: number | null; rightRows: number | null; left: boolean; right: boolean } {
+    const { rows, rightRows } = this.rowCounts(rightLo);
+    return { rows, rightRows, left: rows - rightRows > 0, right: rightRows > 0 };
+  }
+
+  /** The table's rows, index keys and dirty marks carry their key's hash: the copy sends the half that moves. */
+  protected override copiedHash(table: string): string | null {
+    if (table === TABLE || table.startsWith(KEYS_PREFIX) || table.startsWith(DROPPED_PREFIX) || table.startsWith(COMPACT_PREFIX)) return "_hash";
+    if (table === DIRTY) return "hash";
+    return super.copiedHash(table);
+  }
+
   private indexes(): IndexDef[] {
     // Per schema object (a subclass may swap its schema): every write and page asks.
     const schema = this.table;
@@ -545,9 +610,56 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
    * An index's key table, empty, with its index on the row's key (for refreshes and cleanup). The
    * index's name is unique to this table, so a dropped table renamed away keeps its own.
    */
-  private createKeyTable(ix: IndexDef): void {
-    this.db.exec(`CREATE TABLE "${ix.keys}" (_key TEXT PRIMARY KEY NOT NULL, _pk TEXT NOT NULL, _hash TEXT NOT NULL) WITHOUT ROWID`);
-    this.db.exec(`CREATE INDEX "${ix.keys}_pk_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}" ON "${ix.keys}" (_pk)`);
+  private createKeyTable(name: string): void {
+    this.db.exec(`CREATE TABLE "${name}" (_key TEXT PRIMARY KEY NOT NULL, _pk TEXT NOT NULL, _hash TEXT NOT NULL) WITHOUT ROWID`);
+    this.db.exec(`CREATE INDEX "${name}_pk_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}" ON "${name}" (_pk)`);
+  }
+
+  /**
+   * After a split, each built index's key table is copied, in key order and only the keys this
+   * shard owns, into a new one, which then takes its place. Deleting half of a table's keys where
+   * they lie would leave every page half full and the database no smaller: copied in order, the
+   * keys fill their pages, and the old table, emptied whole, frees all of its. The old table
+   * serves until the swap; writes meanwhile change both where the copy has passed. Once per
+   * shard (by its bits).
+   */
+  private startCompactions(): void {
+    const bits = this.nodeLabel();
+    this.compactedFor ??= this.db.exec<{ target: string }>(`SELECT into_table AS target FROM ${COMPACTIONS} WHERE keys = '#'`).toArray()[0]?.target ?? null;
+    if (this.compactedFor === bits) return;
+    for (const ix of this.indexes()) {
+      if (this.building.has(ix.keys) || this.compacting.has(ix.keys)) continue;
+      const into = `${COMPACT_PREFIX}${ix.keys.slice(KEYS_PREFIX.length)}_${Date.now().toString(36)}`;
+      this.createKeyTable(into);
+      this.db.exec(`INSERT INTO ${COMPACTIONS} (keys, into_table, after) VALUES (?, ?, NULL)`, ix.keys, into);
+      this.compacting.set(ix.keys, { into, after: null });
+    }
+    this.db.exec(`INSERT INTO ${COMPACTIONS} (keys, into_table, after) VALUES ('#', ?, NULL) ON CONFLICT (keys) DO UPDATE SET into_table = excluded.into_table`, bits);
+    this.compactedFor = bits;
+    // Work for the alarm: the ready record no longer holds.
+    this.db.exec(`DELETE FROM ${READY}`);
+    if (this.compacting.size > 0) this.askBuildAlarm();
+  }
+
+  /** A key into a key table, and into its compact copy where the copy has passed it. */
+  private putKey(keys: string, key: string, pk: string, hash: string): void {
+    this.db.exec(`INSERT OR REPLACE INTO "${keys}" (_key, _pk, _hash) VALUES (?, ?, ?)`, key, pk, hash);
+    const c = this.compacting.get(keys);
+    if (c && c.after !== null && compareText(key, c.after) <= 0) this.db.exec(`INSERT OR REPLACE INTO "${c.into}" (_key, _pk, _hash) VALUES (?, ?, ?)`, key, pk, hash);
+  }
+
+  /** A key out of a key table, and its compact copy. */
+  private deleteKey(keys: string, key: string): void {
+    this.db.exec(`DELETE FROM "${keys}" WHERE _key = ?`, key);
+    const c = this.compacting.get(keys);
+    if (c) this.db.exec(`DELETE FROM "${c.into}" WHERE _key = ?`, key);
+  }
+
+  /** A row's keys out of a key table, and its compact copy. */
+  private deleteKeysOf(keys: string, pk: string): void {
+    this.db.exec(`DELETE FROM "${keys}" WHERE _pk = ?`, pk);
+    const c = this.compacting.get(keys);
+    if (c) this.db.exec(`DELETE FROM "${c.into}" WHERE _pk = ?`, pk);
   }
 
   /** The key tables in storage: the schema's, and those a newer schema kept (a rollback's). */
@@ -612,6 +724,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       this.building = new Set();
       this.counting = new Map();
       this.countDrops = this.keyClears = this.keyDrops = this.dirtyRows = false;
+      this.compacting = new Map();
       this.migrated = true;
       return;
     }
@@ -656,6 +769,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${DIRTY} (key TEXT PRIMARY KEY NOT NULL, hash TEXT NOT NULL) WITHOUT ROWID`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${KEY_CLEARS} (col TEXT PRIMARY KEY NOT NULL, after TEXT, done INTEGER NOT NULL) WITHOUT ROWID`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${KEY_DROPS} (name TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${COMPACTIONS} (keys TEXT PRIMARY KEY NOT NULL, into_table TEXT NOT NULL, after TEXT) WITHOUT ROWID`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS ${TABLE}_hash ON ${TABLE} (_hash)`);
     const existing = this.db.exec<{ name: string; pk: number }>(`PRAGMA table_info(${TABLE})`).toArray();
     const key = existing.find((c) => c.pk === 1)?.name;
@@ -707,12 +821,21 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       // New, or declared again: an empty key table, and on a table with rows the build's record,
       // in one transaction, so a failure between them leaves neither.
       this.ctx.storage.transactionSync(() => {
-        this.createKeyTable(ix);
+        this.createKeyTable(ix.keys);
         if (!empty) this.db.exec(`INSERT OR REPLACE INTO ${BUILDS} (ix, after) VALUES (?, NULL)`, ix.keys);
       });
       if (!empty) builds.set(ix.keys, null);
     }
     this.building = new Set([...builds.keys()].filter((ix) => wanted.some((w) => w.keys === ix)));
+    // Compactions of an index gone (or being built again): their copies are dropped, in steps.
+    this.compacting = new Map();
+    for (const c of this.db.exec<{ keys: string; target: string; after: string | null }>(`SELECT keys, into_table AS target, after FROM ${COMPACTIONS} WHERE keys != '#'`).toArray()) {
+      if (wanted.some((w) => w.keys === c.keys) && !this.building.has(c.keys)) this.compacting.set(c.keys, { into: c.target, after: c.after });
+      else {
+        this.db.exec(`DELETE FROM ${COMPACTIONS} WHERE keys = ?`, c.keys);
+        this.db.exec(`INSERT OR IGNORE INTO ${KEY_DROPS} (name) VALUES (?)`, c.target);
+      }
+    }
     this.keyClears = this.db.exec(`SELECT 1 FROM ${KEY_CLEARS} WHERE done = 0 LIMIT 1`).toArray().length > 0;
     this.keyDrops = this.db.exec(`SELECT 1 FROM ${KEY_DROPS} LIMIT 1`).toArray().length > 0;
     this.migrateCountGroups(empty);
@@ -746,6 +869,10 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   private keyClears = false;
   /** Key tables of dropped indexes are being emptied. */
   private keyDrops = false;
+  /** Key tables being compacted (see startCompactions): their copy, and the last key copied. */
+  private compacting = new Map<string, { into: string; after: string | null }>();
+  /** The shard whose split the compactions were started for (undefined: not read yet). */
+  private compactedFor: string | null | undefined = undefined;
   /** Rows marked by older code are left to refresh. */
   private dirtyRows = false;
   /** This code is older than the newest schema the shard ran. */
@@ -782,7 +909,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
 
   /** Whether any build step is left. */
   private buildWorkLeft(): boolean {
-    return this.building.size > 0 || this.counting.size > 0 || this.countDrops || this.keyClears || this.keyDrops || this.dirtyRows;
+    return this.building.size > 0 || this.counting.size > 0 || this.countDrops || this.keyClears || this.keyDrops || this.dirtyRows || this.compacting.size > 0;
   }
 
   /** Build steps, from the alarm: a few, then the alarm again if more is left. */
@@ -879,8 +1006,8 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
           // Its keys, as they are now: whatever older code left under the row goes first.
           for (const ix of this.indexes()) {
             if (this.building.has(ix.keys)) continue;
-            this.db.exec(`DELETE FROM "${ix.keys}" WHERE _pk = ?`, key);
-            if (stored) this.db.exec(`INSERT OR REPLACE INTO "${ix.keys}" (_key, _pk, _hash) VALUES (?, ?, ?)`, this.indexKey(ix, stored), key, stored._hash!);
+            this.deleteKeysOf(ix.keys, key);
+            if (stored) this.putKey(ix.keys, this.indexKey(ix, stored), key, stored._hash as string);
           }
           this.refreshRow(key, stored ? { row: this.decode(stored), version: stored._version as number } : null);
           this.db.exec(`DELETE FROM ${DIRTY} WHERE key = ?`, key);
@@ -890,13 +1017,40 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       this.afterBuildStep();
       return this.buildWorkLeft();
     }
+    const [compacted, c] = [...this.compacting][0] ?? [];
+    if (compacted !== undefined && c) {
+      const [lo, hi] = this.ownedHashRange();
+      this.ctx.storage.transactionSync(() => {
+        // In key order from the last key copied: the copy's pages fill one after another.
+        const limit = Math.max(1, Math.floor(budget / 2));
+        const page = c.after === null
+          ? this.db.exec<{ _key: string; _pk: string; _hash: string }>(`SELECT _key, _pk, _hash FROM "${compacted}" ORDER BY _key LIMIT ?`, limit).toArray()
+          : this.db.exec<{ _key: string; _pk: string; _hash: string }>(`SELECT _key, _pk, _hash FROM "${compacted}" WHERE _key > ? ORDER BY _key LIMIT ?`, c.after, limit).toArray();
+        for (const k of page) if (k._hash >= lo && k._hash <= hi) this.db.exec(`INSERT OR REPLACE INTO "${c.into}" (_key, _pk, _hash) VALUES (?, ?, ?)`, k._key, k._pk, k._hash);
+        if (page.length === limit) {
+          const after = page.at(-1)!._key;
+          this.db.exec(`UPDATE ${COMPACTIONS} SET after = ? WHERE keys = ?`, after, compacted);
+          this.compacting.set(compacted, { into: c.into, after });
+          return;
+        }
+        // Copied: the copy takes the table's name, and the old one is emptied and dropped in steps.
+        const dropped = `${DROPPED_PREFIX}${compacted.slice(KEYS_PREFIX.length)}_${Date.now().toString(36)}`;
+        this.db.exec(`ALTER TABLE "${compacted}" RENAME TO "${dropped}"`);
+        this.db.exec(`INSERT INTO ${KEY_DROPS} (name) VALUES (?)`, dropped);
+        this.db.exec(`ALTER TABLE "${c.into}" RENAME TO "${compacted}"`);
+        this.db.exec(`DELETE FROM ${COMPACTIONS} WHERE keys = ?`, compacted);
+        this.compacting.delete(compacted);
+        this.keyDrops = true;
+      });
+      return this.buildWorkLeft();
+    }
     const ix = this.indexes().find((i) => this.building.has(i.keys));
     if (ix) {
       this.ctx.storage.transactionSync(() => {
         const after = this.db.exec<{ after: string | null }>(`SELECT after FROM ${BUILDS} WHERE ix = ?`, ix.keys).toArray()[0]?.after ?? null;
         // Each key is two rows written (the key and its _pk index entry): half a step of rows.
         const page = pageAfter("*", after, Math.max(1, Math.floor(budget / 2)));
-        for (const stored of page) this.db.exec(`INSERT OR REPLACE INTO "${ix.keys}" (_key, _pk, _hash) VALUES (?, ?, ?)`, this.indexKey(ix, stored), stored[this.table.primaryKey]!, stored._hash!);
+        for (const stored of page) this.putKey(ix.keys, this.indexKey(ix, stored), stored[this.table.primaryKey] as string, stored._hash as string);
         if (page.length === Math.max(1, Math.floor(budget / 2))) return void this.db.exec(`UPDATE ${BUILDS} SET after = ? WHERE ix = ?`, page.at(-1)![this.table.primaryKey]!, ix.keys);
         // Every row has its key: the index serves.
         this.db.exec(`DELETE FROM ${BUILDS} WHERE ix = ?`, ix.keys);
@@ -1025,8 +1179,8 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       const from = before ? this.indexKey(ix, before) : null;
       const to = after ? this.indexKey(ix, after) : null;
       if (from === to) continue;
-      if (from !== null) this.db.exec(`DELETE FROM "${ix.keys}" WHERE _key = ?`, from);
-      if (to !== null) this.db.exec(`INSERT OR REPLACE INTO "${ix.keys}" (_key, _pk, _hash) VALUES (?, ?, ?)`, to, key, hash);
+      if (from !== null) this.deleteKey(ix.keys, from);
+      if (to !== null) this.putKey(ix.keys, to, key, hash);
     }
   }
 
