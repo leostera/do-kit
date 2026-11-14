@@ -352,6 +352,20 @@ const MUTANTS: Mutant[] = [
     test: "test/workgraph.test.ts",
     pattern: "brought back by status polls",
   },
+  {
+    name: "row-bound-too-low",
+    breaks: "the bound that skips counting a row's UTF-8 is never below its size",
+    edits: [{ file: "src/table/schema.ts", find: "bytes += typeof v === \"string\" ? 3 * v.length", replace: "bytes += typeof v === \"string\" ? 2 * v.length" }],
+    test: "test/schema.test.ts",
+    pattern: "UTF-8, and maxRowBytes",
+  },
+  {
+    name: "row-always-encoded",
+    breaks: "a row well under maxRowBytes is checked without encoding its text",
+    edits: [{ file: "src/table/schema.ts", find: "  if (rowBytesAtMost(schema, row) <= max) return;\n", replace: "" }],
+    test: "test/schema.test.ts",
+    pattern: "without encoding",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

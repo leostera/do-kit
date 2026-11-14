@@ -1,7 +1,7 @@
 // A sharded table's schema helpers: column values checked against their type (never silently
 // changed into something else), and what a listing cursor belongs to.
 import { expect, test } from "bun:test";
-import { defineTable, encodeValue, queryFingerprint } from "../src/table/schema.ts";
+import { assertRowFits, defineTable, encodeValue, queryFingerprint, rowBytes } from "../src/table/schema.ts";
 
 const schema = defineTable<{ id: string; n: number; x: number; ok: boolean; data: unknown }>({
   primaryKey: "id",
@@ -30,4 +30,47 @@ test("a cursor's fingerprint changes when its index is redefined under the same 
   const request = { index: "byCreated", direction: "asc" as const, where: [] };
   expect(queryFingerprint(request, ["createdAt"])).toBe(queryFingerprint(request, ["createdAt"]));
   expect(queryFingerprint(request, ["createdAt"])).not.toBe(queryFingerprint(request, ["createdAt", "id"]));
+});
+
+// ---- Row size ----
+
+const text = defineTable<{ id: string; body: string }>({ primaryKey: "id", columns: { id: "text", body: "text" }, maxRowBytes: 1_000 });
+const fits = (row: { id: string; body: string }) => {
+  try {
+    assertRowFits(text, row);
+    return true;
+  } catch (error) {
+    if ((error as Error).name === "RowTooLarge") return false;
+    throw error;
+  }
+};
+
+test("a row's size counts text as UTF-8, and maxRowBytes is the most it may be", () => {
+  // 1 + 999 bytes of 1, 2, 3 and 4 byte characters: in UTF-16 units, 1 + 999, 500, 333 and 500.
+  for (const [char, bytes] of [["a", 1], ["é", 2], ["€", 3], ["😀", 4]] as const) {
+    const body = char.repeat(Math.floor(999 / bytes)) + "a".repeat(999 % bytes);
+    expect(rowBytes(text, { id: "k", body })).toBe(1_000);
+    expect(fits({ id: "k", body }), `${char} at the limit`).toBe(true);
+    expect(fits({ id: "k", body: body + "a" }), `${char} one byte past it`).toBe(false);
+  }
+});
+
+test("a row well under maxRowBytes is checked without encoding its text", () => {
+  // Every put checks its row in the caller: copying each value to UTF-8 to count it costs as much
+  // CPU as the rest of the client's work for a write. Text takes at most 3 bytes per UTF-16 unit.
+  const encode = TextEncoder.prototype.encode;
+  let encoded = 0;
+  TextEncoder.prototype.encode = function (this: TextEncoder, input?: string) {
+    encoded++;
+    return encode.call(this, input);
+  };
+  try {
+    expect(fits({ id: "k", body: "€".repeat(300) })).toBe(true);
+    expect(encoded).toBe(0);
+    // Past the bound, it counts exactly: 900 bytes of a 450-unit string can't be told from 1,350 without.
+    expect(fits({ id: "k", body: "é".repeat(450) })).toBe(true);
+    expect(encoded).toBeGreaterThan(0);
+  } finally {
+    TextEncoder.prototype.encode = encode;
+  }
 });

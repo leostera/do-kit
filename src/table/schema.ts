@@ -98,10 +98,25 @@ export function rowBytes<Row extends RowShape>(schema: TableSchema<Row>, row: Ro
 }
 const UTF8 = new TextEncoder();
 
+/**
+ * At least `rowBytes`: text counted as 3 bytes per UTF-16 unit, the most UTF-8 takes for one (a
+ * pair of surrogates is 4 bytes), so it never copies the text to count it.
+ */
+function rowBytesAtMost<Row extends RowShape>(schema: TableSchema<Row>, row: Row): number {
+  let bytes = 0;
+  for (const column of Object.keys(schema.columns)) {
+    const v = encodeValue(schema, column, row[column as keyof Row]);
+    bytes += typeof v === "string" ? 3 * v.length : v === null ? 0 : 8;
+  }
+  return bytes;
+}
+
 /** Throws RowTooLarge unless `row` fits its table's `maxRowBytes`. */
 export function assertRowFits<Row extends RowShape>(schema: TableSchema<Row>, row: Row): void {
-  const bytes = rowBytes(schema, row);
   const max = schema.maxRowBytes ?? DEFAULT_MAX_ROW_BYTES;
+  // Every put checks its row: a bound that fits answers without encoding the text, as most rows do.
+  if (rowBytesAtMost(schema, row) <= max) return;
+  const bytes = rowBytes(schema, row);
   if (bytes > max) throw new RowTooLarge(String(row[schema.primaryKey]), bytes, max);
 }
 
