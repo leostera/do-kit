@@ -8,6 +8,7 @@
 // chunks and keeps only a status row for `keepStatusMs`, then wipes the run's own results store
 // and itself. `delete` does all of it at once.
 import { DurableObject } from "cloudflare:workers";
+import { pendingAlarm } from "../sharded/alarms.js";
 import { sharded } from "../sharded/client.js";
 import { MAX_BODY_BYTES } from "./body.js";
 import type { WorkGraphResults } from "./results.js";
@@ -37,7 +38,10 @@ export interface StartOptions {
   readonly deadlineMs?: number;
   /** How long the run's status (and its own results store) is kept once it ends (default 1 h). */
   readonly keepStatusMs?: number;
-  /** How long a lease lasts before the chunk goes back to ready (default 120 s). */
+  /**
+   * How long a lease lasts before the chunk goes back to ready: at least three times the plan's
+   * chunkMs (start refuses less), and by default 120 s or that, whichever is longer.
+   */
   readonly leaseMs?: number;
   /** A chunk whose compute fails this many times fails the run (default 3). */
   readonly maxAttempts?: number;
@@ -97,6 +101,8 @@ interface Meta {
   runners: number;
   results: string;
   leaseMs: number;
+  /** The cost the plan's chunks were packed to (absent in a run sealed before it existed). */
+  chunkMs?: number | null;
   maxAttempts: number;
   /** (Absent in a run started before it existed: 5.) */
   maxLeases?: number;
@@ -210,15 +216,16 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
   }
 
   /** Ends submission: every needed chunk must exist. Chunks that need nothing are ready. */
-  async graphSeal(name: string): Promise<RunStatus> {
+  async graphSeal(name: string, chunkMs: number | null = null): Promise<RunStatus> {
     const meta = this.metaFor(name);
     if (meta.state !== "submitting") return this.status();
+    if (chunkMs !== null && !(chunkMs > 0)) throw new Error("chunkMs must be positive");
     const missing = this.sql.exec<{ needed: number }>("SELECT needed FROM graph_needs WHERE needed NOT IN (SELECT id FROM graph_chunks) LIMIT 1").toArray()[0];
     if (missing) throw new Error(`run ${name}: chunk ${missing.needed} is needed but was not submitted`);
     this.ctx.storage.transactionSync(() => {
       this.sql.exec("UPDATE graph_chunks SET needs = (SELECT COUNT(*) FROM graph_needs WHERE graph_needs.chunk = graph_chunks.id)");
       this.sql.exec("UPDATE graph_chunks SET state = 'ready' WHERE needs = 0");
-      this.save({ ...meta, state: "ready" });
+      this.save({ ...meta, state: "ready", chunkMs });
     });
     return this.status();
   }
@@ -230,10 +237,15 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     if (meta.state === "submitting") throw new Error(`run ${name} is not sealed`);
     if (meta.state !== "ready") return this.status();
     if (!(options.runners >= 1)) throw new Error("a run needs at least one runner");
+    // A chunk may run longer than planned (units vary, an eviction restarts it): a lease shorter
+    // than three chunks' planned time lapses while its chunk computes, and another runner
+    // computes it as well, against the run's maxLeases.
+    const chunkMs = meta.chunkMs ?? 0;
+    if (options.leaseMs !== undefined && options.leaseMs < 3 * chunkMs) throw new Error(`leaseMs (${options.leaseMs}) must be at least three times the plan's chunkMs (${chunkMs})`);
     const now = Date.now();
     const own = options.results === undefined;
     const results = options.results ?? ownResultsName(name);
-    const started: Meta = { ...meta, state: "running", runners: options.runners, results, ownResults: own, leaseMs: options.leaseMs ?? 120_000, maxAttempts: options.maxAttempts ?? 3, maxLeases: options.maxLeases ?? 5, wakeAfterMs: options.wakeAfterMs ?? 30_000, tickMs: options.tickMs ?? 5_000, logChunks: options.logChunks ?? false, startedAt: now, deadlineAt: now + (options.deadlineMs ?? DAY_MS), keepStatusMs: options.keepStatusMs ?? HOUR_MS };
+    const started: Meta = { ...meta, state: "running", runners: options.runners, results, ownResults: own, leaseMs: options.leaseMs ?? Math.max(120_000, 3 * chunkMs), maxAttempts: options.maxAttempts ?? 3, maxLeases: options.maxLeases ?? 5, wakeAfterMs: options.wakeAfterMs ?? 30_000, tickMs: options.tickMs ?? 5_000, logChunks: options.logChunks ?? false, startedAt: now, deadlineAt: now + (options.deadlineMs ?? DAY_MS), keepStatusMs: options.keepStatusMs ?? HOUR_MS };
     this.save(started);
     this.finishIfDone(); // an empty run
     for (let i = 0; i < options.runners; i++) this.sql.exec("INSERT OR REPLACE INTO graph_runners (runner, seen_at, waiting) VALUES (?, ?, 0)", i, now);
@@ -271,7 +283,7 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     const now = Date.now();
     this.sql.exec("INSERT INTO graph_runners (runner, seen_at, waiting) VALUES (?, ?, 0) ON CONFLICT (runner) DO UPDATE SET seen_at = excluded.seen_at, waiting = 0", runner, now);
     if (finished) {
-      if ("error" in finished) this.fail(finished.chunk, finished.error);
+      if ("error" in finished) this.fail(runner, finished.chunk, finished.attempt, finished.error);
       else this.complete(finished);
     }
     const m = this.meta!;
@@ -280,8 +292,22 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
       await this.ctx.storage.setAlarm(now);
       return m.state === "done" ? { done: true } : { failed: m.error ?? `the run is ${m.state}` };
     }
+    await this.backstopAlarm(now);
     return this.lease(runner, now);
   }
+
+  /**
+   * Re-arms the alarm if it is gone (lost, or stranded): only the alarm lets leases lapse, wakes
+   * quiet runners and keeps the deadline, and runners keep calling here while it is gone. Looked
+   * at once a tick at most.
+   */
+  private async backstopAlarm(now: number): Promise<void> {
+    const m = this.meta!;
+    if (now - this.alarmCheckedAt < m.tickMs) return;
+    this.alarmCheckedAt = now;
+    if ((await pendingAlarm(this.ctx.storage)) === null) await this.ctx.storage.setAlarm(now + m.tickMs);
+  }
+  private alarmCheckedAt = 0;
 
   async graphStatus(): Promise<RunStatus | null> {
     return this.meta ? this.status() : null;
@@ -341,10 +367,15 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     if (readied > 0) this.wakeWaiting(readied);
   }
 
-  /** A chunk whose compute threw: ready again, or the run fails once it has failed maxAttempts times. */
-  private fail(chunk: number, error: string): void {
-    const row = this.sql.exec<{ state: string; failures: number }>("SELECT state, failures FROM graph_chunks WHERE id = ?", chunk).toArray()[0];
-    if (!row || row.state === "done") return;
+  /**
+   * A chunk whose compute threw: ready again, or the run fails once it has failed maxAttempts
+   * times. Only a report on the chunk's current lease (this runner, this attempt) counts: once a
+   * lease ran out and the chunk went to another runner, a late report must not take it from them,
+   * nor count towards the run's attempts.
+   */
+  private fail(runner: number, chunk: number, attempt: number, error: string): void {
+    const row = this.sql.exec<{ state: string; failures: number; runner: number | null; attempts: number }>("SELECT state, failures, runner, attempts FROM graph_chunks WHERE id = ?", chunk).toArray()[0];
+    if (!row || row.state !== "leased" || row.runner !== runner || row.attempts !== attempt) return;
     const m = this.meta!;
     const failures = row.failures + 1;
     this.ctx.storage.transactionSync(() => {
@@ -421,8 +452,21 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     this.meta = null;
   }
 
-  /** Leases that ran out go back to ready, quiet runners are woken, and the deadline is kept; once the run ends, its cleanup. */
+  /**
+   * Leases that ran out go back to ready, quiet runners are woken, and the deadline is kept; once
+   * the run ends, its cleanup. Never throws: the platform retries a failing alarm only a few
+   * times, so a failure re-arms it a tick later.
+   */
   override async alarm(): Promise<void> {
+    try {
+      await this.tick();
+    } catch (error) {
+      console.error(JSON.stringify({ event: "graph-alarm-failed", run: this.meta?.name ?? null, error: String(error).slice(0, 200) }));
+      await this.ctx.storage.setAlarm(Date.now() + (this.meta?.tickMs || 5_000)).catch(() => undefined);
+    }
+  }
+
+  private async tick(): Promise<void> {
     const m = this.meta;
     if (!m) return;
     if (m.cleanup) return this.cleanUp(Date.now());

@@ -14,7 +14,7 @@ const shape: Shape = { trees: 8, size: 5, chainy: 0.3, joins: 0, seed: 5 };
 /** A run whose runners never start ("idle"): the test is runners 0 and 1. Its leases run out at once. */
 async function idleRun(maxAttempts: number): Promise<string> {
   const run = `idle-late-failure-${unique()}`;
-  await post("/workgraph", { op: "start", run, shape, runners: 2, leaseMs: 200, tickMs: 100, wakeAfterMs: 60_000, maxAttempts });
+  await post("/workgraph", { op: "start", run, shape, runners: 2, chunkMs: 50, leaseMs: 200, tickMs: 100, wakeAfterMs: 60_000, maxAttempts });
   return run;
 }
 const next = (run: string, runner: number, finished: unknown = null) => post<Next>("/workgraph", { op: "next", run, runner, finished });

@@ -323,6 +323,8 @@ class NotReady extends Error {
 /** An atomic step met an older call's hold: it gives way rather than wait (wait-die, RFD0008). */
 class Contended extends Error {}
 const HOLD_WAIT_MS = 2_000;
+/** How often a copy waiting to be activated nudges its parent, at most. */
+const NUDGE_EVERY_MS = 1_000;
 /** Keys whose route hash a shard remembers. */
 const ROUTE_HASHES = 4_096;
 /**
@@ -1256,7 +1258,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // Storage copied from another object and not claimed yet: it keeps that object's meta.
     if (this.isUnclaimedCopy()) return { notReady: bits };
     if (meta.name !== name || hostBits(meta.bits) !== hostBits(bits)) throw new Error(`${nodeName(name, bits)} reached ${nodeName(meta.name, meta.bits)}`);
-    if (meta.state === "copy") return { notReady: bits };
+    if (meta.state === "copy") {
+      // Calls may reach only this half: they are the backstop for a parent whose alarm was lost.
+      this.nudgeParent(meta);
+      return { notReady: bits };
+    }
     // A split interrupted by a restart: abandoned (its copy is never activated).
     if (meta.splitting !== null && !this.hold) {
       this.saveMeta({ ...meta, splitting: null });
@@ -1903,6 +1909,35 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   /** Starts serving, if this is the copy of attempt `epoch`. */
+  /**
+   * A claimed copy, called before it serves, asks its parent to activate it: the parent's alarm
+   * may be lost, and its calls may have stopped (clients route this half here). One nudge in
+   * flight at a time, at most every NUDGE_EVERY_MS.
+   */
+  private nudgeParent(meta: Meta): void {
+    const parent = meta.bits.slice(0, -1);
+    if (meta.bits === "" || this.nudging || Date.now() - this.nudgedAt < NUDGE_EVERY_MS) return;
+    this.nudging = true;
+    this.nudgedAt = Date.now();
+    void this.node(`${parent}0`)
+      .shardedNudge(meta.name, meta.bits, meta.epoch)
+      .catch((error: unknown) => console.error(JSON.stringify({ event: "split-nudge-failed", node: this.nodeLabel(), error: String(error).slice(0, 200) })))
+      .finally(() => (this.nudging = false));
+  }
+  private nudging = false;
+  private nudgedAt = 0;
+
+  /**
+   * A copy of `bits` at `epoch` waiting to be activated: if this shard still has to activate it,
+   * asks for the alarm that does now (as a routed call's check would). Not a call: not counted.
+   */
+  async shardedNudge(name: string, bits: string, epoch: number): Promise<void> {
+    if (this.wiped) return;
+    const meta = this.meta;
+    if (!meta || meta.name !== name || meta.activate?.bits !== bits || meta.activate.epoch !== epoch) return;
+    await this.armAlarm(Date.now());
+  }
+
   async shardedActivate(name: string, bits: string, epoch: number): Promise<boolean> {
     this.assertNotWiped();
     const meta = this.meta;

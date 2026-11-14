@@ -40,7 +40,7 @@ export class WorkGraphRun {
       bytes += body.byteLength;
     }
     if (batch.length > 0) await this.coordinator.graphSubmit(this.name, batch);
-    return (await this.coordinator.graphSeal(this.name)) as RunStatus;
+    return (await this.coordinator.graphSeal(this.name, plan.chunkMs)) as RunStatus;
   }
 
   /** Starts `runners` runners. */

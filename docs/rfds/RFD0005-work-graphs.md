@@ -366,7 +366,10 @@ Leasing:
 - A runner that already holds a lease gets the same chunk back, with the same attempt. This is
   how a runner evicted partway through a chunk resumes it.
 - Otherwise the runner gets the ready chunk of the lowest round, then the lowest id, with
-  `lease_until = now + leaseMs` (120 s by default). The chunk's `attempts` goes up by one.
+  `lease_until = now + leaseMs`. The chunk's `attempts` goes up by one. `start` refuses a
+  `leaseMs` under three times the plan's `chunkMs`, and defaults it to 120 s or that, whichever
+  is longer: a chunk can run longer than planned, and a lease that lapses while its chunk
+  computes has another runner compute it too.
 
 Completing:
 - A chunk's completion is accepted from any runner, even one whose lease ran out and passed to
@@ -377,13 +380,17 @@ Completing:
 
 Failing:
 - A chunk whose `compute` threw goes back to `ready`, until it has failed `maxAttempts` times
-  (3). Then the run fails, with the error.
+  (3). Then the run fails, with the error. Only a report on the chunk's current lease counts
+  (the runner that holds it, at its attempt): a late report from a runner whose lease ran out
+  neither takes the chunk from its new runner nor counts towards the attempts.
 - A chunk whose lease runs out after it was leased `maxLeases` times (5) fails the run: its
   runners never reported. A chunk that needs more CPU than an invocation has kills each runner
   that takes it, and would otherwise be leased again until the deadline. The planner refuses a
   unit that costs more than `chunkMs`, since a unit is never cut.
 
-The alarm, every 5 s until the run ends:
+The alarm, every 5 s until the run ends. It never throws: a failure re-arms it a tick later. A
+runner's call re-arms it, at most once a tick, if it is gone (lost, or stranded more than five
+minutes past due), since only the alarm lets leases lapse:
 - **Expiry.** A lease that ran out goes back to `ready`.
 - **Wake.** A runner that has never called is started again at the first tick after the start: its
   start never reached it (the first call to a new object sometimes fails). A runner that has not

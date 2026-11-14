@@ -348,7 +348,7 @@ test("a runner woken while it computes writes nothing until its chunk is done", 
 test("a chunk whose runners never report fails the run, instead of being leased until the deadline", async () => {
   const run = `poison-${unique()}`;
   const shape: Shape = { trees: 1, size: 3, chainy: 1, joins: 0, seed: 1 };
-  await post("/workgraph", { op: "start", run, shape, results: `poison-${unique()}`, runners: 2, chunkMs: 1_000, leaseMs: 400, tickMs: 200, wakeAfterMs: 400, maxLeases: 2 });
+  await post("/workgraph", { op: "start", run, shape, results: `poison-${unique()}`, runners: 2, chunkMs: 100, leaseMs: 400, tickMs: 200, wakeAfterMs: 400, maxLeases: 2 });
   const status = await finished(run, 60_000);
   expect(status.state).toBe("failed");
   expect(status.error).toContain("never reported");

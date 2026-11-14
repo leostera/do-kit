@@ -166,7 +166,10 @@ headroom for the split itself.
    and marks the sibling to activate. Then it releases the held writes. Those now answer `moved`,
    and the client sends them to the new owner.
 6. **Activate.** It calls `shardedActivate` on the sibling, which starts serving. The alarm
-   retries this until it succeeds.
+   retries this until it succeeds. An alarm can be lost, and clients that learned the split call
+   only the sibling, so the sibling is the backstop: called before it serves, it nudges its
+   parent (`shardedNudge`, at most once a second, one at a time), which re-arms its alarm if
+   the activation is still pending.
 7. **Clean up.** Both shards delete what they gave away, in batches of 250 rows from the alarm.
    The core rows go first, then the subclass's rows through `cleanupForeign(owns, limit)`. Rows a
    shard gave away are invisible from the commit onward: every read filters by ownership.

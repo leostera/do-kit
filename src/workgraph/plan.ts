@@ -69,6 +69,8 @@ export interface WorkGraphPlan {
    * cost of the biggest chunk, and at least `span`.
    */
   readonly chunkSpan: number;
+  /** The cost chunks were packed to (PlanOptions.chunkMs): a run's leases must be longer. */
+  readonly chunkMs: number;
   /** The cost added by replayed cuts. */
   readonly replayed: number;
   readonly rounds: number;
@@ -232,7 +234,7 @@ export function planWorkGraph(graph: WorkGraph<Record<string, AnyTask>> | readon
     if (!hash) throw new Error(`unit ${node.key} is not in this plan`);
     return hash;
   };
-  return { chunks, hashes, hashOf, work: units.reduce((sum, u) => sum + u.cost, 0), span, chunkSpan: chunkSpanOf(chunks), replayed, rounds: Math.max(1, rounds) };
+  return { chunks, hashes, hashOf, work: units.reduce((sum, u) => sum + u.cost, 0), span, chunkSpan: chunkSpanOf(chunks), chunkMs, replayed, rounds: Math.max(1, rounds) };
 }
 
 function indexUnits(units: readonly GraphUnit[]): Node[] {
