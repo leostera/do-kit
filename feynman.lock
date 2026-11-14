@@ -95,6 +95,8 @@
     "src/table/client.ts#TableClient.list": "b3c18207c267",
     "src/table/client.ts#perShardLimit": "4fb242e403e9",
     "src/table/index.ts#ShardedTable.cleanupForeign": "4211d2731091",
+    "src/table/index.ts#ShardedTable.countGroups": "b406cdc50552",
+    "src/table/index.ts#ShardedTable.migrateCountGroups": "b288fdcd1dd0",
     "src/table/index.ts#ShardedTable.page": "a4dc147f1802",
     "src/table/index.ts#ShardedTable.tablePage": "4c3f95575761",
     "src/table/schema.ts#mergePages": "1d7e64ea8e52",
