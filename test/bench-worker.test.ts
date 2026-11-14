@@ -1,9 +1,11 @@
-// The benchmarks check their answers: a point that lost writes, lost rows, or walked a table
-// incompletely fails instead of publishing a good number. The checks, and a split point run on
-// the bench Worker in local development.
+// The benchmarks measure the target, not themselves, and check their answers: a point that lost
+// writes, lost rows, or walked a table incompletely fails instead of publishing a good number, and
+// one whose drivers could not keep up says so. The pure parts directly, then the bench Worker in
+// local development.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { join } from "node:path";
 import { createProblem, walkProblems, WriteLog } from "../bench/worker/src/answers.ts";
+import { callsPerOperation, driversFor, LATE_MS, openLoop, scheduleOf } from "../bench/worker/src/drivers.ts";
 
 test("a key reads back as its last acknowledged write, or a later write whose outcome is unknown", () => {
   const log = new WriteLog();
@@ -31,6 +33,66 @@ test("a walk that repeats or skips rows, and a create count off its outcomes, ar
   expect(createProblem(10, 17, 5, 2)).toBeNull();
   expect(createProblem(10, 14, 5, 2)).toContain("lost");
   expect(createProblem(10, 18, 5, 2)).toContain("invented");
+});
+
+test("drivers scale with the calls an operation makes, not the operations", () => {
+  expect(callsPerOperation("read", "table-16")).toBe(1);
+  expect(callsPerOperation("rmw", "table-16")).toBe(2);
+  expect(callsPerOperation("atomic-4", "split")).toBe(5);
+  expect(callsPerOperation("multi-4", "split")).toBe(4);
+  expect(callsPerOperation("list", "table-16")).toBe(48);
+  expect(callsPerOperation("create", "indexed-16")).toBe(2);
+  expect(driversFor(512, callsPerOperation("rmw", "table-16"), 8192)).toBe(2 * driversFor(512, callsPerOperation("write", "table-16"), 8192));
+  expect(driversFor(64, 48, 8192)).toBe(64);
+});
+
+/** A clock of the test's own: time moves only when every call and sleep waits on it. */
+function fakeClock() {
+  let now = 0;
+  const timers: { at: number; resolve: () => void }[] = [];
+  const clock = {
+    now: () => now,
+    sleep: (ms: number) => new Promise<void>((resolve) => timers.push({ at: now + ms, resolve })),
+  };
+  /** Runs `work` to its end, moving time to each next timer once nothing else can run. */
+  const run = async <T>(work: Promise<T>): Promise<T> => {
+    let done = false;
+    void work.finally(() => (done = true));
+    while (!done) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (done) break;
+      timers.sort((a, b) => a.at - b.at);
+      const next = timers.shift();
+      if (!next) throw new Error("nothing to wait on");
+      now = Math.max(now, next.at);
+      next.resolve();
+    }
+    return work;
+  };
+  return { clock, run, oversleep: (ms: number) => (clock.sleep = (d: number) => new Promise<void>((resolve) => timers.push({ at: now + d + ms, resolve }))) };
+}
+
+test("the open loop sends on schedule whatever the answers, and counts what it could not send", async () => {
+  // Calls of 10 ms at 100 a second on 4 lanes: every send made, on time.
+  let f = fakeClock();
+  const call = (ms: number, clock = f.clock) => () => clock.sleep(ms);
+  let s = await f.run(openLoop(Array.from({ length: 4 }, () => call(10)), 100, 0, 1_000, f.clock));
+  expect(s).toEqual({ due: 100, sent: 100, late: 0, skipped: 0 });
+  expect(scheduleOf([s]).driverLimited).toBe(false);
+  // One lane and calls of 50 ms: the lane is busy for 4 sends of every 5, which are skipped.
+  f = fakeClock();
+  s = await f.run(openLoop([call(50, f.clock)], 100, 0, 1_000, f.clock));
+  expect(s.due).toBe(100);
+  expect(s.sent).toBe(20);
+  expect(s.skipped).toBe(80);
+  expect(scheduleOf([s]).driverLimited).toBe(true);
+  // A driver that wakes late (its isolate busy): the sends it makes late are counted.
+  f = fakeClock();
+  f.oversleep(LATE_MS + 10);
+  const lanes = Array.from({ length: 200 }, () => () => Promise.resolve());
+  s = await f.run(openLoop(lanes, 100, 0, 1_000, f.clock));
+  expect(s.late).toBeGreaterThan(0);
+  expect(scheduleOf([s, { due: 1000, sent: 1000, late: 0, skipped: 0 }]).driverLimited).toBe(s.late / 1100 > 0.01);
 });
 
 // ---- The bench Worker, in local development ----
@@ -97,4 +159,24 @@ test("table points check what they read: walks and listings complete, writes rea
     expect(result.successes).toBeGreaterThan(0);
     expect({ operation, wrongAnswers: result.wrongAnswers, wrongSamples: result.wrongSamples, ok: result.ok }).toEqual({ operation, wrongAnswers: 0, wrongSamples: [], ok: true });
   }
+}, 180_000);
+
+test("an open-loop point sends at its arrival rate, and says when its drivers could not", async () => {
+  const point = async (extra: object) => {
+    const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-4", operation: "read", distribution: "uniform", objectName: `open-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64, ...extra }) });
+    return (await response.json()) as { successes: number; operationsPerSecond: number; schedule: { due: number; sent: number; late: number; skipped: number }; driverLimited: boolean; withinLatency?: boolean; error?: string };
+  };
+  const steady = await point({ arrivalRate: 20, concurrency: 16, maxP99Ms: 10_000 });
+  expect(steady.error).toBeUndefined();
+  expect(steady.schedule.due).toBeGreaterThanOrEqual(95);
+  expect(steady.schedule.sent).toBe(steady.schedule.due);
+  expect(steady.driverLimited).toBe(false);
+  expect(steady.withinLatency).toBe(true);
+  expect(steady.operationsPerSecond).toBeGreaterThan(15);
+  expect(steady.operationsPerSecond).toBeLessThan(25);
+  // One driver with one lane, asked for far more than one call at a time can do.
+  const starved = await point({ arrivalRate: 5_000, concurrency: 1, drivers: 1, maxP99Ms: 0.001 });
+  expect(starved.schedule.skipped).toBeGreaterThan(0);
+  expect(starved.driverLimited).toBe(true);
+  expect(starved.withinLatency).toBe(false);
 }, 180_000);

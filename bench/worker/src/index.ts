@@ -1,4 +1,5 @@
 import { createProblem, walkProblems, WriteLog } from "./answers.ts";
+import { CALLS_PER_DRIVER, callsPerOperation, driversFor, openLoop, scheduleOf, type Schedule } from "./drivers.ts";
 import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
@@ -34,8 +35,6 @@ const TEAMS = 64;
 const DRIVERS_PER_FLEET = 256;
 /** The most drivers one measurement starts (32 fleets). */
 const MAX_DRIVERS = 8192;
-/** Calls each driver keeps in flight: one driver completes only about 90 calls/s, however many it keeps. */
-const CALLS_PER_DRIVER = 16;
 /** "list": one page of 50 rows, newest first, each worker walking its own cursor (tables only). */
 /** "walk": the same, in shard order (`order: "shard"`): one shard a page. */
 /**
@@ -265,6 +264,10 @@ interface MeasureConfig {
   readonly concurrency: number;
   readonly durationMs: number;
   readonly startAt: number;
+  /** Open loop: calls a second for the point, sent whatever the answers; `concurrency` caps those in flight. */
+  readonly arrivalRate?: number;
+  /** A p99 past this fails the point's latency (`withinLatency: false`). */
+  readonly maxP99Ms?: number;
 }
 
 interface DriverResult {
@@ -281,6 +284,8 @@ interface DriverResult {
   /** Answers that were wrong: a write not read back, a walk that skipped or repeated rows. */
   readonly wrongAnswers?: number;
   readonly wrongSamples?: readonly string[];
+  /** Open loop only: how the schedule was kept. */
+  readonly schedule?: Schedule;
 }
 
 abstract class KeyValueBase<EnvT> extends DurableObject<EnvT> {
@@ -506,6 +511,7 @@ interface MergedResult {
   readonly errorSamples: readonly string[];
   readonly wrongAnswers: number;
   readonly wrongSamples: readonly string[];
+  readonly schedule?: Schedule & { readonly driverLimited: boolean };
 }
 
 function merge(results: readonly (DriverResult & { readonly failedDrivers?: number })[], failedDrivers: number, extraSamples: readonly string[] = []): MergedResult {
@@ -530,7 +536,8 @@ function merge(results: readonly (DriverResult & { readonly failedDrivers?: numb
     for (const sample of result.errorSamples ?? []) if (samples.size < 10) samples.add(sample);
     for (const [bucket, count] of result.latencyMs) buckets.set(bucket!, (buckets.get(bucket!) ?? 0) + count!);
   }
-  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSamples: [...samples], wrongAnswers, wrongSamples: [...wrongSamples] };
+  const schedules = results.flatMap((r) => (r.schedule ? [r.schedule] : []));
+  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSamples: [...samples], wrongAnswers, wrongSamples: [...wrongSamples], ...(schedules.length ? { schedule: scheduleOf(schedules) } : {}) };
 }
 
 function driverStub(env: Env, config: { readonly objectName: string; readonly driverIndex: number }): DurableObjectStub<BenchDriver> {
@@ -717,7 +724,9 @@ export class BenchDriver extends DurableObject<Env> {
     /** One in this many writes is read back. */
     const READ_BACK = 100;
 
-    const tableWorker = async (): Promise<void> => {
+    // A lane is one caller: its state (a walk's cursor), and one call at a time. Closed loop: each
+    // lane calls again once answered. Open loop: calls go out on a schedule, to a free lane.
+    const tableLane = (): (() => Promise<void>) => {
       const target = config.target as TableTarget | IndexedTarget;
       const t = rowsClient(this.env, target, config.objectName);
       const indexed = isIndexed(target) ? (t as IndexedTableClient<BenchRow>) : null;
@@ -726,7 +735,7 @@ export class BenchDriver extends DurableObject<Env> {
       let cursor: string | null = null;
       // The keys this walk saw: a walk that ends must have seen each row once (no writes run).
       let seen: string[] = [];
-      while (Date.now() < stopAt) {
+      return async () => {
         const key = keyFor(config, sequence++);
         const before = performance.now();
         try {
@@ -787,12 +796,12 @@ export class BenchDriver extends DurableObject<Env> {
           latencyMs[Math.min(120_000, Math.floor(elapsed))]++;
         }
         await yieldIfNoIO(performance.now() - before);
-      }
+      };
     };
 
-    const worker = async (): Promise<void> => {
-      if (isRows(config.target)) return tableWorker();
-      while (Date.now() < stopAt) {
+    const lane = (): (() => Promise<void>) => {
+      if (isRows(config.target)) return tableLane();
+      return async () => {
         const seq = sequence++;
         const key = keyFor(config, seq);
         const write = config.distribution === "control-plane" ? Math.random() < CONTROL_PLANE.writeShare : config.operation === "mixed" ? Math.random() < MIXED_WRITES : config.operation === "write";
@@ -832,13 +841,15 @@ export class BenchDriver extends DurableObject<Env> {
           latencyMs[bucket]++;
         }
         await yieldIfNoIO(performance.now() - before);
-      }
+      };
     };
 
-    await Promise.all(Array.from({ length: config.concurrency }, worker));
+    const lanes = Array.from({ length: config.concurrency }, lane);
+    const schedule = config.arrivalRate ? await openLoop(lanes, config.arrivalRate / config.driverCount, startedAt, stopAt) : null;
+    if (!schedule) await Promise.all(lanes.map(async (call) => { while (Date.now() < stopAt) await call(); }));
     const sparse: [number, number][] = [];
     latencyMs.forEach((count, bucket) => count && sparse.push([bucket, count]));
-    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSamples: [...errorSamples], wrongAnswers, wrongSamples: [...wrongSamples] };
+    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSamples: [...errorSamples], wrongAnswers, wrongSamples: [...wrongSamples], ...(schedule ? { schedule } : {}) };
   }
 
   private async write(target: Target, name: string, keys: readonly string[], values: readonly string[]): Promise<void> {
@@ -886,7 +897,14 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (!Number.isSafeInteger(payloadBytes) || (payloadBytes as number) < 16 || (payloadBytes as number) > 64 * 1024) throw new Error("payloadBytes must be from 16 to 65536");
   const objectName = body.objectName;
   if (typeof objectName !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(objectName)) throw new Error("objectName must be 1-80 safe characters");
-  return { target: target as Target, operation: operation as Operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName };
+  const { arrivalRate, maxP99Ms } = body;
+  if (arrivalRate !== undefined && (typeof arrivalRate !== "number" || !(arrivalRate > 0) || arrivalRate > 1_000_000)) throw new Error("arrivalRate must be calls a second, above 0 and at most 1000000");
+  if (maxP99Ms !== undefined && (typeof maxP99Ms !== "number" || !(maxP99Ms > 0))) throw new Error("maxP99Ms must be a positive number of milliseconds");
+  return {
+    target: target as Target, operation: operation as Operation, distribution: distribution as Distribution, concurrency: concurrency as number, durationMs: durationMs as number, keyCount: keyCount as number, payloadBytes: payloadBytes as number, objectName,
+    ...(arrivalRate !== undefined ? { arrivalRate: arrivalRate as number } : {}),
+    ...(maxP99Ms !== undefined ? { maxP99Ms: maxP99Ms as number } : {}),
+  };
 }
 
 function percentile(histogram: readonly number[], p: number): number {
@@ -1277,11 +1295,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
 
     // One driver tops out at about 90 calls/s, whatever its concurrency: 16 in-flight calls each, so
-    // the drivers are not what is measured. Fleets of 256 drivers start them.
-    // A listing calls every shard for each page: drivers scale with the calls, not the pages.
-    // An indexed create is two calls (reserve, then write): drivers scale with those too.
-    const fanOut = input.operation === "list" && isTable(input.target) ? Number(input.target.slice("table-".length)) : input.operation === "create" && isIndexed(input.target) ? 2 : 1;
-    const driverCount = forcedDrivers ?? Math.min(MAX_DRIVERS, input.concurrency, Math.max(Math.min(16, input.concurrency), Math.ceil((input.concurrency * fanOut) / CALLS_PER_DRIVER)));
+    // the drivers are not what is measured. Fleets of 256 drivers start them. Drivers scale with
+    // the calls an operation makes (a listing calls every shard, an rmw two), not the operations.
+    const driverCount = forcedDrivers ?? driversFor(input.concurrency, callsPerOperation(input.operation, input.target), MAX_DRIVERS);
     const perDriver = Math.ceil(input.concurrency / driverCount);
     const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount, concurrency: perDriver }));
     const fleets: { stub: DurableObjectStub<BenchFleet>; configs: typeof configs }[] = [];
@@ -1304,7 +1320,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const fleetResults = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
     const lostDrivers = settled.reduce((n, r, i) => n + (r.status === "rejected" ? fleets[i]!.configs.length : 0), 0);
     const fleetReasons = settled.flatMap((r) => (r.status === "rejected" ? [`fleet: ${String(r.reason).slice(0, 200)}`] : [])).slice(0, 3);
-    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSamples, wrongAnswers, wrongSamples } = merge(fleetResults, lostDrivers, fleetReasons);
+    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSamples, wrongAnswers, wrongSamples, schedule } = merge(fleetResults, lostDrivers, fleetReasons);
     const histogram = new Array<number>(120_001).fill(0);
     for (const [bucket, count] of latencyMs) histogram[bucket!] = count!;
 
@@ -1348,6 +1364,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
       operationsPerSecond: successes / (elapsedMs / 1000),
       mebibytesPerSecond: bytes / (1024 * 1024) / (elapsedMs / 1000),
       latencyMs: { p50: percentile(histogram, 0.5), p95: percentile(histogram, 0.95), p99: percentile(histogram, 0.99), max: Math.round(maxLatencyMs * 100) / 100 },
+      /** Open loop: how the drivers kept the schedule; driverLimited means the drivers, not the target, were measured. */
+      ...(schedule ? { schedule, driverLimited: schedule.driverLimited } : {}),
+      ...(input.maxP99Ms ? { withinLatency: percentile(histogram, 0.99) <= input.maxP99Ms } : {}),
       topology,
       leased,
       stalls,

@@ -48,6 +48,13 @@ if (!baseUrl || !token) throw new Error("Set BENCH_URL and BENCH_TOKEN in the en
 const timestamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
 const suite = `bench-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 const concurrencyLevels = (process.env.BENCH_CONCURRENCY ?? "1,16,64,256,1024").split(",").map(Number);
+/**
+ * Open loop: calls a second for each point, sent whatever the answers, instead of a number in
+ * flight. Each point keeps at most the largest BENCH_CONCURRENCY level in flight.
+ */
+const arrivalRates = process.env.BENCH_ARRIVAL_RATES?.split(",").map(Number) ?? null;
+/** A point whose p99 is past this is marked `withinLatency: false`. */
+const maxP99Ms = process.env.BENCH_MAX_P99_MS ? Number(process.env.BENCH_MAX_P99_MS) : undefined;
 /** Each level first runs unmeasured, so splits that load causes settle before measuring. */
 const warmup = process.env.BENCH_WARMUP !== "0";
 const payloadBytes = Number(process.env.BENCH_PAYLOAD_BYTES ?? 1024);
@@ -90,6 +97,7 @@ async function measure(config: {
   distribution: Distribution;
   concurrency: number;
   objectName: string;
+  arrivalRate?: number;
 }): Promise<Point> {
   // A failed point is retried once; what failed is logged, as the platform answered it.
   for (let attempt = 1; ; attempt++) {
@@ -101,7 +109,7 @@ async function measure(config: {
     let response: Response;
     let text: string;
     try {
-      response = await fetch(`${baseUrl}/measure`, { method: "POST", headers, body: JSON.stringify({ ...config, durationMs, keyCount, payloadBytes }), timeout: false, signal } as RequestInit);
+      response = await fetch(`${baseUrl}/measure`, { method: "POST", headers, body: JSON.stringify({ ...config, durationMs, keyCount, payloadBytes, ...(maxP99Ms ? { maxP99Ms } : {}) }), timeout: false, signal } as RequestInit);
       text = await response.text();
     } catch (error) {
       console.error(JSON.stringify({ failed: config, error: String(error) }));
@@ -164,11 +172,13 @@ if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ??
   for (const distribution of (process.env.BENCH_DISTRIBUTIONS ?? "uniform,hot").split(",") as Distribution[]) {
     for (const target of (process.env.BENCH_TARGETS ?? "single,split,presplit,legacy").split(",") as Target[]) {
       const objectName = `${suite}-${target}-${operation}-${distribution}`;
-      for (const concurrency of concurrencyLevels) {
+      const levels = arrivalRates ? arrivalRates.map((arrivalRate) => ({ concurrency: Math.max(...concurrencyLevels), arrivalRate })) : concurrencyLevels.map((concurrency) => ({ concurrency }));
+      for (const level of levels) {
+        const { concurrency } = level;
         let point: Point;
         try {
-          if (warmup) await measure({ target, operation, distribution, concurrency, objectName });
-          point = await measure({ target, operation, distribution, concurrency, objectName });
+          if (warmup) await measure({ target, operation, distribution, ...level, objectName });
+          point = await measure({ target, operation, distribution, ...level, objectName });
         } catch (error) {
           // A point that failed twice is logged and left out: the rest of the suite still runs.
           console.error(JSON.stringify({ skipped: { target, operation, distribution, concurrency }, error: String(error) }));
@@ -178,7 +188,8 @@ if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ??
         save();
         const wrong = point as { ok?: boolean; wrongAnswers?: number; wrongSamples?: string[] };
         if (wrong.ok === false) wrongPoints.push(JSON.stringify({ target, operation, distribution, concurrency, wrongAnswers: wrong.wrongAnswers, wrongSamples: wrong.wrongSamples }));
-        console.log(JSON.stringify({ target, operation, distribution, concurrency: point.concurrency, opsPerSecond: Math.round(point.operationsPerSecond), mebibytesPerSecond: Number(point.mebibytesPerSecond.toFixed(3)), latencyMs: point.latencyMs, errors: point.errors, leaves: point.topology?.leaves ?? 1, ...((point as { stalls?: string[] }).stalls?.length ? { stalls: (point as { stalls?: string[] }).stalls } : {}), ...((point as { leased?: unknown }).leased ? { leased: (point as { leased?: unknown }).leased } : {}) }));
+        const open = point as { arrivalRate?: number; driverLimited?: boolean; withinLatency?: boolean };
+        console.log(JSON.stringify({ target, operation, distribution, concurrency: point.concurrency, ...(open.arrivalRate ? { arrivalRate: open.arrivalRate, driverLimited: open.driverLimited } : {}), ...(open.withinLatency === false ? { withinLatency: false } : {}), opsPerSecond: Math.round(point.operationsPerSecond), mebibytesPerSecond: Number(point.mebibytesPerSecond.toFixed(3)), latencyMs: point.latencyMs, errors: point.errors, leaves: point.topology?.leaves ?? 1, ...((point as { stalls?: string[] }).stalls?.length ? { stalls: (point as { stalls?: string[] }).stalls } : {}), ...((point as { leased?: unknown }).leased ? { leased: (point as { leased?: unknown }).leased } : {}) }));
       }
     }
   }

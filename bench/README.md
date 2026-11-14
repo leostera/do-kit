@@ -19,7 +19,18 @@ The numbers and graphs in the [README](../README.md) and [docs/performance.md](.
 
 Operations besides `read` and `write`: `list` and `create` (table targets); `atomic-2` and `atomic-4`, one `atomically` put of that many distinct keys, against `multi-2` and `multi-4`, the same put as one plain call (`presplit` or `split`; with `hot`, keys come from a pool of 8); and `mixed`, reads with 1% writes (`reader-*`).
 
-Driver Durable Objects generate the load from several regions, using `locationHint` (placement is advisory). Each driver keeps at most 16 calls in flight, because one driver completes only about 90 calls/s. With fewer drivers, you measure the drivers, not the target.
+Driver Durable Objects generate the load from several regions, using `locationHint` (placement is advisory). Each driver keeps at most 16 calls to Durable Objects in flight, because one driver completes only about 90 calls/s. With fewer drivers, you measure the drivers, not the target. Drivers scale with the calls an operation makes, not the operations: a table-N `list` page is up to 3 × N calls, an `rmw` 2, `atomic-N` N + 1, `multi-N` N, and an indexed `create` 2 (`worker/src/drivers.ts`).
+
+By default each driver runs a closed loop: a caller calls again once answered, so a slower target is offered less load. With `arrivalRate` (calls/s for the point; `BENCH_ARRIVAL_RATES` in the runner) the drivers run an open loop: calls go out on a fixed schedule whatever the answers, and `concurrency` caps how many are in flight. A send that could not be made (every caller busy) or was made more than 50 ms late is counted in the point's `schedule`. Past 1% of the sends, the point says `driverLimited: true`: it measured its drivers, so add drivers (`drivers`) or in-flight calls before reading its numbers. With `maxP99Ms` (`BENCH_MAX_P99_MS`), a point past that p99 says `withinLatency: false`.
+
+Every point checks its answers, and one that got a wrong answer says `ok: false` and makes the runner exit 1 at the end, with the point kept in the results:
+
+- a split point reads back every key its writers wrote, and counts the rows the shards own (`lostWrites`, `rowDelta`);
+- a table `write` point reads 1 in 100 writes back;
+- each `list` or `walk` that reaches its end must have seen every row once;
+- a `create` point's row count must grow by between its successes and its successes plus errors.
+
+Wrong answers are in `wrongAnswers` and `wrongSamples`.
 
 ## What a run measures
 
