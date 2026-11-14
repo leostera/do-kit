@@ -275,6 +275,13 @@ const MUTANTS: Mutant[] = [
     test: "test/background.test.ts",
     pattern: "throws before super",
   },
+  {
+    name: "flood-unshed",
+    breaks: "a shard flooded with listings refuses some, so its writes still run",
+    edits: [{ file: "src/table/index.ts", find: "    if (this.scannedThisSecond >= this.scanRowsPerSecond) this.notReady", replace: "    if (this.scannedThisSecond >= Infinity) this.notReady" }],
+    test: "test/cost.test.ts",
+    pattern: "flooded",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

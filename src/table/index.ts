@@ -92,11 +92,6 @@ const MAX_TABLE_DEPTH = BUCKET_DIGITS * 4;
 const CLEANUP_BATCH = 250;
 /** A shard's page stops once its rows hold this much text (UTF-16 units, about bytes): RPC answers stay small. */
 const PAGE_BYTES = 4 * 1024 * 1024;
-/**
- * Rows a shard's listings scan a second before more wait for the next: about what SQLite in a
- * Durable Object reads in a quarter of a second, leaving the rest of it to other calls.
- */
-const SCAN_ROWS_PER_SECOND = 200_000;
 /** Counts of a dropped group deleted a step: each reads about four rows (the table and its key). */
 const COUNT_DROP_BATCH = 120;
 /** How long one alarm takes build steps for, at most, before it asks for the next. */
@@ -129,6 +124,11 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
    * an index over millions of rows never needs more CPU than one call has.
    */
   protected indexBuildRows = 10_000;
+  /**
+   * Rows a shard's listings scan a second before more wait for the next: about what SQLite in a
+   * Durable Object reads in a quarter of a second, leaving the rest of it to other calls.
+   */
+  protected scanRowsPerSecond = 200_000;
   private migrated = false;
   /** SQLite's index on the primary key, for listings in key order. */
   private keyIndex = "";
@@ -512,11 +512,11 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     // An index being built, or with rows whose keys may be stale, lists nothing yet: the alarm
     // and the calls meanwhile build it, a step each.
     if (ix && (this.building.has(ix.keys) || this.dirtyRows)) this.notReady();
-    // Flooded: past SCAN_ROWS_PER_SECOND rows scanned this second, pages wait for the next one.
+    // Flooded: past scanRowsPerSecond rows scanned this second, pages wait for the next one.
     // The client backs off and asks again, so a burst of wide listings can't starve the writes.
     const second = Math.floor(Date.now() / 1000);
     if (this.scanSecond !== second) [this.scanSecond, this.scannedThisSecond] = [second, 0];
-    if (this.scannedThisSecond >= SCAN_ROWS_PER_SECOND) this.notReady((second + 1) * 1000);
+    if (this.scannedThisSecond >= this.scanRowsPerSecond) this.notReady((second + 1) * 1000);
     const [lo, hi] = this.ownedHashRange();
     const params: SqlValue[] = [];
     const matches = request.where.length ? request.where.map((c) => this.condition(c, params)).join(" AND ") : "1";

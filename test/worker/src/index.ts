@@ -621,6 +621,8 @@ const docsV2 = defineTable<DocV2>({
 export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   /** A new index is built over a few hundred rows a call, so tests see it take several. */
   protected override indexBuildRows = 300;
+  /** Flooded at 20,000 rows a second: a few full-budget listings in a second, however fast the machine. */
+  protected override scanRowsPerSecond = 20_000;
   protected override commands = docCommands as never;
   async sqlRun(statements: readonly { query: string; bindings?: readonly unknown[] }[]): Promise<unknown[][]> {
     return sqlRun(this.ctx.storage, statements);
