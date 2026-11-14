@@ -178,6 +178,18 @@ test("a row copy sends batches of at most 4 MiB on the heap, whatever the text",
   expect(Math.max(...batches.map((b) => b.heapBytes))).toBeLessThanOrEqual(4 * 1024 * 1024);
 }, 120_000);
 
+test("a row copy whose batch was cut leaves no statement open: the shard can still drop tables", async () => {
+  const name = `size-cut-open-${unique()}`;
+  const cjk = (i: number) => `${i}`.padEnd(600_000, "界");
+  const keys = Array.from({ length: 50 }, (_, i) => `c${i}`).filter((k) => hashBit(keyHash(k), 0) === "1").slice(0, 8);
+  for (const [i, key] of keys.entries()) await call("counters", name, "putText", [key], [cjk(i)]);
+  expect(await post<boolean>("/split", { cls: "counters", name, bits: "" })).toBe(true);
+  // More than one batch: a batch was cut short of its page of rows.
+  expect((await object<unknown[]>("counters", name, "1", "receivedBatches")).length).toBeGreaterThan(1);
+  const drop = await object<unknown>("counters", name, "0", "sqlRun", [{ query: "CREATE TABLE zz_probe (x)" }, { query: "DROP TABLE zz_probe" }]).then(() => "dropped", (e: unknown) => String(e));
+  expect(drop).toBe("dropped");
+}, 120_000);
+
 test("a row copy of a table sends only the rows of the half that moves", async () => {
   const name = `size-copy-half-${unique()}`;
   const names = Array.from({ length: 400 }, (_, i) => `d${i}`);

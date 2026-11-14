@@ -185,3 +185,29 @@ test("the global index's sweep of stale reservations reads only pending entries"
   expect(sweep.map((s) => s.plan.join("; "))).toEqual(sweep.map(() => expect.stringContaining("_pending")));
   expect(Math.max(...sweep.map((s) => s.rowsRead))).toBeLessThanOrEqual(10);
 }, 60_000);
+
+// SQLite refuses DROP and RENAME (SQLITE_LOCKED) while any statement on the connection is unfinished,
+// and a cursor left part-read stays open until it is collected: a page that stopped early would block
+// every key-table drop, compaction and schema change of its shard.
+const dropWorks = (cls: string, name: string) =>
+  post<unknown>("/object", { cls, name, bits: "", method: "sqlRun", args: [[{ query: "CREATE TABLE zz_probe (x)" }, { query: "DROP TABLE zz_probe" }]] }).then(
+    () => "dropped",
+    (error: unknown) => String(error),
+  );
+
+test("a listing page that stops early leaves no statement open: its shard can still drop and rename tables", async () => {
+  const name = `open-statement-${unique()}`;
+  await post("/table", { cls: "evolving", name, op: "putMany", args: [docs(50).map((row) => ({ row }))] });
+  // Full after 2 rows, by the primary key and by an index: the page stops with rows left to read.
+  await post("/table", { cls: "evolving", name, op: "list", args: [{ limit: 2 }] });
+  expect(await dropWorks("evolving", name)).toBe("dropped");
+  await post("/table", { cls: "evolving", name, op: "list", args: [{ index: "byCreated", limit: 2 }] });
+  expect(await dropWorks("evolving", name)).toBe("dropped");
+}, 60_000);
+
+test("a global index page that stops early leaves no statement open on the index shard", async () => {
+  const name = `open-statement-index-${unique()}`;
+  for (let i = 0; i < 20; i++) await post("/indexed", { name, op: "put", args: [{ id: `u${i}`, email: `u${i}@example.com`, name: `u${i}`, team: "core", createdAt: i, active: true }] });
+  await post("/indexed", { name, op: "list", args: [{ index: "byTeam", partition: ["core"], limit: 2 }] });
+  expect(await dropWorks("userIndexes", `${name}`)).toBe("dropped");
+}, 60_000);

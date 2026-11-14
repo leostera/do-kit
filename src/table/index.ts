@@ -1,7 +1,7 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
 // conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
 import { ShardedObject } from "../sharded/index.js";
-import { compareText, DEFAULT_MAX_COUNT_VALUES, DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
+import { compareText, DEFAULT_MAX_COUNT_VALUES, readToEnd, DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
 
 export * from "./schema.js";
 export { table, TableClient, type TableClientOptions } from "./client.js";
@@ -523,16 +523,17 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     const order = request.direction === "asc" ? "ASC" : "DESC";
     // A row's position: its index key, or its primary key. SQLite seeks to the cursor in that
     // key's order and reads on: by an index, in its key table, looking up each row by its key.
-    const sql = ix
-      ? `SELECT t.*, (${matches}) AS _m, k._key AS _pos FROM "${ix.keys}" AS k CROSS JOIN ${TABLE} AS t ON t.${this.q(pk)} = k._pk ` +
-        `WHERE k._key ${request.after === null ? "> ''" : request.direction === "asc" ? "> ?" : "< ?"} AND k._hash >= ? AND k._hash <= ? ORDER BY k._key ${order} LIMIT ?`
-      : `SELECT *, (${matches}) AS _m, ${this.q(pk)} AS _pos FROM ${TABLE} INDEXED BY "${this.keyIndex}" ` +
-        `WHERE ${request.after === null ? "" : `${this.q(pk)} ${request.direction === "asc" ? ">" : "<"} ? AND `}_hash >= ? AND _hash <= ? ORDER BY ${this.q(pk)} ${order} LIMIT ?`;
+    const sqlAfter = (after: string | null) =>
+      ix
+        ? `SELECT t.*, (${matches}) AS _m, k._key AS _pos FROM "${ix.keys}" AS k CROSS JOIN ${TABLE} AS t ON t.${this.q(pk)} = k._pk ` +
+          `WHERE k._key ${after === null ? "> ''" : request.direction === "asc" ? "> ?" : "< ?"} AND k._hash >= ? AND k._hash <= ? ORDER BY k._key ${order} LIMIT ?`
+        : `SELECT *, (${matches}) AS _m, ${this.q(pk)} AS _pos FROM ${TABLE} INDEXED BY "${this.keyIndex}" ` +
+          `WHERE ${after === null ? "" : `${this.q(pk)} ${request.direction === "asc" ? ">" : "<"} ? AND `}_hash >= ? AND _hash <= ? ORDER BY ${this.q(pk)} ${order} LIMIT ?`;
     const rows: { key: string; row: RowShape; version: number; position: string }[] = [];
-    let last: string | null = null;
+    let last: string | null = request.after;
     let scanned = 0;
     let bytes = 0;
-    for (const found of this.db.exec<Record<string, SqlValue>>(sql, ...params, ...(request.after === null ? [] : [request.after]), lo, hi, request.budget)) {
+    for (const found of readToEnd(request.budget, (n) => this.db.exec<Record<string, SqlValue>>(sqlAfter(last), ...params, ...(last === null ? [] : [last]), lo, hi, n))) {
       scanned++;
       last = found._pos as string;
       if (found._m) {

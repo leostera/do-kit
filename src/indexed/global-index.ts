@@ -4,7 +4,7 @@
 // index cannot decide alone.
 import { keyHash, sharded, ShardedObject } from "../sharded/index.js";
 import type { Untyped } from "../table/client.js";
-import type { Condition, RowShape, SqlValue, Versioned } from "../table/schema.js";
+import { readToEnd, type Condition, type RowShape, type SqlValue, type Versioned } from "../table/schema.js";
 import { indexIdOfRoute, routeRangeOf, type ApplyAnswer, type IndexOp, type IndexPage, type IndexPageRequest, type ReserveAnswer, type ResolveAnswer } from "./entries.js";
 
 const ENTRIES = "global_index_entries";
@@ -274,14 +274,14 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
   private page(route: string, request: IndexPageRequest): IndexPage {
     const params: SqlValue[] = [];
     const matches = request.where.length ? request.where.map((c) => condition(c, params)).join(" AND ") : "1";
-    const after = request.after === null ? "" : `AND entry ${request.direction === "asc" ? ">" : "<"} ? `;
-    const sql =
-      `SELECT entry, row, version, (${matches}) AS _m FROM ${ENTRIES} WHERE route = ? AND removed = 0 AND version > 0 ${after}` +
+    const sqlAfter = (after: string | null) =>
+      `SELECT entry, row, version, (${matches}) AS _m FROM ${ENTRIES} WHERE route = ? AND removed = 0 AND version > 0 ${after === null ? "" : `AND entry ${request.direction === "asc" ? ">" : "<"} ? `}` +
       `ORDER BY entry ${request.direction === "asc" ? "ASC" : "DESC"} LIMIT ?`;
     const rows: IndexPage["rows"][number][] = [];
-    let last: string | null = null;
+    let last: string | null = request.after;
     let scanned = 0;
-    for (const found of this.db.exec<{ entry: string; row: string; version: number; _m: number }>(sql, ...params, route, ...(request.after === null ? [] : [request.after]), request.budget)) {
+    // In statements each read to its end: a page that stops early leaves none open (see readToEnd).
+    for (const found of readToEnd(request.budget, (n) => this.db.exec<{ entry: string; row: string; version: number; _m: number }>(sqlAfter(last), ...params, route, ...(last === null ? [] : [last]), n))) {
       scanned++;
       last = found.entry;
       if (found._m) {

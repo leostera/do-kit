@@ -2047,12 +2047,15 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
         let bytes = 0;
         let cut = false;
         for (const row of cursor.raw()) {
+          // Cut: the statement is read on to its end, its rows dropped (the next batch reads them
+          // again). Left part-read, it stays open, and SQLite refuses every DROP and ALTER TABLE.
+          if (cut) continue;
           // Bytes as the batch takes them on the heap (two a character): a batch carries at least
           // one row, and stops before the row that would take it past COPY_BATCH_BYTES.
           const size = row.reduce<number>((n, value) => n + heapBytes(value), 0);
           if (rows.length > 0 && bytes + size > COPY_BATCH_BYTES) {
             cut = true;
-            break;
+            continue;
           }
           after = keyAt.map((i): SqlStorageValue => row[i]!);
           rows.push(order.rowid ? row.slice(1) : row);

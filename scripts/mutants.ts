@@ -296,6 +296,20 @@ const MUTANTS: Mutant[] = [
     test: "test/sharded.test.ts",
     pattern: "commit fails to store",
   },
+  {
+    name: "page-cursor-left-open",
+    breaks: "a listing page reads each statement to its end, so a page that stops early blocks no DROP or ALTER TABLE",
+    edits: [{ file: "src/table/schema.ts", find: "    const n = Math.min(READ_CHUNK, limit - read);\n    const rows = chunk(n).toArray();\n    read += rows.length;\n    yield* rows;\n    if (rows.length < n) return;", replace: "    for (const row of chunk(limit)) yield row;\n    return;" }],
+    test: "test/schema-statements.test.ts",
+    pattern: "stops early",
+  },
+  {
+    name: "copy-cursor-left-open",
+    breaks: "a row copy reads a cut batch's statement to its end",
+    edits: [{ file: "src/sharded/index.ts", find: "            cut = true;\n            continue;", replace: "            cut = true;\n            break;" }],
+    test: "test/size.test.ts",
+    pattern: "batch was cut",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

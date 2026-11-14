@@ -505,6 +505,9 @@ export class Users extends IndexedTable<Env, User> {
 }
 
 export class UserIndexes extends GlobalIndex<Env> {
+  async sqlRun(statements: readonly { query: string; bindings?: readonly unknown[] }[]): Promise<unknown[][]> {
+    return sqlRun(this.ctx.storage, statements);
+  }
   private readonly log = new StatementLog(this.ctx.storage);
   /** The statements this instance ran whose text contains `filter`, since the last reset. */
   async statements(filter: string, reset: boolean): Promise<StatementCost[]> {

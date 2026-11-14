@@ -528,3 +528,22 @@ export function redact(error: unknown): string {
   const text = String((error as Error)?.message ?? error).replace(/"(?:[^"\\]|\\.)*"/g, '"…"');
   return text.length <= REDACTED_LENGTH ? text : `${text.slice(0, REDACTED_LENGTH - 1)}…`;
 }
+
+/** Rows a page reads a statement: each read to its end before the next (see readToEnd). */
+const READ_CHUNK = 64;
+
+/**
+ * Up to `limit` rows, read in statements of READ_CHUNK rows, each to its end: `chunk(n)` runs the
+ * next one (from the last row its caller saw). SQLite refuses DROP and ALTER TABLE while any
+ * statement on the connection is unfinished, and a cursor left part-read stays open until it is
+ * collected: a page that stopped early would block every drop and rename of its shard.
+ */
+export function* readToEnd<T>(limit: number, chunk: (n: number) => SqlStorageCursor<T & Record<string, SqlStorageValue>>): Generator<T> {
+  for (let read = 0; read < limit; ) {
+    const n = Math.min(READ_CHUNK, limit - read);
+    const rows = chunk(n).toArray();
+    read += rows.length;
+    yield* rows;
+    if (rows.length < n) return;
+  }
+}
