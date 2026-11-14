@@ -4,8 +4,9 @@ import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
 import { LeasedRelay, LeasedSource, readHot, writeHot, type ReaderTarget } from "./leased.ts";
+import { plainTable, PlainRows } from "./plain.ts";
 
-export { LeasedRelay, LeasedSource };
+export { LeasedRelay, LeasedSource, PlainRows };
 import { defineCommands, defineTable, ShardedTable, table, type Decision, type TableClient } from "../../../src/table/index.ts";
 import { GlobalIndex, IndexedTable, indexedTable, type IndexedTableClient } from "../../../src/indexed/index.ts";
 import { entryOf, globalIndexes as globalIndexesOf } from "../../../src/indexed/entries.ts";
@@ -14,8 +15,11 @@ import { splittable as legacySplittable, SplittableObject as LegacySplittableObj
 
 const LOCATIONS = ["wnam", "enam", "weur", "eeur", "apac"] as const;
 /** "split": snapshot splits (this package); "legacy": the previous row-by-row handoff. */
-type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget | ReaderTarget;
-const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16", "reader-single", "reader-leased"];
+type Target = "single" | "split" | "legacy" | "presplit" | "presplit-4096" | TableTarget | IndexedTarget | PlainTarget | ReaderTarget;
+const TARGETS: readonly Target[] = ["single", "split", "legacy", "presplit", "presplit-4096", "table-1", "table-4", "table-16", "table-64", "indexed-1", "indexed-4", "indexed-16", "plain-1", "plain-16", "reader-single", "reader-leased"];
+/** The tables' baselines: the same rows in that many plain SQLite Durable Objects, sharded by hand (`plain.ts`). */
+type PlainTarget = "plain-1" | "plain-16";
+const isPlain = (t: Target): t is PlainTarget => t.startsWith("plain-");
 /** One hot key, read by readers in their isolates: of one object, or with leased reads. */
 const isReader = (t: Target): t is ReaderTarget => t === "reader-single" || t === "reader-leased";
 /** A ShardedTable that starts as this many shards and never splits by load: "table-1" is one object. */
@@ -28,7 +32,7 @@ const isTable = (t: Target): t is TableTarget => t.startsWith("table-");
 type IndexedTarget = "indexed-1" | "indexed-4" | "indexed-16";
 const isIndexed = (t: Target): t is IndexedTarget => t.startsWith("indexed-");
 /** Rows, or rows and entries, on shards: the targets the table driver serves. */
-const isRows = (t: Target): t is TableTarget | IndexedTarget => isTable(t) || isIndexed(t);
+const isRows = (t: Target): t is TableTarget | IndexedTarget | PlainTarget => isTable(t) || isIndexed(t) || isPlain(t);
 /** Teams rows belong to: an indexed listing reads one team's partition. */
 const TEAMS = 64;
 /** Drivers per fleet: one fleet object starts and gathers this many drivers, as one Worker did before. */
@@ -103,6 +107,7 @@ interface Env {
   readonly TABLE_4: DurableObjectNamespace<Table4>;
   readonly TABLE_16: DurableObjectNamespace<Table16>;
   readonly TABLE_64: DurableObjectNamespace<Table64>;
+  readonly PLAIN: DurableObjectNamespace<PlainRows>;
   readonly INDEXED_1: DurableObjectNamespace<Indexed1>;
   readonly INDEXED_4: DurableObjectNamespace<Indexed4>;
   readonly INDEXED_16: DurableObjectNamespace<Indexed16>;
@@ -243,7 +248,9 @@ function indexedClient(env: Env, target: IndexedTarget, name: string): IndexedTa
   return indexedTable(rows as never, entries as never, name, indexedRows);
 }
 /** The client of a table or indexed target. */
-function rowsClient(env: Env, target: TableTarget | IndexedTarget, name: string): TableClient<BenchRow> {
+function rowsClient(env: Env, target: TableTarget | IndexedTarget | PlainTarget, name: string): TableClient<BenchRow> {
+  // A plain target serves the calls the driver makes of a table (not apply, or indexed lookups).
+  if (isPlain(target)) return plainTable(env.PLAIN, name, Number(target.slice("plain-".length))) as unknown as TableClient<BenchRow>;
   return isIndexed(target) ? indexedClient(env, target, name) : tableClient(env, target, name);
 }
 
@@ -887,9 +894,10 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (keysPerCall(operation as Operation) > 1 && target !== "presplit" && target !== "split") throw new Error("atomic-N and multi-N are for sharded targets");
   if (isReader(target as Target) ? operation !== "read" && operation !== "mixed" : operation === "mixed") throw new Error("entrypoint targets take read or mixed, and only they take mixed");
   if (operation === "create" && !isRows(target as Target)) throw new Error("create is for table targets");
-  if ((operation === "apply" || operation === "rmw") && !isTable(target as Target)) throw new Error("apply and rmw are for sharded table targets");
+  if (operation === "apply" && !isTable(target as Target)) throw new Error("apply is for sharded table targets");
+  if (operation === "rmw" && !isTable(target as Target) && !isPlain(target as Target)) throw new Error("rmw is for sharded and plain table targets");
   if (operation === "list" && !isRows(target as Target)) throw new Error("list is for table targets");
-  if (operation === "walk" && !isTable(target as Target)) throw new Error("walk is for sharded table targets");
+  if (operation === "walk" && !isTable(target as Target) && !isPlain(target as Target)) throw new Error("walk is for sharded and plain table targets");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
   if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > MAX_DRIVERS * CALLS_PER_DRIVER) throw new Error(`concurrency must be an integer from 1 to ${MAX_DRIVERS * CALLS_PER_DRIVER}`);
   if (!Number.isSafeInteger(durationMs) || (durationMs as number) < 5_000 || (durationMs as number) > 120_000) throw new Error("durationMs must be from 5000 to 120000");

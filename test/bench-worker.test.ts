@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { join } from "node:path";
 import { createProblem, walkProblems, WriteLog } from "../bench/worker/src/answers.ts";
+import { missingBaselines } from "../bench/baselines.ts";
 import { callsPerOperation, driversFor, LATE_MS, openLoop, scheduleOf } from "../bench/worker/src/drivers.ts";
 
 test("a key reads back as its last acknowledged write, or a later write whose outcome is unknown", () => {
@@ -95,6 +96,14 @@ test("the open loop sends on schedule whatever the answers, and counts what it c
   expect(scheduleOf([s, { due: 1000, sent: 1000, late: 0, skipped: 0 }]).driverLimited).toBe(s.late / 1100 > 0.01);
 });
 
+test("a table series is published only with a plain baseline at each of its loads", () => {
+  const at = (target: string, concurrency: number, operation = "write") => ({ target, operation, distribution: "uniform", concurrency });
+  expect(missingBaselines([at("table-16", 64), at("plain-16", 64), at("table-1", 64), at("table-16", 1), at("plain-1", 1)])).toEqual([]);
+  expect(missingBaselines([at("table-16", 64), at("plain-16", 16)])).toEqual(["table-16 write uniform 64"]);
+  expect(missingBaselines([at("table-16", 64, "list"), at("plain-16", 64, "write")])).toEqual(["table-16 list uniform 64"]);
+  expect(missingBaselines([{ ...at("table-16", 64), arrivalRate: 500 }, { ...at("plain-16", 64), arrivalRate: 1000 }])).toEqual(["table-16 write uniform 500/s"]);
+});
+
 // ---- The bench Worker, in local development ----
 
 let base = "";
@@ -160,6 +169,18 @@ test("table points check what they read: walks and listings complete, writes rea
     expect({ operation, wrongAnswers: result.wrongAnswers, wrongSamples: result.wrongSamples, ok: result.ok }).toEqual({ operation, wrongAnswers: 0, wrongSamples: [], ok: true });
   }
 }, 180_000);
+
+test("the plain baselines, one object and sixteen sharded by hand, answer the table points right", async () => {
+  for (const target of ["plain-1", "plain-16"])
+    for (const operation of ["write", "read", "rmw", "list", "walk", "create"]) {
+      const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target, operation, distribution: "uniform", concurrency: 4, objectName: `plain-${operation}-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
+      const result = (await response.json()) as { successes: number; errors: number; wrongAnswers: number; wrongSamples: string[]; topology: { leaves: number; rows: number }; errorSample: string | null };
+      expect({ target, operation, errors: result.errors, errorSample: result.errorSample, wrongAnswers: result.wrongAnswers, wrongSamples: result.wrongSamples }).toEqual({ target, operation, errors: 0, errorSample: null, wrongAnswers: 0, wrongSamples: [] });
+      expect(result.successes).toBeGreaterThan(0);
+      expect(result.topology.leaves).toBe(Number(target.slice("plain-".length)));
+      expect(result.topology.rows).toBeGreaterThanOrEqual(300);
+    }
+}, 300_000);
 
 test("an open-loop point sends at its arrival rate, and says when its drivers could not", async () => {
   const point = async (extra: object) => {

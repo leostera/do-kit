@@ -6,6 +6,7 @@
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { missingBaselines, type SeriesPoint } from "./baselines.ts";
 
 const dir = join(import.meta.dir, "results");
 
@@ -19,23 +20,31 @@ interface Run {
   splits?: unknown[];
 }
 
-/** What each output is made of: runs, and for the core results, the control plane's key count. */
-const OUTPUTS: Record<string, { runs: string[]; extra?: Record<string, unknown> }> = {
+/**
+ * What each output is made of: runs, and for the core results, the control plane's key count.
+ * `baselines`: every table point must have a plain point from the same run (bench/baselines.ts).
+ */
+const OUTPUTS: Record<string, { runs: string[]; extra?: Record<string, unknown>; baselines?: true }> = {
   "latest.json": { runs: ["v050-load", "v050-control-plane", "v050-splits", "v050-split-1g"], extra: { controlPlaneKeys: 10 } },
-  "table.json": { runs: ["v050-table", "v050-table-list", "v050-table-64-read"] },
+  "table.json": { runs: ["v050-table", "v050-table-list", "v050-table-64-read"], baselines: true },
   "indexed.json": { runs: ["v050-indexed"] },
   "atomic.json": { runs: ["v050-atomic"] },
   "leased.json": { runs: ["v050-leased"] },
   "apply.json": { runs: ["v050-table-apply"] },
 };
 
-for (const [output, { runs, extra }] of Object.entries(OUTPUTS)) {
+for (const [output, { runs, extra, baselines }] of Object.entries(OUTPUTS)) {
   const missing = runs.filter((name) => !existsSync(join(dir, `${name}.json`)));
   if (missing.length) {
     console.log(`${output}: left as it is, missing ${missing.join(", ")}`);
     continue;
   }
   const loaded = await Promise.all(runs.map(async (name) => ({ name, run: JSON.parse(await readFile(join(dir, `${name}.json`), "utf8")) as Run })));
+  const unpaired = baselines ? loaded.flatMap(({ name, run }) => missingBaselines((run.points ?? []) as SeriesPoint[]).map((p) => `${name}: ${p}`)) : [];
+  if (unpaired.length) {
+    console.log(`${output}: left as it is, ${unpaired.length} table points without a plain baseline from their run, as ${unpaired[0]}`);
+    continue;
+  }
   // A point measured again by a later run replaces the earlier one (same target, operation, distribution, concurrency).
   const points = new Map<string, unknown>();
   for (const { run } of loaded)
