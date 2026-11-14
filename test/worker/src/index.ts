@@ -478,6 +478,11 @@ const usersV1 = defineTable<User>({ primaryKey: "id", columns: users.columns, gl
 export const usersV3 = defineTable<User>({ primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "name"], partition: 1 } } });
 
 export class EvolvingUsers extends IndexedTable<Env, User> {
+  private readonly log = new StatementLog(this.ctx.storage);
+  /** The statements this instance ran whose text contains `filter`, since the last reset. */
+  async statements(filter: string, reset: boolean): Promise<StatementCost[]> {
+    return this.log.report(filter, reset);
+  }
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
   protected get table(): TableSchema<User> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
@@ -758,6 +763,15 @@ class CounterBase extends ShardedObject<Env, number> {
       this.ctx.abort("test: evicted at getAlarm");
       return getAlarm(options);
     }) as typeof storage.getAlarm;
+  }
+  /** How many rows allRows() returns here (it loads them all). */
+  async allRowsCount(): Promise<number> {
+    return this.allRows().size;
+  }
+  /** Writes a value that is not JSON (NaN, undefined): what update does with it. */
+  async putOdd(keys: readonly string[], payloads: readonly ("nan" | "undefined")[]): Promise<null[]> {
+    const odd = payloads[0] === "nan" ? Number.NaN : undefined;
+    return this.update(keys, () => ({ writes: new Map(keys.map((k) => [k, odd as unknown as number])), result: keys.map(() => null) }));
   }
   /** Stores text values (the class's values are numbers; the base table takes any JSON). */
   async putText(keys: readonly string[], payloads: readonly string[]): Promise<null[]> {
@@ -1163,7 +1177,7 @@ export class PresplitCounters extends CounterBase {
 const keptClients = new Map<string, ReturnType<typeof sharded<CounterBase>>>();
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "users" ? env.USERS : cls === "userIndexes" ? env.USER_INDEXES : cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "routed" ? env.ROUTED_COUNTERS : cls === "routedTable" ? env.ROUTED_DOCS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
+  return (cls === "users" ? env.USERS : cls === "userIndexes" ? env.USER_INDEXES : cls === "evolvingUsers" ? env.EVOLVING_USERS : cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "routed" ? env.ROUTED_COUNTERS : cls === "routedTable" ? env.ROUTED_DOCS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
 }
 
 /** POST /indexed {name, op, args}: one call of the indexed table client, or a test hook. */
@@ -1260,6 +1274,12 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
   // "try:<op>": the op, and what its error says if it throws.
   if (body.op.startsWith("try:")) return tableOp(env, { ...body, op: body.op.slice(4) }).then((ok) => ({ ok }), outcomeOf);
   const route = (body as { route?: number }).route === 2 ? refRouteV2 : refRoute;
+  if (body.op === "putOdd") { // [kind, name]: a row whose meta is not JSON, built here (HTTP can't carry it)
+    const meta = { nan: { a: Number.NaN }, undefined: { a: undefined }, date: { d: new Date(0) }, big: { n: 1 } }[body.args[0] as "nan" | "undefined" | "date" | "big"];
+    const t = table(namespace(env, body.cls) as never, body.name, docs as never) as unknown as { put(row: unknown): Promise<unknown> };
+    const createdAt = body.args[0] === "big" ? 2 ** 53 + 2 : 1;
+    return t.put({ name: body.args[1] as string, id: "odd", createdAt, lastEditAt: null, deleted: false, meta }).then((ok) => ({ ok }), outcomeOf);
+  }
   if (body.op === "deployRoute") { // [version, bits]: of a routedTable shard
     const ns = env.ROUTED_DOCS as unknown as DurableObjectNamespace<RoutedDocs>;
     await ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).deployRoute(body.args[0] as number).catch(() => {});
