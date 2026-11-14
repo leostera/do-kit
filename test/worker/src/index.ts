@@ -194,6 +194,55 @@ function losingCoordinateAnswers<T extends Rpc.DurableObjectBranded>(ns: Durable
   });
 }
 
+/** A statement an object ran: its text, its bindings, and what its cursor read and wrote. */
+export interface StatementCost {
+  readonly query: string;
+  readonly rowsRead: number;
+  readonly rowsWritten: number;
+  /** EXPLAIN QUERY PLAN of it, with its bindings, run when asked (empty for DDL and errors). */
+  readonly plan: string[];
+}
+
+/**
+ * Logs every statement an object runs (the last 20,000), with its cursor, so a test can ask what
+ * each cost and how SQLite planned it. Installed first, under any fault a test adds later.
+ */
+class StatementLog {
+  private entries: { query: string; bindings: unknown[]; cursor: { rowsRead: number; rowsWritten: number } }[] = [];
+  private readonly exec: SqlStorage["exec"];
+  constructor(private readonly storage: DurableObjectStorage) {
+    const sql = storage.sql;
+    const exec = sql.exec.bind(sql);
+    this.exec = exec;
+    sql.exec = ((query: string, ...bindings: unknown[]) => {
+      const cursor = exec(query, ...bindings);
+      if (this.entries.length >= 20_000) this.entries.shift();
+      this.entries.push({ query, bindings, cursor });
+      return cursor;
+    }) as typeof sql.exec;
+  }
+  /** Rows read by every statement since the last reset. */
+  rowsRead(): number {
+    return this.entries.reduce((sum, e) => sum + e.cursor.rowsRead, 0);
+  }
+  /** The statements since the last reset whose text contains `filter` (all, for ""), and starts again if `reset`. */
+  report(filter: string, reset: boolean): StatementCost[] {
+    const out = this.entries
+      .filter((e) => e.query.includes(filter))
+      .map((e) => ({ query: e.query, rowsRead: e.cursor.rowsRead, rowsWritten: e.cursor.rowsWritten, plan: this.plan(e.query, e.bindings) }));
+    if (reset) this.entries = [];
+    return out;
+  }
+  private plan(query: string, bindings: unknown[]): string[] {
+    if (!/^\s*(SELECT|UPDATE|DELETE|INSERT|WITH)/i.test(query)) return [];
+    try {
+      return this.exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${query}`, ...bindings).toArray().map((r) => r.detail);
+    } catch {
+      return [];
+    }
+  }
+}
+
 /** The next SQL statement on `storage` containing `text` throws, once, as a storage error would. */
 function failStatementOnce(storage: DurableObjectStorage, text: string): void {
   const sql = storage.sql;
@@ -235,6 +284,12 @@ function assertApplyAllowed(storage: DurableObjectStorage): void {
 
 export class Users extends IndexedTable<Env, User> {
   protected table = users;
+  private readonly log = new StatementLog(this.ctx.storage);
+  /** The statements this instance ran whose text contains `filter`, since the last reset. */
+  async statements(filter: string, reset: boolean): Promise<StatementCost[]> {
+    return this.log.report(filter, reset);
+  }
+
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
   protected override indexWaitMs = 1_500;
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
@@ -270,6 +325,16 @@ export class Users extends IndexedTable<Env, User> {
 }
 
 export class UserIndexes extends GlobalIndex<Env> {
+  private readonly log = new StatementLog(this.ctx.storage);
+  /** The statements this instance ran whose text contains `filter`, since the last reset. */
+  async statements(filter: string, reset: boolean): Promise<StatementCost[]> {
+    return this.log.report(filter, reset);
+  }
+  /** Runs this index shard's own alarm work now (its sweep of reservations and tombstones). */
+  async alarmNow(): Promise<void> {
+    await this.onAlarm();
+  }
+
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
   protected override reservationTimeoutMs = 1_000;
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
@@ -361,23 +426,42 @@ const docsV2 = defineTable<DocV2>({
 export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   /** A new index is built over a few hundred rows a call, so tests see it take several. */
   protected override indexBuildRows = 300;
-  /** Every SQL cursor since the last `resetRowsRead`: what this instance read, summed on demand. */
-  private cursors: { rowsRead: number }[] = [];
+  private readonly log: StatementLog;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    const sql = ctx.storage.sql;
-    const exec = sql.exec.bind(sql);
-    sql.exec = ((query: string, ...bindings: unknown[]) => {
-      const cursor = exec(query, ...bindings);
-      this.cursors.push(cursor);
-      return cursor;
-    }) as typeof sql.exec;
+    this.log = new StatementLog(ctx.storage);
   }
   /** Rows this instance read since the last reset, and starts counting again. */
   async rowsRead(): Promise<number> {
-    const n = this.cursors.reduce((sum, c) => sum + c.rowsRead, 0);
-    this.cursors = [];
+    const n = this.log.rowsRead();
+    this.log.report("\u0000", true);
     return n;
+  }
+  /** The statements this instance ran whose text contains `filter`, since the last reset. */
+  async statements(filter: string, reset: boolean): Promise<StatementCost[]> {
+    return this.log.report(filter, reset);
+  }
+  /** A page of owned rows (ownedRowsAfter), as a subclass's own walk would read it. */
+  async ownedPage(after: string | null, limit: number): Promise<string[]> {
+    return this.ownedRowsAfter(after, limit).map((r) => String((r.row as { name: string }).name));
+  }
+  /** One step of the migration, as one call's would be: true once it is done, false if it answered not ready. */
+  async migrateOnce(): Promise<boolean> {
+    try {
+      this.migrate();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  /** The local index builds not finished yet, read without migrating. */
+  async buildsLeft(): Promise<number> {
+    const t = this.ctx.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM sqlite_master WHERE name = 'sharded_table_builds'").one().n;
+    return t === 0 ? 0 : this.ctx.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM sharded_table_builds").one().n;
+  }
+  /** Ends this instance, as an eviction would: the next call starts a new one. */
+  async restart(): Promise<void> {
+    this.ctx.abort("test: restart");
   }
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
   protected get table(): TableSchema<DocV2> {
@@ -497,6 +581,16 @@ export class OldAlarm extends ShardedObject<Env, number> {
 }
 
 class CounterBase extends ShardedObject<Env, number> {
+  private readonly log = new StatementLog(this.ctx.storage);
+  /** The statements this instance ran whose text contains `filter`, since the last reset. */
+  async statements(filter: string, reset: boolean): Promise<StatementCost[]> {
+    return this.log.report(filter, reset);
+  }
+  /** A page of owned rows (ownedRowsPage), as a subclass's own walk would read it. */
+  async ownedPage(after: string | null, limit: number): Promise<string[]> {
+    return this.ownedRowsPage(after, limit).map(([key]) => key);
+  }
+
   /** What this object holds (tables, keys, alarm): to check a wipe left nothing. */
   async storage(): Promise<StorageReport> {
     return storageReport(this.ctx.storage);
@@ -1089,6 +1183,12 @@ export default {
           return Response.json((await tableOp(env, body as never)) ?? null);
         case "/wipeAll":
           return Response.json(await sharded(ns, body.name).wipe());
+        case "/object": {
+          // A test method of one shard object, called directly (not routed): {cls, name, bits, method, args}.
+          const { method, args } = body as unknown as { method: string; args?: unknown[] };
+          const stub = ns.get(ns.idFromName(shardObjectName(body.name, body.bits ?? ""))) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+          return Response.json((await stub[method]!(...(args ?? []))) ?? null);
+        }
         case "/evict":
           await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).evict().catch(() => {});
           return Response.json(null);

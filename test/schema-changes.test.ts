@@ -92,16 +92,19 @@ test("a new count group is counted in bounded steps: no call reads more than a f
 
 test("a new local index is built in bounded steps: no call reads more than a few build pages", async () => {
   const name = `index-steps-${unique()}`;
-  // The count groups stay as they are (schema 2's groups are counted from schema 1's rows): only
-  // the index's reads are measured here, from the second call on (the first also counts groups).
+  // One step at a time, as calls that each get "not ready" would take them: a client call retries
+  // until the build is done, so it would measure the whole build.
   const rows = docs(3_000);
   await seedAndUpgrade("evolving", name, rows);
-  await table("evolving", name, "countBy", "deletedAgain").catch(() => undefined);
-  for (let i = 0; i < 30; i++) {
+  const step = () => post<boolean>("/object", { cls: "evolving", name, bits: "", method: "migrateOnce", args: [] });
+  await step(); // the count groups, measured above
+  let steps = 0;
+  for (let done = false; !done && steps < 40; steps++) {
     await table("evolving", name, "rowsRead", "");
-    await table("evolving", name, "get", rows[i]!.name).catch(() => undefined);
+    done = await step();
     expect(await table<number>("evolving", name, "rowsRead", "")).toBeLessThanOrEqual(2 * 300 + 50);
   }
+  expect(steps).toBeGreaterThan(5);
 }, 120_000);
 
 test("a shard building a new index keeps serving gets and puts", async () => {
