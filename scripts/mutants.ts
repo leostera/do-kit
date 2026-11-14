@@ -282,6 +282,13 @@ const MUTANTS: Mutant[] = [
     test: "test/cost.test.ts",
     pattern: "flooded",
   },
+  {
+    name: "abandon-after-commit",
+    breaks: "a split that committed is never given up, which would discard the shard that owns its right half",
+    edits: [{ file: "src/sharded/index.ts", find: "      // which would discard the copy that now owns it. What is left runs after the finally.\n    } catch (error) {", replace: "      // which would discard the copy that now owns it. What is left runs after the finally.\n      await this.armAlarm(Date.now());\n    } catch (error) {" }],
+    test: "test/sharded.test.ts",
+    pattern: "after a split commits",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

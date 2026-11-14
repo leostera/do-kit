@@ -850,6 +850,15 @@ export class OldAlarm extends ShardedObject<Env, number> {
 }
 
 class CounterBase extends ShardedObject<Env, number> {
+  /** The next setAlarm throws, once, as a storage error would. */
+  async failSetAlarmOnce(): Promise<void> {
+    const storage = this.ctx.storage;
+    const setAlarm = storage.setAlarm.bind(storage);
+    storage.setAlarm = (async () => {
+      storage.setAlarm = setAlarm;
+      throw new Error("test: setAlarm failed");
+    }) as typeof storage.setAlarm;
+  }
   /** The logical-copy batches this instance took: their table, rows, and bytes on the heap (2 a UTF-16 unit). */
   private batches: { table: string; rows: number; heapBytes: number }[] = [];
   override async shardedReceive(name: string, bits: string, epoch: number, first: boolean, table: string, columns: readonly string[], rows: readonly (readonly SqlStorageValue[])[]): Promise<void> {

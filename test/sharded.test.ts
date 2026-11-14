@@ -76,6 +76,20 @@ test("compare-and-swap across splits: one winner per value, final value counts t
   );
 }, 180_000);
 
+test("a storage error after a split commits does not give the split up: the new shard keeps its half and serves", async () => {
+  const name = `split-after-commit-${Date.now()}`;
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  // The split's first setAlarm is the one after its claim commits: the right half is the sibling's by then.
+  await post("/object", { cls: "m", name, bits: "", method: "failSetAlarmOnce", args: [] });
+  expect(await post("/split", { cls: "m", name, bits: "" })).toBe(true);
+  await call("m", name, "add", KEYS, KEYS.map(() => 1));
+  const values = await post<number[]>("/call", { cls: "m", name, method: "get", keys: KEYS, payloads: null, notReadyWaitMs: 5_000 });
+  expect(values).toEqual(KEYS.map(() => 2));
+  const [left, right] = await Promise.all([describe("m", name, "0"), describe("m", name, "1")]);
+  expect([left.state, right.state]).toEqual(["shard", "shard"]);
+  expect((left as unknown as { lastSplit: unknown }).lastSplit).not.toBeNull();
+}, 60_000);
+
 test("load splits a node by itself, and nothing is lost", async () => {
   const name = `auto-${Date.now()}`;
   const expected = new Map<string, number>();

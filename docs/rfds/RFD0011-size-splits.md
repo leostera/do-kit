@@ -127,6 +127,12 @@ and 1.50 MB.
 - The parent records the copy to discard and tells the sibling (`shardedDiscard`), its alarm
   retrying until the sibling confirms. The sibling deletes the copy of that attempt or an older
   one, claimed or not, and keeps a newer attempt's copy or a serving shard.
+- A split is given up only before its claim commits. The sibling deletes a claimed copy, so a
+  claimed copy must belong to a split the parent gave up. Once the parent commits, the right half
+  is the copy's. A step after that fails (a storage error arming the alarm, or activating the
+  sibling) is logged and retried by the alarm or the next call, never taken for a split given up.
+  Taken for one, it discarded the shard that owned the right half, with the writes it had
+  acknowledged.
 - After n automatic attempts given up in a row, the next starts no sooner than `2^n` split
   timeouts after the last one started, capped at 30 minutes. A size split given up asks the alarm
   for that time, so it is tried again with no write to start it.

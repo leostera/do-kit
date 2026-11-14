@@ -1903,9 +1903,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       console.log(JSON.stringify({ event: "split", node: nodeName(meta.name, meta.bits), copy: method, ms: Date.now() - started }));
       this.hold = null;
       release();
-      await this.armAlarm(Date.now());
-      await this.activateSibling().catch(() => {}); // the alarm retries
-      return true;
+      // From here on the right half is the sibling's: nothing that fails may give the split up,
+      // which would discard the copy that now owns it. What is left runs after the finally.
     } catch (error) {
       const now = this.meta;
       // The copy goes: the alarm tells the sibling until it has (a copy left behind is billed,
@@ -1924,6 +1923,16 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
         release();
       }
     }
+    // Only a committed split gets here (a failed one returned above). What is left can fail
+    // without undoing it: the alarm (its backstops re-arm a lost one) and the sibling's
+    // activation (the alarm, or the next call, asks again).
+    try {
+      await this.armAlarm(Date.now());
+    } catch (error) {
+      console.error(JSON.stringify({ event: "split-alarm-failed", node: this.nodeLabel(), error: String(error).slice(0, 200) }));
+    }
+    await this.activateSibling().catch(() => {});
+    return true;
   }
 
   /** Copies this object's storage to the right sibling, then claims the copy there. */
