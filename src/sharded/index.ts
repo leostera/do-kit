@@ -1531,7 +1531,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
         if (rows.length === 0 || (rows.length < COPY_PAGE_ROWS && bytes < COPY_BATCH_BYTES)) break;
       }
     }
-    if (!(await target.shardedReceiveDone(meta.name, right, epoch))) throw new Error("the copy did not take this split's meta");
+    // Views and triggers last, once the rows are in: a trigger made first would fire on every
+    // copied row. Views first of the two, as an INSTEAD OF trigger is on a view.
+    const late = this.sql
+      .exec<{ type: string; name: string; tbl_name: string; sql: string | null }>("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('view', 'trigger') ORDER BY type DESC, name")
+      .toArray()
+      .filter((o): o is { type: string; name: string; tbl_name: string; sql: string } => o.sql !== null && !o.name.startsWith("_cf_") && !o.name.startsWith("sqlite_"))
+      .map(({ name, sql }) => ({ name, sql }));
+    if (!(await target.shardedReceiveDone(meta.name, right, epoch, late))) throw new Error("the copy did not take this split's meta");
   }
 
   /**
@@ -1814,6 +1821,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.refuseOlderAttempt(epoch);
     this.receiving = epoch;
     this.ctx.storage.transactionSync(() => {
+      // Views and triggers of an earlier attempt too: a view outlives the tables it reads.
+      for (const o of this.sql.exec<{ type: string; name: string }>("SELECT type, name FROM sqlite_master WHERE type IN ('view', 'trigger')").toArray()) {
+        if (!o.name.startsWith("_cf_") && !o.name.startsWith("sqlite_")) this.sql.exec(`DROP ${o.type === "view" ? "VIEW" : "TRIGGER"} IF EXISTS ${quoteIdentifier(o.name)}`);
+      }
       for (const t of this.tables()) this.sql.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(t)}`);
       this.meta = null;
       for (const o of objects) this.sql.exec(o.sql);
@@ -1844,8 +1855,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   /** The logical copy is complete: it holds the source's meta, from this split. */
-  async shardedReceiveDone(name: string, bits: string, epoch: number): Promise<boolean> {
+  async shardedReceiveDone(name: string, bits: string, epoch: number, late: readonly { readonly name: string; readonly sql: string }[] = []): Promise<boolean> {
     if (this.receiving !== epoch) return false;
+    // The views and triggers, now that every row is in (see copyRows).
+    if (late.length > 0) this.ctx.storage.transactionSync(() => { for (const o of late) this.sql.exec(o.sql); });
     this.meta = this.loadMeta();
     const meta = this.meta;
     return meta !== null && meta.name === name && meta.splitting === epoch && `${meta.bits}1` === bits && this.isUnclaimedCopy();
@@ -1892,11 +1905,24 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.receiving = null; // claimed: no batch may change it now
     this.ctx.storage.transactionSync(() => {
       this.afterClone((key) => ownsHash(bits, this.routeHash(key)));
+      this.dropForeignHolds(bits);
       // The parent's meta (copied with its storage) gives the tree's presplit depth.
       this.saveMeta({ name, bits, state: "copy", epoch, splitting: null, activate: null, cleanup: this.outside(bits), foreign: true, ...(meta.presplit ? { presplit: meta.presplit } : {}), parent, splitAt: Date.now() });
     });
     await this.armAlarm(Date.now());
     return true;
+  }
+
+  /**
+   * Deletes the atomic holds copied from the parent that hold none of `bits`' keys: they hold the
+   * half the parent kept, which the parent resolves. (A split waits out holds before it starts, so
+   * these are prepares that arrived while it ran, on the half that stays.)
+   */
+  private dropForeignHolds(bits: string): void {
+    this.atomicReady = null;
+    if (!this.hasAtomicTables()) return;
+    for (const h of this.loadHolds()) if (!h.keys.some((key) => ownsHash(bits, this.routeHash(key)))) this.sql.exec("DELETE FROM sharded_atomic_holds WHERE tx = ?", h.tx);
+    this.held = null;
   }
 
   /** The hash ranges outside a shard's. */
@@ -1908,7 +1934,6 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     return out;
   }
 
-  /** Starts serving, if this is the copy of attempt `epoch`. */
   /**
    * A claimed copy, called before it serves, asks its parent to activate it: the parent's alarm
    * may be lost, and its calls may have stopped (clients route this half here). One nudge in
@@ -1938,6 +1963,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     await this.armAlarm(Date.now());
   }
 
+  /** Starts serving, if this is the copy of attempt `epoch`. */
   async shardedActivate(name: string, bits: string, epoch: number): Promise<boolean> {
     this.assertNotWiped();
     const meta = this.meta;

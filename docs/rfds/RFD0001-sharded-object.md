@@ -154,14 +154,16 @@ headroom for the split itself.
      schedules the restore and restarts on it.
    - **Logical:** the fallback where snapshots are unavailable. It copies every table and index,
      in batches of at most 4 MiB, paged by a stable key. Batches are tagged with the attempt's
-     epoch, so a late batch cannot overwrite newer rows.
+     epoch, so a late batch cannot overwrite newer rows. Views and triggers come last, once the
+     rows are in, so a trigger does not fire on the copied rows.
 
    Either way the copy carries its attempt's epoch, and the new object refuses one that is not
    newer than what it holds: a claimed copy may be all there is of its half (the original stops
    owning the half once the claim answers), so a message of an abandoned attempt that arrives
    late must not replace it.
 4. **Claim.** It calls `shardedClaim` on the new object until the copy answers that it is this
-   attempt's copy.
+   attempt's copy. The copy drops the atomic holds it was copied that hold none of its keys:
+   prepares that came in during the split, on the half that stays.
 5. **Commit.** In one transaction, it becomes `bits + "0"`, records the right half for cleanup,
    and marks the sibling to activate. Then it releases the held writes. Those now answer `moved`,
    and the client sends them to the new owner.
