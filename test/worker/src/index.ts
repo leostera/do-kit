@@ -4,7 +4,7 @@
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
 //   POST /tree {cls, name, presplitHint?}  (every shard, as its objects describe themselves)
 import { MAX_KNOWN_OBJECTS, RouteMismatch } from "../../../src/sharded/client.ts";
-import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type AtomicMethod, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
+import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type AtomicMethod, type CallStats, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import type { AtomicStep } from "../../../src/sharded/atomic.ts";
 import { defineCommands, defineTable, ShardedTable, table, TableClient, type Command, type Decision, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 import type { ShardPage, ShardPageRequest } from "../../../src/table/schema.ts";
@@ -146,9 +146,15 @@ export class Docs extends ShardedTable<Env, Doc> {
   }
   /** Page calls this instance answered: what a listing costs. */
   private pages = 0;
+  /** Each page call waits this long first (in memory): a slow shard. */
+  private pageDelayMs = 0;
   override async tablePage(request: ShardPageRequest): Promise<ShardPage> {
     this.pages++;
+    if (this.pageDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.pageDelayMs));
     return super.tablePage(request);
+  }
+  async slowPages(ms: number): Promise<void> {
+    this.pageDelayMs = ms;
   }
   async pageCalls(): Promise<number> {
     return this.pages;
@@ -1449,11 +1455,14 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     await ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).deployRoute(body.args[0] as number).catch(() => {});
     return null;
   }
-  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, { ...(body.cls === "routedTable" ? { routeOf: route } : {}), commands: docCommands as never, ...((body as { options?: object }).options ?? {}) }) as unknown as Record<string, (...a: unknown[]) => unknown>;
+  // With `stats`: what each call of the client took (onCall), answered along with the result.
+  const stats: CallStats[] = [];
+  const onCall = (body as { stats?: boolean }).stats ? { onCall: (s: CallStats) => void stats.push(s) } : {};
+  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, { ...(body.cls === "routedTable" ? { routeOf: route } : {}), commands: docCommands as never, ...((body as { options?: object }).options ?? {}), ...onCall }) as unknown as Record<string, (...a: unknown[]) => unknown>;
   if (body.op === "all") {
     const rows: unknown[] = [];
     for await (const row of (t.all as (q: ListQuery) => AsyncGenerator<unknown>).call(t, body.args[0] as ListQuery)) rows.push(row);
-    return rows;
+    return (body as { stats?: boolean }).stats ? { ok: rows, stats } : rows;
   }
   if (body.op === "upgrade") {
     const ns = namespace(env, body.cls) as unknown as DurableObjectNamespace<EvolvingDocs>;
@@ -1484,6 +1493,10 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     return ns.get(ns.idFromName(shardObjectName(body.name, (body.args[0] as string) ?? ""))).rowsRead();
   }
   if (body.op === "scan") return (sharded(namespace(env, body.cls) as never, body.name, body.cls === "routedTable" ? { routeOf: refRoute } : {}).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(...(body.args as [string, ...unknown[]]));
+  if ((body as { stats?: boolean }).stats) {
+    const result = await Promise.resolve(t[body.op]!.call(t, ...body.args)).then((ok) => ({ ok }), (error: unknown) => ({ threw: String(error) }));
+    return { ...result, stats };
+  }
   return t[body.op]!.call(t, ...body.args);
 }
 

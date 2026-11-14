@@ -33,6 +33,8 @@ Every point checks its answers, and one that got a wrong answer says `ok: false`
 
 Wrong answers are in `wrongAnswers` and `wrongSamples`.
 
+A point on a table or indexed target also keeps its 20 slowest operations in `slowest`, slowest first, each with what it was made of, from the client's `onCall`: its client calls (`rounds`: a query-order page's rounds, an rmw's get and put), its shard calls, the answers that sent it again (`moved`, `stale`, `notReady`), and its slowest shard call with that shard's bits. A p99 made of retries reads differently from one slow shard.
+
 ## What a run measures
 
 `bun run bench:run` runs two suites. Pick them with `BENCH_SUITES=load,split`.

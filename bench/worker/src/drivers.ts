@@ -99,3 +99,51 @@ export async function openLoop(
   await Promise.all(running);
   return { due, sent, late, skipped };
 }
+
+/** What one client call of an operation took, as the sharded client's `onCall` says. */
+export interface ClientCall {
+  readonly kind: string;
+  readonly ms: number;
+  readonly shardCalls: number;
+  readonly retries: { readonly moved: number; readonly stale: number; readonly notReady: number };
+  readonly slowest: { readonly bits: string; readonly ms: number } | null;
+  readonly error: string | null;
+}
+
+/** One of a point's slowest operations: how long, and what it was made of. */
+export interface SlowCall {
+  readonly operation: string;
+  readonly ms: number;
+  /** Client calls the operation made: rounds of a query-order page, get and put of an rmw. */
+  readonly rounds: number;
+  readonly shardCalls: number;
+  /** Answers that sent part of it again, by why. */
+  readonly retries: { readonly moved: number; readonly stale: number; readonly notReady: number };
+  /** Its slowest shard call. */
+  readonly slowestShard: { readonly bits: string; readonly ms: number } | null;
+  readonly error: string | null;
+}
+
+/** Slow calls kept: by each driver, and for the point. */
+export const SLOWEST_KEPT = 20;
+
+/** An operation's client calls, summed into one record. */
+export function slowCallOf(operation: string, ms: number, calls: readonly ClientCall[]): SlowCall {
+  let slowestShard: SlowCall["slowestShard"] = null;
+  for (const c of calls) if (c.slowest && (!slowestShard || c.slowest.ms > slowestShard.ms)) slowestShard = c.slowest;
+  const sum = (f: (c: ClientCall) => number) => calls.reduce((n, c) => n + f(c), 0);
+  return {
+    operation,
+    ms: Math.round(ms * 100) / 100,
+    rounds: calls.length,
+    shardCalls: sum((c) => c.shardCalls),
+    retries: { moved: sum((c) => c.retries.moved), stale: sum((c) => c.retries.stale), notReady: sum((c) => c.retries.notReady) },
+    slowestShard,
+    error: calls.find((c) => c.error)?.error ?? null,
+  };
+}
+
+/** The `n` slowest of `calls`, slowest first. */
+export function slowest(calls: readonly SlowCall[], n = SLOWEST_KEPT): SlowCall[] {
+  return [...calls].sort((a, b) => b.ms - a.ms).slice(0, n);
+}

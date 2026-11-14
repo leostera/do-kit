@@ -244,6 +244,11 @@ a sibling that refuses activation is asked after 1 s, 2 s, then every 3 s.
   and written and statements run per routed method; and a table's listing pages, rows scanned and
   pages cut by their budget.
 
+A client says what each of its calls took, if asked: `ShardedClientOptions.onCall` gets, once the
+call ends, its kind, time, shard calls (those sent again included), its `moved`, `stale` and
+`notReady` answers, its slowest shard call with that shard's bits, and its error. The slowest
+calls of a load are read from these, and so is which shard they waited on.
+
 Two structured logs are opt-in, off by default:
 - `ShardedClientOptions.logWideHops: n` logs a `sharded-wide-hop` line for each hop of a routed
   call that reaches at least `n` shards: shards, keys, the hop's time, its calls' p10, p50, p90

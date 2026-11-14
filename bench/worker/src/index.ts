@@ -1,5 +1,5 @@
 import { createProblem, walkProblems, WriteLog } from "./answers.ts";
-import { CALLS_PER_DRIVER, callsPerOperation, driversFor, openLoop, scheduleOf, type Schedule } from "./drivers.ts";
+import { CALLS_PER_DRIVER, callsPerOperation, driversFor, openLoop, scheduleOf, slowCallOf, slowest, SLOWEST_KEPT, type ClientCall, type Schedule, type SlowCall } from "./drivers.ts";
 import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
@@ -243,20 +243,20 @@ export class Index16 extends IndexBench {
     return this.env.INDEXED_16 as never;
   }
 }
-function indexedClient(env: Env, target: IndexedTarget, name: string): IndexedTableClient<BenchRow> {
+function indexedClient(env: Env, target: IndexedTarget, name: string, onCall?: (call: ClientCall) => void): IndexedTableClient<BenchRow> {
   const [rows, entries] = { "indexed-1": [env.INDEXED_1, env.INDEX_1], "indexed-4": [env.INDEXED_4, env.INDEX_4], "indexed-16": [env.INDEXED_16, env.INDEX_16] }[target];
-  return indexedTable(rows as never, entries as never, name, indexedRows);
+  return indexedTable(rows as never, entries as never, name, indexedRows, onCall ? { onCall } : {});
 }
-/** The client of a table or indexed target. */
-function rowsClient(env: Env, target: TableTarget | IndexedTarget | PlainTarget, name: string): TableClient<BenchRow> {
+/** The client of a table or indexed target. `onCall`: what each call of a do-kit client took (a plain target has none to say). */
+function rowsClient(env: Env, target: TableTarget | IndexedTarget | PlainTarget, name: string, onCall?: (call: ClientCall) => void): TableClient<BenchRow> {
   // A plain target serves the calls the driver makes of a table (not apply, or indexed lookups).
   if (isPlain(target)) return plainTable(env.PLAIN, name, Number(target.slice("plain-".length))) as unknown as TableClient<BenchRow>;
-  return isIndexed(target) ? indexedClient(env, target, name) : tableClient(env, target, name);
+  return isIndexed(target) ? indexedClient(env, target, name, onCall) : tableClient(env, target, name, onCall);
 }
 
-function tableClient(env: Env, target: TableTarget, name: string): TableClient<BenchRow> {
+function tableClient(env: Env, target: TableTarget, name: string, onCall?: (call: ClientCall) => void): TableClient<BenchRow> {
   const ns = { "table-1": env.TABLE_1, "table-4": env.TABLE_4, "table-16": env.TABLE_16, "table-64": env.TABLE_64 }[target];
-  return table(ns as never, name, benchRows, { logShardErrors: true, commands: benchCommands as never });
+  return table(ns as never, name, benchRows, { logShardErrors: true, commands: benchCommands as never, ...(onCall ? { onCall } : {}) });
 }
 
 interface MeasureConfig {
@@ -293,6 +293,8 @@ interface DriverResult {
   readonly wrongSamples?: readonly string[];
   /** Open loop only: how the schedule was kept. */
   readonly schedule?: Schedule;
+  /** Table targets: the slowest operations, with their rounds, retries and slowest shard. */
+  readonly slowest?: readonly SlowCall[];
 }
 
 abstract class KeyValueBase<EnvT> extends DurableObject<EnvT> {
@@ -519,6 +521,7 @@ interface MergedResult {
   readonly wrongAnswers: number;
   readonly wrongSamples: readonly string[];
   readonly schedule?: Schedule & { readonly driverLimited: boolean };
+  readonly slowest: readonly SlowCall[];
 }
 
 function merge(results: readonly (DriverResult & { readonly failedDrivers?: number })[], failedDrivers: number, extraSamples: readonly string[] = []): MergedResult {
@@ -544,7 +547,7 @@ function merge(results: readonly (DriverResult & { readonly failedDrivers?: numb
     for (const [bucket, count] of result.latencyMs) buckets.set(bucket!, (buckets.get(bucket!) ?? 0) + count!);
   }
   const schedules = results.flatMap((r) => (r.schedule ? [r.schedule] : []));
-  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSamples: [...samples], wrongAnswers, wrongSamples: [...wrongSamples], ...(schedules.length ? { schedule: scheduleOf(schedules) } : {}) };
+  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSamples: [...samples], wrongAnswers, wrongSamples: [...wrongSamples], slowest: slowest(results.flatMap((r) => r.slowest ?? [])), ...(schedules.length ? { schedule: scheduleOf(schedules) } : {}) };
 }
 
 function driverStub(env: Env, config: { readonly objectName: string; readonly driverIndex: number }): DurableObjectStub<BenchDriver> {
@@ -730,12 +733,20 @@ export class BenchDriver extends DurableObject<Env> {
     };
     /** One in this many writes is read back. */
     const READ_BACK = 100;
+    /** The slowest operations, with what they were made of: SLOWEST_KEPT of them, slowest first. */
+    let slow: SlowCall[] = [];
+    const keepIfSlow = (ms: number, calls: readonly ClientCall[]) => {
+      if (slow.length === SLOWEST_KEPT && ms <= slow.at(-1)!.ms) return;
+      slow = slowest([...slow, slowCallOf(config.operation, ms, calls)]);
+    };
 
     // A lane is one caller: its state (a walk's cursor), and one call at a time. Closed loop: each
     // lane calls again once answered. Open loop: calls go out on a schedule, to a free lane.
     const tableLane = (): (() => Promise<void>) => {
       const target = config.target as TableTarget | IndexedTarget;
-      const t = rowsClient(this.env, target, config.objectName);
+      // What this lane's client calls took, for the operation now running (one at a time a lane).
+      const calls: ClientCall[] = [];
+      const t = rowsClient(this.env, target, config.objectName, (call) => void calls.push(call));
       const indexed = isIndexed(target) ? (t as IndexedTableClient<BenchRow>) : null;
       // An indexed listing reads one team's partition: each caller its own team.
       const team = teamOf(sequence);
@@ -744,6 +755,7 @@ export class BenchDriver extends DurableObject<Env> {
       let seen: string[] = [];
       return async () => {
         const key = keyFor(config, sequence++);
+        calls.length = 0;
         const before = performance.now();
         try {
           await bounded(async () => {
@@ -801,6 +813,7 @@ export class BenchDriver extends DurableObject<Env> {
           const elapsed = performance.now() - before;
           maxLatencyMs = Math.max(maxLatencyMs, elapsed);
           latencyMs[Math.min(120_000, Math.floor(elapsed))]++;
+          keepIfSlow(elapsed, calls);
         }
         await yieldIfNoIO(performance.now() - before);
       };
@@ -856,7 +869,7 @@ export class BenchDriver extends DurableObject<Env> {
     if (!schedule) await Promise.all(lanes.map(async (call) => { while (Date.now() < stopAt) await call(); }));
     const sparse: [number, number][] = [];
     latencyMs.forEach((count, bucket) => count && sparse.push([bucket, count]));
-    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSamples: [...errorSamples], wrongAnswers, wrongSamples: [...wrongSamples], ...(schedule ? { schedule } : {}) };
+    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSamples: [...errorSamples], wrongAnswers, wrongSamples: [...wrongSamples], slowest: slow, ...(schedule ? { schedule } : {}) };
   }
 
   private async write(target: Target, name: string, keys: readonly string[], values: readonly string[]): Promise<void> {
@@ -1328,7 +1341,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const fleetResults = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
     const lostDrivers = settled.reduce((n, r, i) => n + (r.status === "rejected" ? fleets[i]!.configs.length : 0), 0);
     const fleetReasons = settled.flatMap((r) => (r.status === "rejected" ? [`fleet: ${String(r.reason).slice(0, 200)}`] : [])).slice(0, 3);
-    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSamples, wrongAnswers, wrongSamples, schedule } = merge(fleetResults, lostDrivers, fleetReasons);
+    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSamples, wrongAnswers, wrongSamples, schedule, slowest: slowCalls } = merge(fleetResults, lostDrivers, fleetReasons);
     const histogram = new Array<number>(120_001).fill(0);
     for (const [bucket, count] of latencyMs) histogram[bucket!] = count!;
 
@@ -1374,6 +1387,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
       latencyMs: { p50: percentile(histogram, 0.5), p95: percentile(histogram, 0.95), p99: percentile(histogram, 0.99), max: Math.round(maxLatencyMs * 100) / 100 },
       /** Open loop: how the drivers kept the schedule; driverLimited means the drivers, not the target, were measured. */
       ...(schedule ? { schedule, driverLimited: schedule.driverLimited } : {}),
+      /** The slowest operations (table targets), slowest first, with what each was made of. */
+      ...(slowCalls.length ? { slowest: slowCalls } : {}),
       ...(input.maxP99Ms ? { withinLatency: percentile(histogram, 0.99) <= input.maxP99Ms } : {}),
       topology,
       leased,

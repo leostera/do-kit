@@ -169,6 +169,48 @@ test("redact takes row keys out of error text and bounds its length", async () =
   expect(text.length).toBeLessThanOrEqual(200);
 });
 
+// ---- What each call took ----
+
+type Stats = { kind: string; method: string; ms: number; shardCalls: number; retries: { moved: number; stale: number; notReady: number }; slowest: { bits: string; ms: number } | null; error: string | null };
+const withStats = (cls: string, name: string, op: string, args: unknown[]) => post<{ ok?: unknown; threw?: string; stats: Stats[] }>("/table", { cls, name, op, args, stats: true });
+
+test("onCall says which shard a listing waited on, in query order and in shard order", async () => {
+  const name = `stats-slow-${unique()}`;
+  await post("/table", { cls: "presplitTable", name, op: "putMany", args: [Array.from({ length: 40 }, (_, i) => ({ row: doc(`d${i}`, i) }))] });
+  await post("/object", { cls: "presplitTable", name, bits: "10", method: "slowPages", args: [150] });
+  const page = await withStats("presplitTable", name, "list", [{ limit: 50 }]);
+  expect(page.threw).toBeUndefined();
+  const [query] = page.stats;
+  // Four shards, one call each, none sent again, and the slow one named.
+  expect(query).toMatchObject({ kind: "scan", shardCalls: 4, retries: { moved: 0, stale: 0, notReady: 0 }, error: null });
+  expect(query!.slowest!.bits).toBe("10");
+  expect(query!.slowest!.ms).toBeGreaterThanOrEqual(150);
+  expect(query!.ms).toBeGreaterThanOrEqual(query!.slowest!.ms);
+  // In shard order: a call per shard, and the slow shard's is the slow one.
+  const walk = await withStats("presplitTable", name, "all", [{ order: "shard", limit: 10 }]);
+  const shards = walk.stats.filter((s) => s.kind === "shard");
+  expect(shards.length).toBeGreaterThanOrEqual(4);
+  const slowest = shards.reduce((a, b) => (b.ms > a.ms ? b : a));
+  expect(slowest.slowest!.bits).toBe("10");
+}, 30_000);
+
+test("onCall counts the answers that sent a call again, and says why a call threw", async () => {
+  const name = `stats-moved-${unique()}`;
+  const rows = Array.from({ length: 40 }, (_, i) => ({ row: doc(`d${i}`, i) }));
+  await post("/table", { cls: "table", name, op: "putMany", args: [rows] });
+  // The client knows one shard; the object splits behind its back.
+  expect(await post("/split", { cls: "table", name, bits: "" })).toBe(true);
+  const read = await withStats("table", name, "getMany", [rows.map((r) => r.row.name)]);
+  expect(read.threw).toBeUndefined();
+  const [call] = read.stats;
+  expect(call).toMatchObject({ kind: "call", error: null });
+  expect(call!.retries.moved).toBeGreaterThanOrEqual(1);
+  expect(call!.shardCalls).toBeGreaterThanOrEqual(3);
+  // A command the table does not have: thrown, and said so.
+  const bad = await withStats("table", name, "apply", ["d1", "noSuchCommand", {}]);
+  expect(bad.threw).toBeDefined();
+}, 30_000);
+
 // ---- Bench tooling and docs ----
 
 test("bench/compare.ts passes a result file against itself", () => {

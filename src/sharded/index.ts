@@ -27,7 +27,7 @@ import { compareText, storedJson } from "./values.js";
 export { ATOMIC_HOLD_MS, ATOMIC_OUTCOME_TTL_MS, type AtomicMethod, type AtomicOutcome, type AtomicShardResult, type Prepared } from "./atomic.js";
 export { hashBit, keyHash } from "./hash.js";
 export { pendingAlarm, STRANDED_ALARM_MS } from "./alarms.js";
-export { RouteMismatch, ShardFull, SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
+export { RouteMismatch, ShardFull, SpansShards, ShardedClient, sharded, type CallStats, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 
 declare global {
   /** An opaque handle on a point-in-time copy of an object's storage; it can only be sent over RPC. */

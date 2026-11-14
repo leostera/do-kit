@@ -201,3 +201,19 @@ test("an open-loop point sends at its arrival rate, and says when its drivers co
   expect(starved.driverLimited).toBe(true);
   expect(starved.withinLatency).toBe(false);
 }, 180_000);
+
+test("a table point keeps its slowest operations, with their rounds, retries and slowest shard", async () => {
+  const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-16", operation: "list", distribution: "uniform", concurrency: 8, objectName: `slowest-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
+  const point = (await response.json()) as { latencyMs: { max: number }; slowest: { operation: string; ms: number; rounds: number; shardCalls: number; retries: Record<string, number>; slowestShard: { bits: string; ms: number } | null }[] };
+  expect(point.slowest.length).toBe(20);
+  expect(point.slowest.map((s) => s.ms)).toEqual([...point.slowest.map((s) => s.ms)].sort((a, b) => b - a));
+  const [first] = point.slowest;
+  expect(first!.ms).toBeCloseTo(point.latencyMs.max, 0);
+  // A query-order page of 16 shards: at least a round of 16 shard calls, the slowest named.
+  expect(first!.operation).toBe("list");
+  expect(first!.rounds).toBeGreaterThanOrEqual(1);
+  expect(first!.shardCalls).toBeGreaterThanOrEqual(16);
+  expect(Object.keys(first!.retries).sort()).toEqual(["moved", "notReady", "stale"]);
+  expect(first!.slowestShard!.bits).toMatch(/^[01]{4}$/);
+  expect(first!.slowestShard!.ms).toBeLessThanOrEqual(first!.ms);
+}, 120_000);
