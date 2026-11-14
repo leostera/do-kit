@@ -2,10 +2,11 @@
 // while the shard splits: the original stops owning the half that moves, the copy answers "not
 // ready" until it is activated, and cleanup deletes the rows the original gave away.
 //
-// The rule is needed: --without mergeToFrontier returns every row the shards sent, past where one
-// of them stopped, and skips the rows that shard had not sent yet (noRowSkipped). The original
-// lists only rows it owns, and the merge drops a key two shards sent; neither is needed in this
-// model, where a client learns of a split only once it has committed.
+// Each rule is needed: --without mergeToFrontier returns every row the shards sent, past where one
+// of them stopped, and skips the rows that shard had not sent yet (noRowSkipped). --without
+// listOwnedOnce returns a moved row twice, once from the original (still storing it until cleanup)
+// and once from the copy (noRowTwice). The rule is two guards, each enough here: the original
+// lists only rows it owns, and the merge drops a key two shards sent.
 import { atMost, budget, defineActor, defineCall, defineLimit, defineMessage, defineProperty, defineRule, defineScenario, defineSpec, defineZone, failed, listOf, lose, oneOf } from "@leostera/feynman";
 
 /** Rows by sort position; row 2's key hashes into the half that moves. */
@@ -37,6 +38,7 @@ const Activate = defineCall("Activate", {}, { name: "activate" });
 const Activated = defineMessage("Activated", {}, { name: "activated", tone: "reply" });
 
 const mergeToFrontier = defineRule("mergeToFrontier", { description: "A page holds only the rows up to the smallest frontier any shard reported." });
+const listOwnedOnce = defineRule("listOwnedOnce", { description: "A shard lists only rows it owns (not ones a split gave away and cleanup hasn't deleted), and the merge drops a key two shards sent." });
 
 const callers = defineZone({ name: "Workers", description: "merge one page from every shard" });
 const objects = defineZone({ name: "Durable Objects", description: "each lists only the rows it owns" });
@@ -100,7 +102,7 @@ export const Client = defineActor({
         // Without the merge rule: as far as any shard got.
         const frontier = mergeToFrontier.on ? Math.min(...answers.map((a) => a.frontier)) : Math.max(...answers.map((a) => a.frontier));
         const sent = answers.flatMap((a) => a.rows);
-        const complete = [...new Set(sent)].filter((r) => r <= frontier).sort((a, b) => a - b);
+        const complete = (listOwnedOnce.on ? [...new Set(sent)] : sent).filter((r) => r <= frontier).sort((a, b) => a - b);
         const page = complete.slice(0, LIMIT);
         s.emitted.push(...page);
         s.cursor = page.length === LIMIT ? page[LIMIT - 1]! : frontier;
@@ -196,7 +198,8 @@ export const Original = defineActor({
       run(s, msg, ctx) {
         if (msg.as === "root" && s.committed) return ctx.reply(Moved, {});
         // Owned rows only: row 2 may still be stored, but after the commit it is not listed.
-        ctx.reply(Rows, { shard: msg.as, ...shardPage(s.committed ? [0, 1] : [...ROWS], msg.after, msg.limit) });
+        const stored = s.committed && !s.storesMoved ? [0, 1] : [...ROWS];
+        ctx.reply(Rows, { shard: msg.as, ...shardPage(s.committed && listOwnedOnce.on ? [0, 1] : stored, msg.after, msg.limit) });
       },
     },
     copied: {
@@ -290,6 +293,7 @@ export const Sibling = defineActor({
 const noRowTwice = defineProperty("noRowTwice", {
   description: "No row is returned twice, across pages.",
   always: (w) => new Set(w.the(Client).state.emitted).size === w.the(Client).state.emitted.length,
+  needs: [listOwnedOnce],
 });
 const inOrder = defineProperty("inOrder", {
   description: "Rows come back in sort order, across pages.",
