@@ -321,7 +321,9 @@ changes go through the client, which reserves first.
     that no longer has one of them (removed, or redefined: a new id), it queues the old id in
     `indexed_drops`, and builds a redefined index again like a new one.
   - Its alarm tells every index shard to drop the id (a scan of `indexDrop`), then drops the
-    id's fences. Every row shard that saw the id go asks; asking again changes nothing. From the
+    id's fences, reading them 250 at a time in rowid order, at most 20 windows an alarm (they have
+    no index by route: one statement over them all could take the shard for long). Every row
+    shard that saw the id go asks; asking again changes nothing. From the
     migration on, it leaves the id's changes out of what it sends.
   - An index shard records the id (`global_index_dropped`, kept for good: one row per index ever
     dropped), and its alarm deletes the id's entries, `dropBatch` (2,000) at a time. A change to a

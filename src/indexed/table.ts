@@ -34,6 +34,9 @@ const DELIVERY_BATCH = 200;
  * the entries of many writes.
  */
 const MAX_SENDS = 4;
+/** Fences read a statement while a dropped index's are deleted, and windows a call. */
+const FENCE_WINDOW = 250;
+const FENCE_WINDOWS = 20;
 /** A delivery call that has not answered in this long fails, and frees its slot. */
 const SEND_TIMEOUT_MS = 10_000;
 /** Outbox entries one alarm delivers at most: a backlog goes over several alarms. */
@@ -488,17 +491,42 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
     const ids = this.store.exec<{ id: string }>(`SELECT id FROM ${DROPS} ORDER BY id`).toArray().map((r) => r.id);
     for (const id of ids) {
       try {
-        await this.indexShards().scan("indexDrop", id);
+        // Once an instance: the fences may take several calls, and the index shards dropped it.
+        if (!this.dropsSent.has(id)) await this.indexShards().scan("indexDrop", id);
+        this.dropsSent.add(id);
       } catch (error) {
         console.error(JSON.stringify({ event: "index-drop-failed", node: this.nodeLabel(), index: id, error: String(error) }));
         return false;
       }
-      const [from, to] = routeRangeOf(id);
-      this.store.exec(`DELETE FROM ${FENCES} WHERE route >= ? AND route < ?`, from, to);
+      if (!this.dropFences(id)) return false;
       this.store.exec(`DELETE FROM ${DROPS} WHERE id = ?`, id);
     }
     return true;
   }
+
+  /**
+   * Deletes a dropped index's fences, a window of FENCE_WINDOW rows at a time in rowid order (the
+   * fences have no index by route, and a statement over all of them could be long), at most
+   * FENCE_WINDOWS windows a call. True once none is left; the cursor is in memory, so a restart
+   * starts over, at worst reading again what it read.
+   */
+  private dropFences(id: string): boolean {
+    const [from, to] = routeRangeOf(id);
+    for (let w = 0; w < FENCE_WINDOWS; w++) {
+      const after = this.fenceCursor.get(id) ?? 0;
+      const window = this.store.exec<{ rowid: number; route: string }>(`SELECT rowid, route FROM ${FENCES} WHERE rowid > ? ORDER BY rowid LIMIT ?`, after, FENCE_WINDOW).toArray();
+      if (window.length === 0) {
+        this.fenceCursor.delete(id);
+        return true;
+      }
+      const gone = window.filter((f) => f.route >= from && f.route < to).map((f) => f.rowid);
+      for (const part of slices(gone)) this.store.exec(`DELETE FROM ${FENCES} WHERE rowid IN (${marks(part)})`, ...part);
+      this.fenceCursor.set(id, window.at(-1)!.rowid);
+    }
+    return false;
+  }
+  private readonly fenceCursor = new Map<string, number>();
+  private readonly dropsSent = new Set<string>();
 
   /** The ids of the schema's global indexes. */
   private liveIndexIds(): ReadonlySet<string> {

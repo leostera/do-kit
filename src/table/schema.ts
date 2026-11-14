@@ -317,6 +317,8 @@ export type SqlValue = string | number | null;
 export interface ShardPage {
   readonly rows: readonly { readonly key: string; readonly row: RowShape; readonly version: number; readonly position: Position }[];
   readonly frontier: Position | null;
+  /** The page holds as many bytes as a page takes: the client ends its page here too. */
+  readonly full?: true;
   /** Asked for: this shard's rows, and its counts of a group. */
   readonly total?: number;
   readonly counts?: readonly GroupCount[];

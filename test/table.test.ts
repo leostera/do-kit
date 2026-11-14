@@ -472,11 +472,12 @@ test("a late message of an older split attempt cannot replace a claimed copy", a
   await table("flaky", name, "failActivations", true, "");
   expect(await post<boolean>("/split", { cls: "flaky", name, bits: "" })).toBe(true);
   // The original has stopped owning the right half: the claimed copy is all there is of it.
-  const copy = await post<{ bits: string; state: string; storedRows: number }>("/describe", { cls: "flaky", name, bits: "1" });
+  const copy = await post<{ bits: string; state: string; rows: number }>("/describe", { cls: "flaky", name, bits: "1" });
   expect(copy).toMatchObject({ bits: "1", state: "copy" });
   expect(await table<string>("flaky", name, "lateSchema", 0, "1")).toContain("refused");
   expect(await table<string>("flaky", name, "lateSchema", 1, "1")).toContain("refused"); // its own attempt's, again
-  expect(await post("/describe", { cls: "flaky", name, bits: "1" })).toMatchObject({ bits: "1", state: "copy", storedRows: copy.storedRows });
+  // Its own rows, not what it stores: the copy's cleanup of the other half may be under way.
+  expect(await post("/describe", { cls: "flaky", name, bits: "1" })).toMatchObject({ bits: "1", state: "copy", rows: copy.rows });
   await table("flaky", name, "failActivations", false, "1");
   const listed = await table<Versioned[]>("flaky", name, "all", {});
   expect(listed.map((r) => r.row.name).sort()).toEqual(rows.map((r) => r.name).sort());

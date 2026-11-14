@@ -225,7 +225,7 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 ### What is atomic
 
 - **One row**: every write is one transaction with its index entries and counts, and its versions are linearizable: a read that starts after a write is acknowledged sees it or something later.
-- **One shard's part of a batch**: `putMany`, `patch` and `delete` batches are one transaction per shard.
+- **One shard's part of a batch**: `putMany`, `patch` and `delete` batches are one transaction per shard, for batches of up to 1,000 rows. A larger batch is sent 1,000 rows a call, so its part on one shard can be several transactions.
 - **A batch across shards** is not, and can be partially applied: if one shard fails, the others' parts stay written, and the error says which rows are unknown. Use `atomically` ([RFD0008](docs/rfds/RFD0008-atomic-calls-across-shards.md)) when rows in several shards must change together.
 - **Reads across shards** (`getMany`, a page) are not a snapshot: one shard's answer can include a write that another's, asked a moment earlier, does not.
 - **`count()`** may count a row twice, or miss it, at the moment a split commits; it is exact otherwise.
@@ -476,7 +476,7 @@ A method called through `client.call` takes its `keys` first and their `payloads
 - **Waiting:** a call waits up to 30 s for a shard that is not serving yet (`sharded(ns, name, { notReadyWaitMs })` to change it). A write held by a split in progress waits until that split finishes or gives up (`splitTimeoutMs`), however long that is.
 - **Jurisdictions:** pass `env.X.jurisdiction("eu")` to `sharded` and every shard of the object stays in that jurisdiction, including the ones splits create.
 - **Stub options:** `sharded(ns, name, { stubOptions: { version: { cohort } } })` passes options to every stub of the object's shards, including the stubs shards make for each other when they split.
-- **Scans:** `client.scan("method")` calls a method on every shard. It can enumerate that shard's rows with `this.allRows()`. There is one result per shard, not a global snapshot.
+- **Scans:** `client.scan("method")` calls a method on every shard. It can enumerate that shard's rows with `this.allRows()`, up to `allRowsCap` (10,000) rows; past that it throws, and `ownedRowsPage(afterKey, limit)` pages them. There is one result per shard, not a global snapshot.
 
 ## Split policy
 

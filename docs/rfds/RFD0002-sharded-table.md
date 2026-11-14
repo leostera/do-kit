@@ -143,7 +143,10 @@ declares.
 - Each returns `{ ok, version }`: the row's new version, or its current version when `ifVersion`
   did not match. `ifVersion: 0` means "only if absent".
 - Every write runs in the core's `transact`. It waits while a split copies the key, checks the
-  shard still owns it, and is one SQLite transaction with the index keys and the counts.
+  shard still owns it, and is one SQLite transaction with the index keys and the counts. A put
+  of a row that exists updates it in place, and touches an index only if its key changed.
+- The client sends a batch 1,000 rows a call at most, the calls at once: a shard's part of a
+  larger batch is several transactions.
 - A write may carry an `opId`. The shard keeps the opId with the write's result, in the
   write's transaction, for `OP_ID_TTL_MS` (a day). The same request sent again under that opId
   (its answer was lost) answers the kept result and writes nothing. Another request under it
@@ -174,8 +177,12 @@ A page:
    twice `limit / shards`, plus two. Each shard returns matching rows in index order, scanning at
    most `budget` rows.
 2. Each shard answers its rows and a **frontier**: the position up to which it has reported every
-   match. That is its last row if it returned its limit, the last row it scanned if it ran out of
-   budget, or the end.
+   match. That is its last row if it returned its limit, or rows holding 4 MiB of text (it says
+   `full`, and the client ends its page there), the last row it scanned if it ran out of budget,
+   or the end.
+   A shard whose listings scanned 200,000 rows this second answers the next "not ready" until the
+   second is over, and the client backs off: a burst of wide listings can't take the shard from
+   its writes.
 3. The client merges. Every shard has reported everything up to the smallest frontier, so the rows
    up to it are complete. It returns those, sorted, up to `limit`. If the page comes up short, it
    asks again from the frontier, up to three rounds.
@@ -211,7 +218,9 @@ order on random tuples.
 - **The total.** Each shard keeps rows per 16-bit hash prefix (`sharded_table_counts`), updated
   in the write's transaction. A shard's count sums the prefixes in its range, which is exact at
   every depth up to 16 (the table's `maxDepth` limit). After a split both sides store all
-  prefixes but sum only their own, so nothing is recomputed.
+  prefixes but sum only their own, so nothing is recomputed. The sum is kept in memory once read,
+  and moved by each write; a write transaction that rolls back drops it, and the next count sums
+  again. So a count reads nothing after the first.
 - **Count groups.** `counts: { byStatus: "status" }` counts rows per value of a column the same
   way, in `sharded_table_group_counts`. `countBy(group)` sums a shard's range per value. Count
   groups are for columns of few values: past `maxCountValues` (1,000) values, `countBy` answers

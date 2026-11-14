@@ -229,7 +229,8 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
       const merged = mergePages(pages, { limit: wanted, direction: request.direction });
       rows.push(...merged.rows);
       next = merged.next;
-      if (next === null || rows.length === request.limit) break;
+      // A shard's page full by bytes ends this page: another round would only add to it.
+      if (next === null || rows.length === request.limit || pages.some((p) => p.full)) break;
     }
     return {
       rows: rows.map(({ row, version }) => ({ row: row as Row, version })),
@@ -268,6 +269,7 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
       const page = answer.ok as ShardPage;
       rows.push(...page.rows);
       at = page.frontier !== null ? { ...at, after: page.frontier } : nextShard(at);
+      if (page.full) break;
     }
     return { rows: rows.map(({ row, version }) => ({ row: row as Row, version })), cursor: at === null ? null : encodeShardCursor(fingerprint, at) };
   }
@@ -289,26 +291,46 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
   }
 
   /**
-   * Calls `method` for each key, with the results back in the keys' order. A call over several
-   * shards one of which fails throws that shard's error with `results`: each row's RowOutcome.
-   * `read`: it writes nothing, and is sent again after an error of unknown outcome.
+   * Calls `method` for each key, with the results back in the keys' order, at most MAX_ROWS_PER_CALL
+   * rows a call: a larger batch goes in several calls, at once. A call over several shards one of
+   * which fails throws that shard's error with `results`: each row's RowOutcome. `read`: it writes
+   * nothing, and is sent again after an error of unknown outcome.
    */
   protected async byPosition<R>(keys: readonly string[], method: keyof TableMethods, payloads: readonly unknown[] | null, read = false): Promise<R[]> {
     const out = new Array<R>(keys.length);
-    try {
-      for (const group of await (read ? this.client.read(keys, method, payloads) : this.client.call(keys, method, payloads))) group.positions.forEach((p, i) => (out[p] = group.result[i] as R));
-    } catch (error) {
-      const e = error as { settled?: { positions: readonly number[]; result: readonly unknown[] }[]; unknown?: { positions: readonly number[] }[] } | null;
-      if (!read && e && typeof e === "object" && e.settled) {
-        const results = new Array<unknown>(keys.length).fill({ unknown: true });
-        for (const group of e.settled) group.positions.forEach((p, i) => (results[p] = group.result[i]));
-        Object.assign(e, { results });
-      }
+    const results = new Array<unknown>(keys.length).fill({ unknown: true });
+    const chunks: number[] = [];
+    for (let start = 0; start < keys.length; start += MAX_ROWS_PER_CALL) chunks.push(start);
+    const settled = await Promise.allSettled(
+      chunks.map(async (start) => {
+        const part = keys.slice(start, start + MAX_ROWS_PER_CALL);
+        const partPayloads = payloads ? payloads.slice(start, start + MAX_ROWS_PER_CALL) : null;
+        try {
+          for (const group of await (read ? this.client.read(part, method, partPayloads) : this.client.call(part, method, partPayloads))) {
+            group.positions.forEach((p, i) => (out[start + p] = results[start + p] = group.result[i] as R));
+          }
+        } catch (error) {
+          const e = error as { settled?: { positions: readonly number[]; result: readonly unknown[] }[] } | null;
+          if (e && typeof e === "object" && e.settled) for (const group of e.settled) group.positions.forEach((p, i) => (results[start + p] = group.result[i]));
+          throw error;
+        }
+      }),
+    );
+    const failed = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (failed) {
+      const error = failed.reason as unknown;
+      if (!read && error && typeof error === "object" && "settled" in error) Object.assign(error, { results });
       throw error;
     }
     return out;
   }
 }
+
+/**
+ * Rows a table call carries at most: a batch's part on one shard is one transaction of up to this
+ * many rows, and a larger one goes in several (a call's size and time stay bounded).
+ */
+export const MAX_ROWS_PER_CALL = 1_000;
 
 /** Sums counts per value over shards, leaving out values with none. */
 function sumGroups(perShard: readonly (readonly GroupCount[])[]): GroupCount[] {

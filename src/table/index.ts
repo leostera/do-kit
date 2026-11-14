@@ -84,6 +84,13 @@ interface IndexDef {
 const BUCKET_DIGITS = 4;
 const MAX_TABLE_DEPTH = BUCKET_DIGITS * 4;
 const CLEANUP_BATCH = 250;
+/** A shard's page stops once its rows hold this much text (UTF-16 units, about bytes): RPC answers stay small. */
+const PAGE_BYTES = 4 * 1024 * 1024;
+/**
+ * Rows a shard's listings scan a second before more wait for the next: about what SQLite in a
+ * Durable Object reads in a quarter of a second, leaving the rest of it to other calls.
+ */
+const SCAN_ROWS_PER_SECOND = 200_000;
 /** Counts of a dropped group deleted a step: each reads about four rows (the table and its key). */
 const COUNT_DROP_BATCH = 120;
 /** How long one alarm takes build steps for, at most, before it asks for the next. */
@@ -274,26 +281,36 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   protected putRow(row: Row, options: PutOptions = {}): WriteResult {
     this.migrate();
     const key = row[this.table.primaryKey] as string;
-    const current = this.version(key);
+    // One read of the row: its version, and what its indexes and counts had.
+    const existing = this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).toArray()[0] ?? null;
+    const current = (existing?._version as number | undefined) ?? 0;
     if (options.ifVersion !== undefined && options.ifVersion !== current) return { ok: false, version: current };
     const stored: Record<string, SqlValue> = {};
     for (const name of Object.keys(this.table.columns)) stored[name] = this.encode(name, row[name]);
     this.assertFits(key, stored);
-    const watched = this.watchesRows() ? { before: current === 0 ? null : this.getRow(key)!.row, after: this.decode(stored) } : null;
+    const watched = this.watchesRows() ? { before: existing ? this.decode(existing) : null, after: this.decode(stored) } : null;
     if (watched) {
       const refused = this.refuseRowWrite(key, watched.before, watched.after);
       if (refused !== null) return { ok: false, version: current, refused };
     }
-    const before = current === 0 ? null : this.storedRow(key);
+    const before = existing;
     const names = Object.keys(stored);
     const version = (current === 0 ? this.deletedVersion() : current) + 1;
-    this.db.exec(
-      `INSERT INTO ${TABLE} (${names.map((n) => this.q(n)).join(", ")}, _hash, _version) VALUES (${names.map(() => "?").join(", ")}, ?, ?) ` +
-        `ON CONFLICT (${this.q(this.table.primaryKey)}) DO UPDATE SET ${names.map((n) => `${this.q(n)} = excluded.${this.q(n)}`).join(", ")}, _version = excluded._version`,
-      ...names.map((n) => stored[n]!),
-      this.routeHash(key),
-      version,
-    );
+    // A row that exists is updated in place: one row written (an upsert writes two).
+    if (existing)
+      this.db.exec(
+        `UPDATE ${TABLE} SET ${names.filter((n) => n !== this.table.primaryKey).map((n) => `${this.q(n)} = ?`).join(", ")}, _version = ? WHERE ${this.q(this.table.primaryKey)} = ?`,
+        ...names.filter((n) => n !== this.table.primaryKey).map((n) => stored[n]!),
+        version,
+        key,
+      );
+    else
+      this.db.exec(
+        `INSERT INTO ${TABLE} (${names.map((n) => this.q(n)).join(", ")}, _hash, _version) VALUES (${names.map(() => "?").join(", ")}, ?, ?)`,
+        ...names.map((n) => stored[n]!),
+        this.routeHash(key),
+        version,
+      );
     if (current === 0) this.countRow(key, 1);
     this.countGroups(key, before, stored);
     this.updateKeys(key, before, stored);
@@ -398,6 +415,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.migrated = false;
     this.keyIndex = "";
     this.buildAlarm = "none";
+    this.counted = null;
     this.deletedAt = null;
     this.indexDefs = null;
     super.forgetStorage();
@@ -442,6 +460,11 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     // An index being built, or with rows whose keys may be stale, lists nothing yet: the alarm
     // and the calls meanwhile build it, a step each.
     if (ix && (this.building.has(ix.keys) || this.dirtyRows)) this.notReady();
+    // Flooded: past SCAN_ROWS_PER_SECOND rows scanned this second, pages wait for the next one.
+    // The client backs off and asks again, so a burst of wide listings can't starve the writes.
+    const second = Math.floor(Date.now() / 1000);
+    if (this.scanSecond !== second) [this.scanSecond, this.scannedThisSecond] = [second, 0];
+    if (this.scannedThisSecond >= SCAN_ROWS_PER_SECOND) this.notReady((second + 1) * 1000);
     const [lo, hi] = this.ownedHashRange();
     const params: SqlValue[] = [];
     const matches = request.where.length ? request.where.map((c) => this.condition(c, params)).join(" AND ") : "1";
@@ -456,27 +479,37 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     const rows: { key: string; row: RowShape; version: number; position: string }[] = [];
     let last: string | null = null;
     let scanned = 0;
+    let bytes = 0;
     for (const found of this.db.exec<Record<string, SqlValue>>(sql, ...params, ...(request.after === null ? [] : [request.after]), lo, hi, request.budget)) {
       scanned++;
       last = found._pos as string;
       if (found._m) {
         rows.push({ key: found[pk] as string, row: this.decode(found), version: found._version as number, position: last });
-        if (rows.length === request.limit) {
+        for (const name of Object.keys(this.table.columns)) {
+          const v = found[name];
+          bytes += typeof v === "string" ? v.length : 8;
+        }
+        // Full by rows, or by bytes: an answer of large rows stays well under what a call returns.
+        if (rows.length === request.limit || bytes >= PAGE_BYTES) {
           this.listings.pages++;
           this.listings.scanned += scanned;
-          return { rows, frontier: last };
+          this.scannedThisSecond += scanned;
+          return bytes >= PAGE_BYTES ? { rows, frontier: last, full: true } : { rows, frontier: last };
         }
       }
     }
     // Out of budget: reported everything up to the last row scanned. Out of rows: the end.
     this.listings.pages++;
     this.listings.scanned += scanned;
+    this.scannedThisSecond += scanned;
     if (scanned === request.budget) this.listings.budgetStops++;
     return { rows, frontier: scanned === request.budget ? last : null };
   }
 
   /** Listing pages served since this instance started, the rows they scanned, and those their budget cut. */
   private readonly listings = { pages: 0, scanned: 0, budgetStops: 0 };
+  private scanSecond = 0;
+  private scannedThisSecond = 0;
 
   protected override layerCounters() {
     return { table: { ...this.listings } };
@@ -934,10 +967,22 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.countDrops = this.db.exec(`SELECT 1 FROM ${COUNT_DROPS} LIMIT 1`).toArray().length > 0;
   }
 
-  /** Rows this shard owns (its migrated storage). */
+  /**
+   * Rows this shard owns (its migrated storage): summed from the counts once an instance and
+   * owned range, then kept in step by the writes. A write transaction that rolls back drops it
+   * (afterRollback), and the next count sums again.
+   */
   private count(): number {
     const [lo, hi] = this.ownedBuckets();
-    return this.db.exec<{ n: number | null }>(`SELECT SUM(n) AS n FROM ${COUNTS} WHERE bucket >= ? AND bucket <= ?`, lo, hi).one().n ?? 0;
+    const range = `${lo}-${hi}`;
+    if (this.counted?.range !== range) this.counted = { range, n: this.db.exec<{ n: number | null }>(`SELECT SUM(n) AS n FROM ${COUNTS} WHERE bucket >= ? AND bucket <= ?`, lo, hi).one().n ?? 0 };
+    return this.counted.n;
+  }
+  private counted: { range: string; n: number } | null = null;
+
+  protected override afterRollback(): void {
+    this.counted = null;
+    super.afterRollback();
   }
 
   private countBy(group: string): GroupCount[] {
@@ -1013,6 +1058,12 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   }
 
   private countRow(key: string, delta: number): void {
+    // Kept in step only for a key this shard owns (the count is of the owned range).
+    if (this.counted) {
+      const [lo, hi] = this.ownedBuckets();
+      const bucket = this.routeHash(key).slice(0, BUCKET_DIGITS);
+      if (bucket >= lo && bucket <= hi) this.counted = { ...this.counted, n: this.counted.n + delta };
+    }
     this.db.exec(`INSERT INTO ${COUNTS} (bucket, n) VALUES (?, ?) ON CONFLICT (bucket) DO UPDATE SET n = n + excluded.n`, this.routeHash(key).slice(0, BUCKET_DIGITS), delta);
   }
 

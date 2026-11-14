@@ -642,7 +642,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // No await from here on: the checks and the transaction see the same split state and time.
     this.assertBeforeDeadline();
     this.assertOwner(keys);
-    return this.ctx.storage.transactionSync(() => {
+    return this.writeTransaction(() => {
       const current = new Map<string, V>();
       for (const key of keys) {
         const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_rows WHERE key = ?", key).toArray()[0];
@@ -672,8 +672,24 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // No await from here on: the checks and the transaction see the same split state and time.
     this.assertBeforeDeadline();
     this.assertOwner(keys);
-    return this.ctx.storage.transactionSync(fn);
+    return this.writeTransaction(fn);
   }
+
+  /**
+   * A transaction of the subclass's writes: if it throws, it is rolled back, and `afterRollback`
+   * tells the layers to drop what they kept in memory of it.
+   */
+  private writeTransaction<R>(fn: () => R): R {
+    try {
+      return this.ctx.storage.transactionSync(fn);
+    } catch (error) {
+      this.afterRollback();
+      throw error;
+    }
+  }
+
+  /** After a write transaction rolled back: a layer that keeps what it wrote in memory (a table's row count) drops it. */
+  protected afterRollback(): void {}
 
   /**
    * Throws Expired past the deadline of the routed call being served: its caller has given up on
@@ -740,6 +756,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.calls.clear();
     this.alarmCheckedAt = 0;
     this.routesChecked = false;
+    this.storedWake = undefined;
   }
 
   protected cleanupForeign(_owns: (key: string) => boolean, _limit: number): number {
@@ -771,8 +788,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * For work a shard does in slices before it can serve (building an index over its rows): each
    * call does a slice, commits it, and ends here until the work is done.
    */
-  protected notReady(): never {
-    throw new NotReady(Date.now());
+  protected notReady(until: number = Date.now()): never {
+    throw new NotReady(until);
   }
 
   /** This shard's name (`${name}#${bits}`), once it has one. */
@@ -912,7 +929,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       // No await from here on: the check and the transaction see the same holds and split state.
       if (this.holding(keys, exceptTx)) continue;
       this.assertOwner(keys);
-      return this.ctx.storage.transactionSync(() => inTransaction(gathered));
+      return this.writeTransaction(() => inTransaction(gathered));
     }
   }
 
@@ -1097,7 +1114,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const h = this.loadHold(tx);
     if (!h) return { gone: true };
     const m = this.atomicMethod(h.method);
-    const result = this.ctx.storage.transactionSync(() => {
+    const result = this.writeTransaction(() => {
       let applied: unknown = undefined;
       if (outcome === "commit") {
         const { writes, result } = m.apply(this.rowsOf(h.keys), h.staged);
@@ -1376,9 +1393,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.assertOwner([]);
     const [lo, hi] = hashRange(this.meta!.bits);
     const out = new Map<string, V>();
-    for (const r of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM sharded_rows WHERE hash >= ? AND hash <= ?", lo, hi)) out.set(r.key, JSON.parse(r.value) as V);
+    // At most allRowsCap: past it one call would read, hold and return more than it should.
+    for (const r of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM sharded_rows WHERE hash >= ? AND hash <= ? LIMIT ?", lo, hi, this.allRowsCap + 1)) out.set(r.key, JSON.parse(r.value) as V);
+    if (out.size > this.allRowsCap) throw new Error(`allRows: this shard owns more than ${this.allRowsCap} rows; page them with ownedRowsPage(afterKey, limit)`);
     return out;
   }
+
+  /** The most rows `allRows` returns: a shard with more throws, naming `ownedRowsPage`. */
+  protected allRowsCap = 10_000;
 
   /** "moved" for a call addressed to `bits`: this shard went deeper, so `bits` and more split. */
   private moved(bits: string): CallAnswer<never> {
@@ -1897,9 +1919,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   /** When the subclass asked for `onAlarm`, if it did. */
   private loadWake(): number | null {
     if (!this.schemaReady) return null;
-    const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_meta WHERE key = 'wake'").toArray()[0];
-    return row ? Number(row.value) : null;
+    // Read once an instance: only saveWake changes it, and keeps this in step.
+    if (this.storedWake === undefined) {
+      const row = this.sql.exec<{ value: string }>("SELECT value FROM sharded_meta WHERE key = 'wake'").toArray()[0];
+      this.storedWake = row ? Number(row.value) : null;
+    }
+    return this.storedWake;
   }
+  private storedWake: number | null | undefined = undefined;
 
   /** Alarms in a row whose work threw (layers' or the app's). */
   private loadWakeFailures(): number {
@@ -1914,8 +1941,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
 
   private saveWake(time: number | null): void {
     this.ensureSchema();
+    // Unknown until read again if the statement fails (inside a transaction that rolls back, say).
+    this.storedWake = undefined;
     if (time === null) this.sql.exec("DELETE FROM sharded_meta WHERE key = 'wake'");
     else this.sql.exec("INSERT INTO sharded_meta (key, value) VALUES ('wake', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(time));
+    this.storedWake = time;
   }
 
   /**
