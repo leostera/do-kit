@@ -497,6 +497,27 @@ class CounterBase extends ShardedObject<Env, number> {
     return keys.map(() => null);
   }
 
+  /** A subclass's own schema: rows, a count kept by a trigger, and a view over them. */
+  async keepCounted(keys: readonly string[], _payloads: null): Promise<null[]> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS counted (key TEXT PRIMARY KEY)");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS counted_n (n INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("INSERT INTO counted_n (n) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM counted_n)");
+    this.ctx.storage.sql.exec("CREATE TRIGGER IF NOT EXISTS counted_bump AFTER INSERT ON counted BEGIN UPDATE counted_n SET n = n + 1; END");
+    this.ctx.storage.sql.exec("CREATE VIEW IF NOT EXISTS counted_view AS SELECT key FROM counted");
+    return keys.map(() => null);
+  }
+  /** Adds a note per key, and answers the trigger's count. */
+  async addCounted(keys: readonly string[], _payloads: null): Promise<number[]> {
+    for (const key of keys) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO counted (key) VALUES (?)", key);
+    const n = this.ctx.storage.sql.exec<{ n: number }>("SELECT n FROM counted_n").one().n;
+    return keys.map(() => n);
+  }
+  /** Whether this shard's view answers. */
+  async viewed(keys: readonly string[], _payloads: null): Promise<boolean[]> {
+    const ok = this.ctx.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM sqlite_master WHERE type = 'view' AND name = 'counted_view'").one().n === 1;
+    return keys.map(() => ok);
+  }
+
   /** Ends this instance (an eviction): what it kept in memory is gone. Called on the object, not routed. */
   async evict(): Promise<void> {
     this.ctx.abort("test: evicted");
