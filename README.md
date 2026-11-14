@@ -226,7 +226,7 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 
 - **One row**: every write is one transaction with its index entries and counts, and its versions are linearizable: a read that starts after a write is acknowledged sees it or something later.
 - **One shard's part of a batch**: `putMany`, `patch` and `delete` batches are one transaction per shard.
-- **A batch across shards** is not, and can fail partway (partial): if one shard fails, the others' parts stay written, and the error says which rows are unknown. Use `atomically` ([RFD0008](docs/rfds/RFD0008-atomic-calls-across-shards.md)) when rows in several shards must change together.
+- **A batch across shards** is not, and can be partially applied: if one shard fails, the others' parts stay written, and the error says which rows are unknown. Use `atomically` ([RFD0008](docs/rfds/RFD0008-atomic-calls-across-shards.md)) when rows in several shards must change together.
 - **Reads across shards** (`getMany`, a page) are not a snapshot: one shard's answer can include a write that another's, asked a moment earlier, does not.
 - **`count()`** may count a row twice, or miss it, at the moment a split commits; it is exact otherwise.
 
