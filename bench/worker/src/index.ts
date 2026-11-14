@@ -1,5 +1,5 @@
 import { createProblem, walkProblems, WriteLog } from "./answers.ts";
-import { CALLS_PER_DRIVER, callsPerOperation, driversFor, openLoop, scheduleOf, slowCallOf, slowest, SLOWEST_KEPT, type ClientCall, type Schedule, type SlowCall } from "./drivers.ts";
+import { CALLS_PER_DRIVER, callsPerOperation, driversFor, lanesFor, openLoop, scheduleOf, slowCallOf, slowest, SLOWEST_KEPT, type ClientCall, type Schedule, type SlowCall } from "./drivers.ts";
 import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
@@ -1319,8 +1319,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
     // the drivers are not what is measured. Fleets of 256 drivers start them. Drivers scale with
     // the calls an operation makes (a listing calls every shard, an rmw two), not the operations.
     const driverCount = forcedDrivers ?? driversFor(input.concurrency, callsPerOperation(input.operation, input.target), MAX_DRIVERS);
-    const perDriver = Math.ceil(input.concurrency / driverCount);
-    const configs = Array.from({ length: driverCount }, (_, driverIndex) => ({ ...input, driverIndex, driverCount, concurrency: perDriver }));
+    const lanes = lanesFor(input.concurrency, driverCount);
+    const configs = lanes.map((concurrency, driverIndex) => ({ ...input, driverIndex, driverCount, concurrency }));
     const fleets: { stub: DurableObjectStub<BenchFleet>; configs: typeof configs }[] = [];
     for (let i = 0; i < configs.length; i += DRIVERS_PER_FLEET) {
       const stub = env.BENCH_FLEETS.get(env.BENCH_FLEETS.idFromName(`${input.objectName}-fleet-${i / DRIVERS_PER_FLEET}`));
@@ -1375,7 +1375,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
     return Response.json({
       ...input,
-      concurrency: Math.ceil(input.concurrency / driverCount) * driverCount,
+      concurrency: input.concurrency,
       driverCount,
       failedDrivers,
       errorSamples,

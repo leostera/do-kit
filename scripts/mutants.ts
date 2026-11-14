@@ -366,6 +366,13 @@ const MUTANTS: Mutant[] = [
     test: "test/schema.test.ts",
     pattern: "without encoding",
   },
+  {
+    name: "lanes-rounded-up",
+    breaks: "a point runs at, and reports, the load it was asked for",
+    edits: [{ file: "bench/worker/src/index.ts", find: "      concurrency: input.concurrency,", replace: "      concurrency: Math.max(...lanesFor(input.concurrency, driverCount)) * driverCount," }],
+    test: "test/bench-worker.test.ts",
+    pattern: "load asked for",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

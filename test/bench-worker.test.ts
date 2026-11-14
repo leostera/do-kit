@@ -6,7 +6,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { join } from "node:path";
 import { createProblem, walkProblems, WriteLog } from "../bench/worker/src/answers.ts";
 import { missingBaselines } from "../bench/baselines.ts";
-import { callsPerOperation, driversFor, LATE_MS, openLoop, scheduleOf } from "../bench/worker/src/drivers.ts";
+import { callsPerOperation, driversFor, lanesFor, LATE_MS, openLoop, scheduleOf } from "../bench/worker/src/drivers.ts";
 
 test("a key reads back as its last acknowledged write, or a later write whose outcome is unknown", () => {
   const log = new WriteLog();
@@ -45,6 +45,17 @@ test("drivers scale with the calls an operation makes, not the operations", () =
   expect(callsPerOperation("create", "indexed-16")).toBe(2);
   expect(driversFor(512, callsPerOperation("rmw", "table-16"), 8192)).toBe(2 * driversFor(512, callsPerOperation("write", "table-16"), 8192));
   expect(driversFor(64, 48, 8192)).toBe(64);
+});
+
+test("a point runs at the load it was asked for, its calls shared out among its drivers", () => {
+  for (const [concurrency, target] of [[256, "table-1"], [1024, "table-4"], [2048, "table-64"], [16, "table-16"], [1, "table-64"]] as const) {
+    const drivers = driversFor(concurrency, callsPerOperation("list", target), 128);
+    const lanes = lanesFor(concurrency, drivers);
+    expect(lanes.length).toBe(drivers);
+    expect(lanes.reduce((n, l) => n + l, 0)).toBe(concurrency);
+    expect(Math.max(...lanes) - Math.min(...lanes)).toBeLessThanOrEqual(1);
+    expect(Math.min(...lanes)).toBeGreaterThan(0);
+  }
 });
 
 /** A clock of the test's own: time moves only when every call and sleep waits on it. */
@@ -201,6 +212,14 @@ test("an open-loop point sends at its arrival rate, and says when its drivers co
   expect(starved.driverLimited).toBe(true);
   expect(starved.withinLatency).toBe(false);
 }, 180_000);
+
+test("a point with more drivers than an even share of its calls reports, and runs at, the load asked for", async () => {
+  // A 4-shard listing makes up to 12 calls: 40 in flight take 30 drivers, 10 of them with 2 lanes.
+  const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-4", operation: "list", distribution: "uniform", concurrency: 40, objectName: `lanes-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
+  const point = (await response.json()) as { concurrency: number; driverCount: number };
+  expect(point.driverCount).toBe(30);
+  expect(point.concurrency).toBe(40);
+}, 120_000);
 
 test("a table point keeps its slowest operations, with their rounds, retries and slowest shard", async () => {
   const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-16", operation: "list", distribution: "uniform", concurrency: 8, objectName: `slowest-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });

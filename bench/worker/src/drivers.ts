@@ -31,6 +31,16 @@ export function driversFor(concurrency: number, callsPerOp: number, maxDrivers: 
   return Math.min(maxDrivers, concurrency, Math.max(Math.min(16, concurrency), Math.ceil((concurrency * callsPerOp) / CALLS_PER_DRIVER)));
 }
 
+/**
+ * Each driver's share of a point's calls in flight: together exactly `concurrency`, the first
+ * `concurrency % drivers` drivers one more than the rest. (Rounded up for each, a point ran at a
+ * load it was not asked for, and could not be paired with a baseline at the load asked for.)
+ */
+export function lanesFor(concurrency: number, drivers: number): number[] {
+  const base = Math.floor(concurrency / drivers);
+  return Array.from({ length: drivers }, (_, i) => base + (i < concurrency % drivers ? 1 : 0));
+}
+
 /** How a driver kept an open-loop schedule. */
 export interface Schedule {
   /** Sends the schedule asked for. */
