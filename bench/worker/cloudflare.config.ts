@@ -7,6 +7,8 @@ import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
 const NAME = process.env.BENCH_WORKER_NAME ?? "do-kit-bench";
 const HOSTNAME = process.env.BENCH_HOSTNAME;
+const TRACE_RATE = Number(process.env.BENCH_TRACE_RATE ?? 0.01);
+if (!(TRACE_RATE > 0 && TRACE_RATE <= 1)) throw new Error("BENCH_TRACE_RATE: a share of requests from above 0 to 1");
 // Deployed with BENCH_TEARDOWN=1 before the Worker is deleted: every class deleted, with its storage.
 const TEARDOWN = process.env.BENCH_TEARDOWN === "1";
 
@@ -53,7 +55,9 @@ export default defineConfig(() => ({
     // A split benchmark runs writers for minutes in one request, and a driver runs all of a
     // point's calls in one request: a listing of a 64-shard table is up to 192 calls.
     limits: { cpuMs: 300_000, subrequests: 1_000_000 },
-    observability: { enabled: true, logs: { enabled: true, invocationLogs: false } },
+    // Traces on every run: each Durable Object call by method and each SQL statement by its text,
+    // to read where a point's time went against the code (BENCH_TRACE_RATE, default 1 in 100).
+    observability: { enabled: true, logs: { enabled: true, invocationLogs: false }, traces: { enabled: true, headSamplingRate: TRACE_RATE } },
     entrypoint: TEARDOWN ? gone : entrypoint,
     env: TEARDOWN ? {} : {
       BENCH_DRIVERS: bindings.durableObject({ worker: NAME, exportName: "BenchDriver" }),

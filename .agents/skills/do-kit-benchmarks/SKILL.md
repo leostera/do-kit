@@ -32,7 +32,15 @@ and every number in the README and `docs/performance.md` comes from a results fi
    `bun bench/workgraph/plot.ts`. A number in prose must be in a results file.
 6. **Report what you saw, failures included.** Absolute numbers with p50 or p99 and failed calls.
    If a target got worse, or a run behaved in a way nobody can explain yet, the docs say so.
-7. **Always tear down.** When the runs are done, tear down every Worker you deployed, and any
+7. **Performance only where it runs; correctness anywhere.** The local runtime is not the one a
+   deploy gets: its scheduling, storage, RPC and limits differ, so a local throughput, latency or
+   CPU profile says little about the edge. Locally, run the tests and short loads that check
+   answers (lost writes, wrong listings), never a load to be measured. Every number, and every
+   question about where time goes, is answered on the deployed bench Workers.
+8. **Trace every run.** The bench Workers deploy with Workers tracing on (`BENCH_TRACE_RATE`,
+   1 in 100 by default): each Durable Object call by method and each SQL statement by its text,
+   so a slow or failing point is read against the client and shard code that made the calls.
+9. **Always tear down.** When the runs are done, tear down every Worker you deployed, and any
    Access application made only for it (see below). No exceptions, even if you might rerun
    tomorrow: redeploying takes a minute.
 

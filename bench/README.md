@@ -100,6 +100,8 @@ bun bench/workgraph/plot.ts
 
 ## Probing
 
+Measure only on the deployed Workers: the local runtime schedules, stores and calls differently, so local runs check answers, never numbers. Both Workers deploy with Workers tracing on, sampling `BENCH_TRACE_RATE` of requests (1 in 100 by default), so every run leaves spans for each Durable Object call and SQL statement to read against the code.
+
 When a result looks wrong, `bench/probe.ts` asks the deployed Workers why, before any guess goes into the code: which isolate and colo each shard, driver or runner runs in (`placement`, `runner-placement`), one `/measure` point with a chosen driver count (`measure`), each work graph runner's timeline of alarms, wakes and chunks (`timeline`), and, with `bench/errors.sh`, the Worker's error events from Workers Observability. The errors are where a runtime that resets objects shows up: retries hide it from the results.
 
 ```sh
