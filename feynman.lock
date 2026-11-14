@@ -63,6 +63,7 @@
     "src/sharded/index.ts#ShardedObject.armAlarm": "7b10ddc77c30",
     "src/sharded/index.ts#ShardedObject.arrive": "31d8937cbf35",
     "src/sharded/index.ts#ShardedObject.arriveOrCreate": "38303ba3d347",
+    "src/sharded/index.ts#ShardedObject.assertNotWiped": "a2d48b9c7c9a",
     "src/sharded/index.ts#ShardedObject.atomicCommit": "dfc3df0d4b85",
     "src/sharded/index.ts#ShardedObject.atomicPrepare": "6bc1eaee045d",
     "src/sharded/index.ts#ShardedObject.atomicResolve": "6873dc233bb0",
