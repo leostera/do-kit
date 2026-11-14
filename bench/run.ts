@@ -157,6 +157,9 @@ if (!process.env.BENCH_RESULTS_NAME) writeFileSync(join(resultsDir, "latest.csv"
 console.log(`Saved ${points.length} points in ${resultsDir}`);
 }
 
+/** Points whose answers were wrong: kept in the results, and the run fails at the end. */
+const wrongPoints: string[] = [];
+
 if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ?? "write,read").split(",") as Operation[]) {
   for (const distribution of (process.env.BENCH_DISTRIBUTIONS ?? "uniform,hot").split(",") as Distribution[]) {
     for (const target of (process.env.BENCH_TARGETS ?? "single,split,presplit,legacy").split(",") as Target[]) {
@@ -173,6 +176,8 @@ if (suites.has("load")) for (const operation of (process.env.BENCH_OPERATIONS ??
         }
         points.push(point);
         save();
+        const wrong = point as { ok?: boolean; wrongAnswers?: number; wrongSamples?: string[] };
+        if (wrong.ok === false) wrongPoints.push(JSON.stringify({ target, operation, distribution, concurrency, wrongAnswers: wrong.wrongAnswers, wrongSamples: wrong.wrongSamples }));
         console.log(JSON.stringify({ target, operation, distribution, concurrency: point.concurrency, opsPerSecond: Math.round(point.operationsPerSecond), mebibytesPerSecond: Number(point.mebibytesPerSecond.toFixed(3)), latencyMs: point.latencyMs, errors: point.errors, leaves: point.topology?.leaves ?? 1, ...((point as { stalls?: string[] }).stalls?.length ? { stalls: (point as { stalls?: string[] }).stalls } : {}), ...((point as { leased?: unknown }).leased ? { leased: (point as { leased?: unknown }).leased } : {}) }));
       }
     }
@@ -188,9 +193,14 @@ if (suites.has("split"))
       const result = await splitBench({ target, objectName: `${suite}-splitbench-${target}-${mib}`, rows, payloadBytes: splitRowBytes, writers: 8 });
       splits.push(result);
       save();
+      if (result.ok === false) wrongPoints.push(JSON.stringify({ target, mib, lostWrites: result.lostWrites, lostSample: result.lostSample, rowDelta: result.rowDelta }));
       console.log(JSON.stringify({ target, mib, copy: result.copy, servingMs: result.servingMs, doneMs: result.doneMs, writeLatencyMs: result.writeLatencyMs, errors: result.errors }));
     }
   }
 
 
 save();
+if (wrongPoints.length > 0) {
+  for (const p of wrongPoints) console.error(`wrong answers: ${p}`);
+  process.exit(1);
+}

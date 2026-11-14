@@ -1,3 +1,4 @@
+import { createProblem, walkProblems, WriteLog } from "./answers.ts";
 import { DurableObject } from "cloudflare:workers";
 import { where, type Where } from "./where.ts";
 import { nodeName, sharded, ShardedObject, shardObjectName, type AtomicMethod, type SplitPolicy, type UpdateResult } from "../../../src/sharded/index.ts";
@@ -94,7 +95,7 @@ interface Env {
   readonly SPLIT_MANUAL: DurableObjectNamespace<ManualSplitObject>;
   readonly LEGACY_MANUAL: DurableObjectNamespace<ManualLegacySplitObject>;
   readonly TWO_COPY_MANUAL: DurableObjectNamespace<ManualTwoCopySplitObject>;
-  readonly BENCH_TOKEN: string;
+  readonly BENCH_TOKEN?: string;
   readonly SPLIT_JOBS: DurableObjectNamespace<SplitBenchJob>;
   readonly PRESPLIT: DurableObjectNamespace<PresplitObject>;
   readonly PRESPLIT_4096: DurableObjectNamespace<WidePresplitObject>;
@@ -277,6 +278,9 @@ interface DriverResult {
   readonly maxLatencyMs: number;
   /** Up to five distinct messages of the calls that failed. */
   readonly errorSamples?: readonly string[];
+  /** Answers that were wrong: a write not read back, a walk that skipped or repeated rows. */
+  readonly wrongAnswers?: number;
+  readonly wrongSamples?: readonly string[];
 }
 
 abstract class KeyValueBase<EnvT> extends DurableObject<EnvT> {
@@ -371,7 +375,8 @@ function shardedNamespace(env: Env, target: Target): DurableObjectNamespace<Spli
 
 /** Splits only when told to: for timing one split. */
 export class ManualSplitObject extends SplitObject {
-  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, copy: "native", splitTimeoutMs: 300_000 };
+  // "auto": snapshots when deployed, rows in local development (the result says which ran).
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, copy: "auto", splitTimeoutMs: 300_000 };
   protected override nodes(): DurableObjectNamespace<ShardedObject<Env, string>> {
     return this.env.SPLIT_MANUAL as never;
   }
@@ -413,6 +418,11 @@ export class ManualTwoCopySplitObject extends TwoCopySplittableObject<Env, strin
 
   async put(keys: readonly string[], values: readonly string[]): Promise<number> {
     return this.update(keys, () => ({ writes: new Map(keys.map((key, i) => [key, values[i]!])), result: keys.length }));
+  }
+
+  async get(keys: readonly string[], _payloads: null): Promise<(string | null)[]> {
+    const current = await this.read(keys);
+    return keys.map((key) => current.get(key) ?? null);
   }
 
   async seed(_keys: readonly string[], _payloads: null, start: number, count: number, bytes: number): Promise<Seeded> {
@@ -494,6 +504,8 @@ interface MergedResult {
   readonly maxLatencyMs: number;
   readonly failedDrivers: number;
   readonly errorSamples: readonly string[];
+  readonly wrongAnswers: number;
+  readonly wrongSamples: readonly string[];
 }
 
 function merge(results: readonly (DriverResult & { readonly failedDrivers?: number })[], failedDrivers: number, extraSamples: readonly string[] = []): MergedResult {
@@ -504,7 +516,11 @@ function merge(results: readonly (DriverResult & { readonly failedDrivers?: numb
   let bytes = 0;
   let elapsedMs = 0;
   let maxLatencyMs = 0;
+  let wrongAnswers = 0;
+  const wrongSamples = new Set<string>();
   for (const result of results) {
+    wrongAnswers += result.wrongAnswers ?? 0;
+    for (const sample of result.wrongSamples ?? []) if (wrongSamples.size < 10) wrongSamples.add(sample);
     successes += result.successes;
     errors += result.errors;
     bytes += result.bytes;
@@ -514,7 +530,7 @@ function merge(results: readonly (DriverResult & { readonly failedDrivers?: numb
     for (const sample of result.errorSamples ?? []) if (samples.size < 10) samples.add(sample);
     for (const [bucket, count] of result.latencyMs) buckets.set(bucket!, (buckets.get(bucket!) ?? 0) + count!);
   }
-  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSamples: [...samples] };
+  return { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs: [...buckets], errorSamples: [...samples], wrongAnswers, wrongSamples: [...wrongSamples] };
 }
 
 function driverStub(env: Env, config: { readonly objectName: string; readonly driverIndex: number }): DurableObjectStub<BenchDriver> {
@@ -692,6 +708,14 @@ export class BenchDriver extends DurableObject<Env> {
     const errorSamples = new Set<string>();
     /** New keys this driver created: one count for all its workers. */
     let created = 0;
+    let wrongAnswers = 0;
+    const wrongSamples = new Set<string>();
+    const wrong = (what: string) => {
+      wrongAnswers++;
+      if (wrongSamples.size < 5) wrongSamples.add(what.slice(0, 200));
+    };
+    /** One in this many writes is read back. */
+    const READ_BACK = 100;
 
     const tableWorker = async (): Promise<void> => {
       const target = config.target as TableTarget | IndexedTarget;
@@ -700,6 +724,8 @@ export class BenchDriver extends DurableObject<Env> {
       // An indexed listing reads one team's partition: each caller its own team.
       const team = teamOf(sequence);
       let cursor: string | null = null;
+      // The keys this walk saw: a walk that ends must have seen each row once (no writes run).
+      let seen: string[] = [];
       while (Date.now() < stopAt) {
         const key = keyFor(config, sequence++);
         const before = performance.now();
@@ -711,8 +737,13 @@ export class BenchDriver extends DurableObject<Env> {
               if (!result.ok) throw new Error(`create refused: ${JSON.stringify(result)}`);
               bytes += config.payloadBytes;
             } else if (config.operation === "write") {
-              await t.put(benchRow(key, config.payloadBytes));
+              const written = await t.put(benchRow(key, config.payloadBytes));
               bytes += config.payloadBytes;
+              // Read back: the row is there at the version written or a later one.
+              if (written.ok && Math.random() < 1 / READ_BACK) {
+                const found = await t.get(key);
+                if (!found || found.version < written.version) wrong(`write of ${key} at version ${written.version} read back as ${found ? `version ${found.version}` : "absent"}`);
+              }
             } else if (config.operation === "apply") {
               const done = await (t as unknown as TableClient<BenchRow, typeof benchCommands>).apply(key, "touch", { row: benchRow(key, config.payloadBytes) });
               if (!done.ok) throw new Error(`apply refused: ${JSON.stringify(done)}`);
@@ -737,6 +768,13 @@ export class BenchDriver extends DurableObject<Env> {
                 : await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor, ...(config.operation === "walk" ? { order: "shard" as const } : {}) });
               cursor = page.cursor;
               bytes += page.rows.length * config.payloadBytes;
+              for (const row of page.rows) seen.push(row.row.name);
+              if (cursor === null) {
+                // An indexed listing reads one team: its count is not known here, only repeats are.
+                const { duplicates, missing } = walkProblems(seen, indexed ? 0 : config.keyCount);
+                if (duplicates || missing) wrong(`a walk saw ${seen.length} rows: ${duplicates} repeated, ${missing} of ${config.keyCount} missing`);
+                seen = [];
+              }
             }
           });
           successes++;
@@ -800,7 +838,7 @@ export class BenchDriver extends DurableObject<Env> {
     await Promise.all(Array.from({ length: config.concurrency }, worker));
     const sparse: [number, number][] = [];
     latencyMs.forEach((count, bucket) => count && sparse.push([bucket, count]));
-    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSamples: [...errorSamples] };
+    return { successes, errors, bytes, elapsedMs: Date.now() - startedAt, latencyMs: sparse, maxLatencyMs, errorSamples: [...errorSamples], wrongAnswers, wrongSamples: [...wrongSamples] };
   }
 
   private async write(target: Target, name: string, keys: readonly string[], values: readonly string[]): Promise<void> {
@@ -911,22 +949,31 @@ async function splitBench(env: Env, input: SplitBenchInput, progress: (line: unk
   const seedMs = Date.now() - seedStarted;
 
   // Writers on random seeded keys (both halves) through the client, before, during and after.
+  // Each writer has its own keys and writes values of its own, so every key's last acknowledged
+  // value is known, and read back once the split is done.
   const histogram = new Array<number>(120_001).fill(0);
   let writes = 0;
   let errors = 0;
   let maxMs = 0;
   let stop = false;
-  const value = "y".repeat(input.payloadBytes);
-  const write = (key: string) =>
-    input.target === "split" ? sharded(env.SPLIT_MANUAL, name).call([key], "put", [value]) : input.target === "two-copy" ? twoCopySplittable(env.TWO_COPY_MANUAL, name).call([key], "put", [value]) : legacySplittable(env.LEGACY_MANUAL, name).call([key], "put", [value]);
+  const log = new WriteLog();
+  const client = () => (input.target === "split" ? sharded(env.SPLIT_MANUAL, name) : input.target === "two-copy" ? twoCopySplittable(env.TWO_COPY_MANUAL, name) : legacySplittable(env.LEGACY_MANUAL, name)) as unknown as {
+    call(keys: readonly string[], method: string, payloads: readonly unknown[] | null): Promise<unknown>;
+  };
   const writer = async (w: number) => {
     for (let i = w; !stop; i += input.writers) {
-      const key = `row-${Math.floor(Math.random() * input.rows)}`;
+      // A key of this writer's: its index is w modulo the writers.
+      const at = Math.floor(Math.random() * input.rows);
+      const index = at - (at % input.writers) + w;
+      const key = `row-${index < input.rows ? index : w}`;
+      const value = `w${w}-${i}-`.padEnd(input.payloadBytes, "y");
       const before = performance.now();
       try {
-        await write(key);
+        await client().call([key], "put", [value]);
+        log.acked(key, value);
         writes++;
       } catch {
+        log.unknown(key, value);
         errors++;
       }
       const ms = performance.now() - before;
@@ -975,6 +1022,19 @@ async function splitBench(env: Env, input: SplitBenchInput, progress: (line: unk
   await sleep(1000);
   stop = true;
   await writing;
+  // The answers: every key written reads back as its writes allow, and no seeded row is gone.
+  const written = log.written();
+  const read = new Map<string, string | null>();
+  for (let i = 0; i < written.length; i += 100) {
+    const keys = written.slice(i, i + 100);
+    const values = (await client().call(keys, "get", null)) as { result: (string | null)[] }[] | (string | null)[];
+    const flat = flatValues(values, keys.length);
+    keys.forEach((key, j) => read.set(key, flat[j] ?? null));
+  }
+  const seeded = "x".repeat(input.payloadBytes);
+  const lost = log.lost(read, () => seeded);
+  const rowDelta = input.target === "split" ? (await rowsOf(split, name)) - input.rows : null;
+  await progress({ checked: written.length, lostWrites: lost.length, rowDelta });
   return {
     ...input,
     bytes: input.rows * input.payloadBytes,
@@ -988,8 +1048,32 @@ async function splitBench(env: Env, input: SplitBenchInput, progress: (line: unk
     doneMs,
     writes,
     errors,
+    /** Keys written, read back after the split. */
+    checked: written.length,
+    /** Keys that read back as no write allows: a lost write. Non-zero fails the point. */
+    lostWrites: lost.length,
+    lostSample: lost.slice(0, 5),
+    /** Rows the shards own, less the rows seeded (split only): non-zero fails the point. */
+    rowDelta,
+    ok: lost.length === 0 && (rowDelta ?? 0) === 0,
     writeLatencyMs: { p50: percentile(histogram, 0.5), p95: percentile(histogram, 0.95), p99: percentile(histogram, 0.99), max: Math.round(maxMs) },
   };
+}
+
+/** A call's answer as values in key order: a sharded client answers results per shard, with their positions. */
+function flatValues(answer: unknown, n: number): (string | null)[] {
+  if (Array.isArray(answer) && answer.every((a) => a && typeof a === "object" && "positions" in a)) {
+    const out = new Array<string | null>(n).fill(null);
+    for (const part of answer as { positions: number[]; result: (string | null)[] }[]) part.positions.forEach((p, i) => (out[p] = part.result[i] ?? null));
+    return out;
+  }
+  return answer as (string | null)[];
+}
+
+/** Rows the shards of a sharded object own, summed over its tree. */
+async function rowsOf(ns: DurableObjectNamespace<ShardedObject<Env, string>>, name: string): Promise<number> {
+  const tree = await sharded(ns, name).describeTree();
+  return tree.filter((n) => n.state === "shard").reduce((sum, n) => sum + n.rows, 0);
 }
 
 function validateSplitBench(input: unknown): SplitBenchInput {
@@ -1032,7 +1116,10 @@ export default {
 
 async function handle(request: Request, env: Env): Promise<Response> {
   {
-    if (request.headers.get("authorization") !== `Bearer ${env.BENCH_TOKEN}`) return new Response("Unauthorized", { status: 401 });
+    // A token is required, except in local development (no secret set, on localhost): without
+    // this, an unset secret made "Bearer undefined" the token.
+    const local = !env.BENCH_TOKEN && new URL(request.url).hostname === "localhost";
+    if (!local && (!env.BENCH_TOKEN || request.headers.get("authorization") !== `Bearer ${env.BENCH_TOKEN}`)) return new Response("Unauthorized", { status: 401 });
     const path = new URL(request.url).pathname;
     // One table call, timed: where a listing over many shards spends its time (or hangs). From a
     // driver object with `fromObject`, as the load runs.
@@ -1208,13 +1295,16 @@ async function handle(request: Request, env: Env): Promise<Response> {
     // Leased reads: what reached the source during the point, besides what readers saw.
     const source = input.target === "reader-leased" ? env.LEASED_SOURCE.get(env.LEASED_SOURCE.idFromName(input.objectName)) : null;
     const sourceBefore = source ? await source.stats() : null;
+    // A create point must grow the count by what it created: counted before and after.
+    const counted = () => bounded(() => rowsClient(env, input.target as TableTarget | IndexedTarget, input.objectName).count(), 20_000, "counting the rows").catch((error: unknown) => (stalls.push(String(error)), null));
+    const countBefore = input.operation === "create" && isRows(input.target) ? await counted() : null;
     // Later with more fleets: every driver must have its start time before it comes.
     const startAt = Date.now() + 750 + 250 * fleets.length;
     const settled = await Promise.allSettled(fleets.map((fleet, i) => bounded(() => fleet.stub.measure(fleet.configs.map((config) => ({ ...config, startAt }))), input.durationMs + 60_000, `measure of fleet ${i}`)));
     const fleetResults = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
     const lostDrivers = settled.reduce((n, r, i) => n + (r.status === "rejected" ? fleets[i]!.configs.length : 0), 0);
     const fleetReasons = settled.flatMap((r) => (r.status === "rejected" ? [`fleet: ${String(r.reason).slice(0, 200)}`] : [])).slice(0, 3);
-    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSamples } = merge(fleetResults, lostDrivers, fleetReasons);
+    const { successes, errors, bytes, elapsedMs, maxLatencyMs, failedDrivers, latencyMs, errorSamples, wrongAnswers, wrongSamples } = merge(fleetResults, lostDrivers, fleetReasons);
     const histogram = new Array<number>(120_001).fill(0);
     for (const [bucket, count] of latencyMs) histogram[bucket!] = count!;
 
@@ -1231,6 +1321,12 @@ async function handle(request: Request, env: Env): Promise<Response> {
       // Counting asks every shard: one still overloaded from the run answers nothing.
       const rows = await bounded(() => rowsClient(env, input.target as TableTarget | IndexedTarget, input.objectName).count(), 20_000, "counting the rows").catch((error: unknown) => (stalls.push(String(error)), -1));
       topology = { leaves, rows, depth: Math.log2(leaves) };
+    }
+    const wrong = [...wrongSamples];
+    let wrongCount = wrongAnswers;
+    if (countBefore !== null && topology && topology.rows >= 0) {
+      const problem = createProblem(countBefore, topology.rows, successes, errors);
+      if (problem) (wrongCount++, wrong.unshift(problem));
     }
     // Walking 4,096 shards is 8,191 calls. A presplit tree is complete, so the depth of the shards on
     // its first and last paths gives it: the root's object and the object of "1" (bits "1000…").
@@ -1255,6 +1351,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
       topology,
       leased,
       stalls,
+      /** Wrong answers: a write not read back, a walk that skipped or repeated rows, rows a create lost. */
+      wrongAnswers: wrongCount,
+      wrongSamples: wrong.slice(0, 10),
+      ok: wrongCount === 0,
       // The first sample, under the name earlier results use.
       errorSample: errorSamples[0] ?? null,
     });

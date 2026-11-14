@@ -16,7 +16,7 @@ interface Env {
   readonly COORDINATORS: DurableObjectNamespace<BenchCoordinator>;
   readonly RUNNERS: DurableObjectNamespace<BenchRunner>;
   readonly RESULTS: DurableObjectNamespace<BenchResults>;
-  readonly BENCH_TOKEN: string;
+  readonly BENCH_TOKEN?: string;
 }
 
 export class BenchCoordinator extends WorkGraphCoordinator<Env> {
@@ -133,7 +133,8 @@ interface StartRequest {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.headers.get("authorization") !== `Bearer ${env.BENCH_TOKEN}`) return new Response("unauthorized", { status: 401 });
+    // A token is required: an unset secret must not make "Bearer undefined" the token.
+    if (!env.BENCH_TOKEN || request.headers.get("authorization") !== `Bearer ${env.BENCH_TOKEN}`) return new Response("unauthorized", { status: 401 });
     const url = new URL(request.url);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     try {
