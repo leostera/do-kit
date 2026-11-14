@@ -21,6 +21,8 @@ interface Env extends GraphEnv {
   readonly ROUTED_COUNTERS: DurableObjectNamespace<RoutedCounters>;
   readonly ROUTED_DOCS: DurableObjectNamespace<RoutedDocs>;
   readonly DOCS: DurableObjectNamespace<Docs>;
+  readonly DOCS_DEFAULT_HOLD: DurableObjectNamespace<DocsDefaultHold>;
+  readonly PRESPLIT_DOCS: DurableObjectNamespace<PresplitDocs>;
   readonly EVOLVING: DurableObjectNamespace<EvolvingDocs>;
   readonly FLAKY: DurableObjectNamespace<FlakyDocs>;
   readonly OLD_ALARM: DurableObjectNamespace<OldAlarm>;
@@ -150,6 +152,22 @@ export class Docs extends ShardedTable<Env, Doc> {
 
 /** Git refs that can conflict (refs/heads/a and refs/heads/a/b) share their first 3 components. */
 export const refRoute = (key: string): string => key.split("/").slice(0, 3).join("/");
+
+/** The docs table with the default hold wait: a write held by a split waits for it, not refused at once. */
+export class DocsDefaultHold extends Docs {
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.DOCS_DEFAULT_HOLD as never;
+  }
+}
+
+/** The docs table, presplit into 4 shards. */
+export class PresplitDocs extends Docs {
+  protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6, holdWaitMs: 0, initialDepth: 2 };
+  protected override nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
+    return this.env.PRESPLIT_DOCS as never;
+  }
+}
 
 /** A later deploy's routeOf: by the first 2 components, so refs/heads/a and refs/heads/b share a route. */
 export const refRouteV2 = (key: string): string => key.split("/").slice(0, 2).join("/");
@@ -1185,7 +1203,7 @@ export class PresplitCounters extends CounterBase {
 const keptClients = new Map<string, ReturnType<typeof sharded<CounterBase>>>();
 
 function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
-  return (cls === "users" ? env.USERS : cls === "userIndexes" ? env.USER_INDEXES : cls === "evolvingUsers" ? env.EVOLVING_USERS : cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "routed" ? env.ROUTED_COUNTERS : cls === "routedTable" ? env.ROUTED_DOCS : cls === "table" ? env.DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
+  return (cls === "users" ? env.USERS : cls === "userIndexes" ? env.USER_INDEXES : cls === "evolvingUsers" ? env.EVOLVING_USERS : cls === "auto" ? env.AUTO_COUNTERS : cls === "presplit" ? env.PRESPLIT_COUNTERS : cls === "routed" ? env.ROUTED_COUNTERS : cls === "routedTable" ? env.ROUTED_DOCS : cls === "table" ? env.DOCS : cls === "tableDefaultHold" ? env.DOCS_DEFAULT_HOLD : cls === "presplitTable" ? env.PRESPLIT_DOCS : cls === "evolving" ? env.EVOLVING : cls === "flaky" ? env.FLAKY : cls === "oldAlarm" ? env.OLD_ALARM : env.COUNTERS) as never;
 }
 
 /** POST /indexed {name, op, args}: one call of the indexed table client, or a test hook. */
