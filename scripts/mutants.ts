@@ -33,8 +33,8 @@ const MUTANTS: Mutant[] = [
     name: "stale-get",
     breaks: "a shard that split stops serving the keys it gave away",
     edits: [
-      { file: "src/sharded/index.ts", find: "    if (answer) return this.answered(answer);\n    this.counters.calls++;\n    for (const key of keys) if (!ownsHash(bits, this.routeHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);\n    this.countCall(keys.length);\n    const fn = this.routedMethod(method);", replace: "    if (answer && !(method === \"tableGet\" && \"moved\" in answer)) return this.answered(answer);\n    this.counters.calls++;\n    for (const key of keys) if (!ownsHash(bits, this.routeHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);\n    this.countCall(keys.length);\n    const fn = this.routedMethod(method);" },
-      { file: "src/table/index.ts", find: "    this.migrate();\n    this.assertOwns(keys);\n    return keys.map((key) => this.getRow(key));", replace: "    this.migrate();\n    return keys.map((key) => this.getRow(key));" },
+      { file: "src/sharded/index.ts", find: "    if (answer) return this.answered(answer);\n    this.counters.calls++;\n    for (const key of keys) if (!ownsHash(bits, this.routeHash(key))) throw new Error(`key ${key} is not owned by ${nodeName(name, bits)}`);\n    this.sampleRoutes(keys);\n    this.countCall(keys.length);\n    const fn = this.routedMethod(method);", replace: "    if (answer && !(method === \"tableGet\" && \"moved\" in answer)) return this.answered(answer);\n    this.counters.calls++;\n    this.sampleRoutes(keys);\n    this.countCall(keys.length);\n    const fn = this.routedMethod(method);" },
+      { file: "src/table/index.ts", find: "    this.ready();\n    this.assertOwns(keys);\n    return keys.map((key) => this.getRow(key));", replace: "    this.ready();\n    return keys.map((key) => this.getRow(key));" },
     ],
     test: "test/table-history.test.ts",
     pattern: "no read is stale",
@@ -56,7 +56,7 @@ const MUTANTS: Mutant[] = [
   {
     name: "utf16-compare-text",
     breaks: "keys compare by code point, as SQLite orders them",
-    edits: [{ file: "src/table/schema.ts", find: "export function compareText(a: string, b: string): number {\n  if (a === b) return 0;", replace: "export function compareText(a: string, b: string): number {\n  return a < b ? -1 : a > b ? 1 : 0;" }],
+    edits: [{ file: "src/sharded/values.ts", find: "export function compareText(a: string, b: string): number {\n  if (a === b) return 0;", replace: "export function compareText(a: string, b: string): number {\n  return a < b ? -1 : a > b ? 1 : 0;" }],
     test: "test/table-differential.test.ts",
     pattern: "seeded operations",
   },
@@ -71,7 +71,8 @@ const MUTANTS: Mutant[] = [
     name: "owned-once",
     breaks: "a listing returns a row a split gave away once (the page's owner check and the merge's dedup: each covers the other)",
     edits: [
-      { file: "src/table/index.ts", find: "WHERE ${after}_hash >= ? AND _hash <= ? ", replace: "WHERE ${after}(_hash >= ? OR 1) AND (_hash <= ? OR 1) " },
+      { file: "src/table/index.ts", find: "AND k._hash >= ? AND k._hash <= ? ORDER BY k._key", replace: "AND (k._hash >= ? OR 1) AND (k._hash <= ? OR 1) ORDER BY k._key" },
+      { file: "src/table/index.ts", find: "? AND `}_hash >= ? AND _hash <= ? ORDER BY ${this.q(pk)}", replace: "? AND `}(_hash >= ? OR 1) AND (_hash <= ? OR 1) ORDER BY ${this.q(pk)}" },
       { file: "src/table/schema.ts", find: "      if (seen.has(r.key)) return false;\n", replace: "" },
     ],
     test: "test/table.test.ts",
@@ -99,9 +100,9 @@ const MUTANTS: Mutant[] = [
     pattern: "table settles",
   },
   {
-    name: "page-indexed-by",
-    breaks: "a page walks its index, not the table",
-    edits: [{ file: "src/table/index.ts", find: 'FROM ${TABLE} INDEXED BY "${sqlIndex}" WHERE', replace: "FROM ${TABLE} WHERE" }],
+    name: "page-in-key-order",
+    breaks: "a page reads its index's key table in key order, with no sort",
+    edits: [{ file: "src/table/index.ts", find: "AND k._hash <= ? ORDER BY k._key ${order} LIMIT ?", replace: "AND k._hash <= ? ORDER BY k._key || '' ${order} LIMIT ?" }],
     test: "test/query-plans.test.ts",
     pattern: "uses an index",
   },
@@ -115,7 +116,169 @@ const MUTANTS: Mutant[] = [
     test: "test/query-plans.test.ts",
     pattern: "alarm at most once",
   },
+  {
+    name: "atomic-client-per-call",
+    breaks: "a primary keeps its client and stubs across the atomic calls it coordinates",
+    edits: [{ file: "src/sharded/index.ts", find: "    if (this.atomicClientFor?.options === options) return this.atomicClientFor.client;\n", replace: "" }],
+    test: "test/atomic.test.ts",
+    pattern: "keeps its client",
+  },
+  {
+    name: "compare-never-fails",
+    breaks: "bench/compare.ts exits 1 when a number moved past the tolerance",
+    edits: [{ file: "bench/compare.ts", find: "process.exit(problems.length > 0 ? 1 : 0);", replace: "process.exit(0);" }],
+    test: "test/observability.test.ts",
+    pattern: "fails when a measured",
+  },
+  {
+    name: "copy-drops-rows",
+    breaks: "a split point finds rows a copy lost (lostWrites, rowDelta)",
+    edits: [{ file: "src/sharded/index.ts", find: "        await target.shardedReceive(meta.name, right, epoch, first, table, order.rowid ? names.slice(1) : names, rows);\n        first = false;", replace: "        const last = rows.length === 0 || (rows.length < COPY_PAGE_ROWS && !cut);\n        await target.shardedReceive(meta.name, right, epoch, first, table, order.rowid ? names.slice(1) : names, last && table === \"sharded_rows\" ? rows.slice(0, rows.length >> 1) : rows);\n        first = false;" }],
+    test: "test/bench-worker.test.ts",
+    pattern: "split point",
+  },
+  {
+    name: "bench-token-unset",
+    breaks: "an unset BENCH_TOKEN lets in no one but localhost",
+    edits: [{ file: "bench/worker/src/index.ts", find: "    if (!local && (!env.BENCH_TOKEN || request.headers.get(\"authorization\") !== `Bearer ${env.BENCH_TOKEN}`))", replace: "    if (!local && request.headers.get(\"authorization\") !== `Bearer ${env.BENCH_TOKEN}`)" }],
+    test: "test/bench-worker.test.ts",
+    pattern: "only localhost",
+  },
+  {
+    name: "walk-skips-rows",
+    breaks: "a table point fails a walk that skipped rows",
+    edits: [{ file: "src/table/client.ts", find: "    return { rows: rows.map(({ row, version }) => ({ row: row as Row, version })), cursor: at === null ? null : encodeShardCursor(fingerprint, at) };", replace: "    return { rows: rows.slice(0, at === null ? rows.length : -1).map(({ row, version }) => ({ row: row as Row, version })), cursor: at === null ? null : encodeShardCursor(fingerprint, at) };" }],
+    test: "test/bench-worker.test.ts",
+    pattern: "table points",
+  },
+  {
+    name: "plain-merge-unordered",
+    breaks: "the hand-sharded baseline merges its pages in order",
+    edits: [{ file: "bench/worker/src/plain.ts", find: "const rows = pages.flat().sort(newer).slice(0, limit);", replace: "const rows = pages.flat().slice(0, limit);" }],
+    test: "test/bench-worker.test.ts",
+    pattern: "plain baselines",
+  },
+  {
+    name: "open-loop-waits",
+    breaks: "the open loop sends whatever the answers",
+    edits: [{ file: "bench/worker/src/drivers.ts", find: "      running.add(done);", replace: "      running.add(done);\n      await done;" }],
+    test: "test/bench-worker.test.ts",
+    pattern: "open loop sends",
+  },
+  {
+    name: "driver-limited-never",
+    breaks: "a point whose drivers fell behind says driverLimited",
+    edits: [{ file: "bench/worker/src/drivers.ts", find: "driverLimited: due > 0 && (late + skipped) / due > DRIVER_LIMITED_SHARE", replace: "driverLimited: false" }],
+    test: "test/bench-worker.test.ts",
+    pattern: "open",
+  },
+  {
+    name: "slowest-shard-first",
+    breaks: "onCall names the slowest shard call, not the first",
+    edits: [{ file: "src/sharded/client.ts", find: "    if (!this.slowest || ms > this.slowest.ms) this.slowest = { bits, ms };", replace: "    if (!this.slowest) this.slowest = { bits, ms };" }],
+    test: "test/observability.test.ts",
+    pattern: "waited on",
+  },
+  {
+    name: "moved-uncounted",
+    breaks: "onCall counts moved answers",
+    edits: [{ file: "src/sharded/client.ts", find: "          else if (\"moved\" in answer) {\n            if (tally) tally.retries.moved++;", replace: "          else if (\"moved\" in answer) {" }],
+    test: "test/observability.test.ts",
+    pattern: "sent a call again",
+  },
+  {
+    name: "slow-calls-without-rounds",
+    breaks: "a bench point's slowest operations carry their client calls",
+    edits: [{ file: "bench/worker/src/index.ts", find: "          keepIfSlow(elapsed, calls);", replace: "          keepIfSlow(elapsed, []);" }],
+    test: "test/bench-worker.test.ts",
+    pattern: "slowest operations",
+  },
+  {
+    name: "stranded-alarm-trusted",
+    breaks: "an alarm long past due counts as missing, so work arms a new one",
+    edits: [{ file: "src/sharded/alarms.ts", find: "  return at !== null && at < Date.now() - STRANDED_ALARM_MS ? null : at;", replace: "  return at;" }],
+    test: "test/observability.test.ts",
+    pattern: "stranded alarm",
+  },
+  {
+    name: "wipe-window",
+    breaks: "a wiped shard refuses calls for its refusal window",
+    edits: [{ file: "src/sharded/index.ts", find: "    if (Date.now() - this.wipedAt < WIPED_REFUSE_MS) throw new Error(\"this shard was wiped\");\n", replace: "" }],
+    test: "test/wipe.test.ts",
+    pattern: "within its refusal window",
+  },
+  {
+    name: "deadline-ignored",
+    breaks: "a call past its caller's deadline is refused, and writes nothing",
+    edits: [{ file: "src/sharded/index.ts", find: "    if (deadline !== null && deadline !== undefined && Date.now() > deadline) throw new Expired(", replace: "    if (false && deadline !== null && deadline !== undefined && Date.now() > deadline) throw new Expired(" }],
+    test: "test/background.test.ts",
+    pattern: "past its deadline is refused",
+  },
+  {
+    name: "size-cap-off",
+    breaks: "a shard at refuseAtBytes refuses writes that grow it",
+    edits: [{ file: "src/sharded/index.ts", find: "(after >= cap || this.fullAt !== null)", replace: "(false)" }],
+    test: "test/size.test.ts",
+    pattern: "refuses writes that grow it",
+  },
+  {
+    name: "refusal-never-splits",
+    breaks: "a write refused at the cap runs the split decision too",
+    edits: [{ file: "src/sharded/index.ts", find: "      if (error instanceof Full) this.checkSize();\n", replace: "" }],
+    test: "test/size.test.ts",
+    pattern: "the refusal splits it",
+  },
+  {
+    name: "split-backoff-off",
+    breaks: "splits given up one after another wait longer and longer",
+    edits: [{ file: "src/sharded/index.ts", find: "    if (failed === 0) return 0;\n    return splits.at(-1)!.at", replace: "    if (failed >= 0) return 0;\n    return splits.at(-1)!.at" }],
+    test: "test/size.test.ts",
+    pattern: "longer and longer",
+  },
+  {
+    name: "compaction-mirror",
+    breaks: "a write during key-table compaction reaches the compacted copy",
+    edits: [{ file: "src/table/index.ts", find: "    if (c && c.after !== null && compareText(key, c.after) <= 0) this.db.exec(`INSERT OR REPLACE INTO \"${c.into}\" (_key, _pk, _hash) VALUES (?, ?, ?)`, key, pk, hash);\n", replace: "" }],
+    test: "test/table-compaction.test.ts",
+  },
+  {
+    name: "legacy-rows-unread",
+    breaks: "a shard of the first layout reads its rows where they are",
+    edits: [{ file: "src/sharded/index.ts", find: "    if (row || !this.legacyRows) return row?.value;", replace: "    if (row || this.legacyRows || !this.legacyRows) return row?.value;" }],
+    test: "test/size.test.ts",
+    pattern: "first layout",
+  },
+  {
+    name: "route-mismatch-unchecked",
+    breaks: "a client routing differently from the object is refused, and nothing is written",
+    edits: [{ file: "src/sharded/index.ts", find: "    // client would look for these keys elsewhere once the tree splits.\n    if (hashes) {", replace: "    // client would look for these keys elsewhere once the tree splits.\n    if (hashes && false) {" }],
+    test: "test/colocation.test.ts",
+    pattern: "route differently are refused",
+  },
+  {
+    name: "routes-unsampled",
+    breaks: "a shard keeps a sample of keys and their routes, so a deploy that changes routeOf is refused",
+    edits: [{ file: "src/sharded/index.ts", find: "    if (kept.length >= ROUTE_SAMPLE || keys.length === 0) return;", replace: "    return;" }],
+    test: "test/route-changes.test.ts",
+  },
+  {
+    name: "alarm-backoff-forgotten",
+    breaks: "an onAlarm that keeps throwing is retried less and less often",
+    edits: [{ file: "src/sharded/index.ts", find: "      const failures = threw ? this.loadWakeFailures() + 1 : 0;", replace: "      const failures = threw ? 1 : 0;" }],
+    test: "test/background.test.ts",
+    pattern: "less and less often",
+  },
+  {
+    name: "layer-alarm-with-app",
+    breaks: "the library's alarm work runs though the app's onAlarm throws",
+    edits: [{ file: "src/sharded/index.ts", find: "      try {\n        await this.layerAlarm();\n      } catch (error) {\n        threw = true;\n        console.error(JSON.stringify({ event: \"layer-alarm-failed\", node: this.nodeLabel(), error: String(error) }));\n      }\n      try {\n        await this.onAlarm();", replace: "      try {\n        await this.onAlarm();\n        await this.layerAlarm();" }],
+    test: "test/background.test.ts",
+    pattern: "throws before super",
+  },
 ];
+
+/** A mutant whose text to change is gone from the source. */
+class StaleMutant extends Error {}
 
 const only = process.argv[2];
 const survivors: string[] = [];
@@ -127,7 +290,7 @@ for (const mutant of MUTANTS.filter((m) => !only || m.name.includes(only))) {
       originals.set(edit.file, source);
       const current = readFileSync(edit.file, "utf8");
       const at = current.indexOf(edit.find);
-      if (at < 0 || current.indexOf(edit.find, at + 1) >= 0) throw new Error(`${mutant.name}: the text to mutate is not in ${edit.file} exactly once; update the mutant`);
+      if (at < 0 || current.indexOf(edit.find, at + 1) >= 0) throw new StaleMutant(`${mutant.name}: the text to mutate is not in ${edit.file} exactly once; update the mutant`);
       writeFileSync(edit.file, current.replace(edit.find, edit.replace));
     }
     rmSync("test/worker/.cloudflare", { recursive: true, force: true });
@@ -135,12 +298,17 @@ for (const mutant of MUTANTS.filter((m) => !only || m.name.includes(only))) {
     const killed = run.status !== 0 && /\(fail\)/.test(`${run.stdout}${run.stderr}`);
     console.log(`${killed ? "killed  " : "SURVIVED"} ${mutant.name}: ${mutant.breaks}`);
     if (!killed) survivors.push(mutant.name);
+  } catch (error) {
+    if (!(error instanceof StaleMutant)) throw error;
+    // The source moved on: the guard may still be held, but this mutant no longer says so.
+    console.log(`STALE    ${error.message}`);
+    survivors.push(mutant.name);
   } finally {
     for (const [file, source] of originals) writeFileSync(file, source);
     rmSync("test/worker/bun.lock", { force: true });
   }
 }
 if (survivors.length) {
-  console.log(`\n${survivors.length} mutant(s) survived: ${survivors.join(", ")}`);
+  console.log(`\n${survivors.length} mutant(s) survived or are stale: ${survivors.join(", ")}`);
   process.exit(1);
 }
