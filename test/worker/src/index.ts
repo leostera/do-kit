@@ -353,11 +353,11 @@ export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.EVOLVING as never;
   }
-  /** A deploy of the new schema: records it and restarts, so the next call migrates. */
-  async upgrade(): Promise<void> {
+  /** A deploy of schema `version` (2: the new one; 1: a rollback): records it and restarts, so the next call migrates. */
+  async upgrade(version = 2): Promise<void> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
     this.ctx.storage.sql.exec("DELETE FROM test_schema");
-    this.ctx.storage.sql.exec("INSERT INTO test_schema (version) VALUES (2)");
+    this.ctx.storage.sql.exec("INSERT INTO test_schema (version) VALUES (?)", version);
     await this.ctx.storage.sync();
     this.ctx.abort("upgrade");
   }
@@ -900,7 +900,7 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
   }
   if (body.op === "upgrade") {
     const ns = namespace(env, body.cls) as unknown as DurableObjectNamespace<EvolvingDocs>;
-    await ns.get(ns.idFromName(shardObjectName(body.name, ""))).upgrade().catch(() => {});
+    await ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).upgrade((body.args[0] as number) ?? 2).catch(() => {});
     return null;
   }
   if (body.op === "failActivations") {
