@@ -477,6 +477,16 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
    * The copy keeps the outbox entries of its own keys, and delivers them: it has those rows from
    * here on, and a put is sent with its row. The rest are the original's. Call `super.afterClone`.
    */
+  protected override forgetStorage(): void {
+    this.indexMigrated = false;
+    this.batch = null;
+    this.live = null;
+    this.uniques = null;
+    this.hasDuplicates = true;
+    this.wakeAt = null;
+    super.forgetStorage();
+  }
+
   protected override afterClone(owns: (key: string) => boolean): void {
     this.migrate();
     for (const { key } of this.store.exec<{ key: string }>(`SELECT DISTINCT key FROM ${OUTBOX}`).toArray()) if (!owns(key)) this.store.exec(`DELETE FROM ${OUTBOX} WHERE key = ?`, key);

@@ -823,8 +823,9 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   /**
    * Deletes every shard's storage and alarm: the whole sharded object, for one that is done with.
-   * Waits out splits in progress (both halves are then wiped). Nothing may write to the object
-   * meanwhile: a write after its shard is wiped would make that shard again. The root's object
+   * Waits out splits in progress (both halves are then wiped). A wiped shard refuses calls for 5 s
+   * (a stored tombstone, dropped by an alarm then), so a write still in flight does not make it
+   * again; after that the name may be used again. The root's object
    * goes last, since it is how the others are found: a wipe that fails partway can run again.
    * Returns how many shards held something.
    */

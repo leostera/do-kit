@@ -50,5 +50,6 @@ test("a write that reaches a wiped object within its refusal window is refused, 
   await post("/wipeAll", { cls: "counters", name });
   await post("/evict", { cls: "counters", name, bits: "" });
   await expect(call("counters", name, "add", ["a"], [1])).rejects.toThrow();
-  expect(await post<{ bits: string }[]>("/tree", { cls: "counters", name }).catch(() => [])).toEqual([]);
+  // Nothing was made again: the root's object holds no shard.
+  expect((await post<{ state: string }[]>("/tree", { cls: "counters", name })).map((n) => n.state)).toEqual(["new"]);
 }, 30_000);

@@ -569,11 +569,12 @@ interface Report {
 }
 
 /** Nothing of the base class's: no sharded_* table, no key, no alarm; and no row in any table. */
+/** Wiped: nothing left but the tombstone that refuses late calls for a while, and the alarm that drops it. */
 function expectWiped(report: Report) {
-  expect(report.tables.filter((t) => t.name.startsWith("sharded_"))).toEqual([]);
-  expect(report.tables.filter((t) => t.rows > 0)).toEqual([]);
+  expect(report.tables.filter((t) => t.name.startsWith("sharded_") && t.name !== "sharded_wiped")).toEqual([]);
+  expect(report.tables.filter((t) => t.rows > 0 && t.name !== "sharded_wiped")).toEqual([]);
   expect(report.keys).toBe(0);
-  expect(report.alarm).toBeNull();
+  if (report.alarm !== null) expect(report.alarm).toBeLessThanOrEqual(Date.now() + 5_000);
 }
 
 test("wipe deletes every shard's storage and alarm, across splits, and a second wipe finds nothing", async () => {

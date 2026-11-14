@@ -341,6 +341,13 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
   private dropped: ReadonlySet<string> | null = null;
 
   /** Deletes entries of routes this shard gave away. Call `super.cleanupForeign`. */
+  protected override forgetStorage(): void {
+    this.migrated = false;
+    this.dropped = null;
+    this.wakeAt = null;
+    super.forgetStorage();
+  }
+
   protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
     this.migrate();
     const [lo, hi] = this.ownedHashRange();

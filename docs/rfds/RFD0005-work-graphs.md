@@ -422,9 +422,11 @@ Two things make sure a wiped object stays empty:
 - An object that holds nothing is not made again by being asked. The coordinator, the runners and
   the sharded layer create their tables only when they first store something, so a late status,
   stop or delete, a late `graphNext`, or a read of a wiped results shard creates no storage.
-- A results shard, once wiped, refuses every call for 5 s. A write from a runner stopped while
-  writing finds it so, and fails; the runner, stopping, writes nothing more. After that the name
-  is free again: a run's name can be reused once the run is deleted, though its first chunks wait
+- A results shard, once wiped, refuses every call for 5 s, even if it is evicted meanwhile: it
+  keeps one stored tombstone for those seconds, and an alarm drops it. A write from a runner
+  stopped while writing finds it so, and fails; the runner, stopping, writes nothing more. After
+  that the name is free again, in the same instance too (layers forget what they cached of their
+  storage, `forgetStorage`): a run's name can be reused once the run is deleted, though its first chunks wait
   out those seconds.
   A wipe waits for a shard that is splitting or moving, and follows a shard that moved.
 

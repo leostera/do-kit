@@ -333,6 +333,8 @@ const ROUTE_HASHES = 4_096;
  * to use again.
  */
 const WIPED_REFUSE_MS = 5_000;
+/** The one table a wiped object keeps for WIPED_REFUSE_MS: when it was wiped. */
+const WIPED_TABLE = "sharded_wiped";
 /**
  * How long a split waits for its new object's first call before going ahead anyway. A first call
  * can take seconds, and one that never returns must not leave the shard unable to split again:
@@ -507,6 +509,9 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     // An object only visited (a lazy shard asked whether it exists, a wiped one) stays empty.
     this.schemaReady = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sharded_meta'").one().n > 0;
     this.meta = this.schemaReady ? this.loadMeta() : null;
+    // Wiped, then evicted: the refusal outlives the instance.
+    const tombstone = !this.schemaReady && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?", WIPED_TABLE).one().n > 0;
+    if (tombstone) this.wipedAt = this.sql.exec<{ at: number }>(`SELECT at FROM ${WIPED_TABLE}`).toArray()[0]?.at ?? null;
   }
 
   private ensureSchema(): void {
@@ -519,6 +524,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (this.wipedAt === null) return;
     if (Date.now() - this.wipedAt < WIPED_REFUSE_MS) throw new Error("this shard was wiped");
     // Any call still in flight when it was wiped has long arrived: the name may be used again.
+    this.endWipe();
+  }
+
+  /** The refusal window is over: the tombstone goes, and the object is empty. */
+  private endWipe(): void {
+    this.sql.exec(`DROP TABLE IF EXISTS ${WIPED_TABLE}`);
     this.wipedAt = null;
   }
   private get wiped(): boolean {
@@ -628,6 +639,20 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    * `owns`. The default deletes nothing: an original that keeps delivering an outbox for keys
    * that moved keeps those rows.
    */
+  /**
+   * After a wipe deleted every table: forget what this instance knew of its storage, as an
+   * instance that never saw it would. The object may be used again once the wipe's refusal ends,
+   * in this same instance. A subclass that caches anything read from storage (a migration done,
+   * a table made) overrides this, resets it, and calls super.
+   */
+  protected forgetStorage(): void {
+    this.held = null;
+    this.atomicReady = null;
+    this.receiving = null;
+    this.calls.clear();
+    this.alarmCheckedAt = 0;
+  }
+
   protected cleanupForeign(_owns: (key: string) => boolean, _limit: number): number {
     return 0;
   }
@@ -1693,6 +1718,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    */
   override async alarm(): Promise<void> {
     if (this.wiped) return;
+    if (this.wipedAt !== null) return this.endWipe();
     const meta = this.meta;
     // A verbatim copy not claimed yet carries the source's alarm: it is not this object's.
     if (!meta || this.isUnclaimedCopy()) return;
@@ -2002,7 +2028,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     await this.ctx.storage.deleteAll();
     this.meta = null;
     this.schemaReady = false;
-    this.calls.clear();
+    this.forgetStorage();
+    // A tombstone, so the refusal survives an eviction, and an alarm to drop it once it is over.
+    this.sql.exec(`CREATE TABLE ${WIPED_TABLE} (at INTEGER NOT NULL)`);
+    this.sql.exec(`INSERT INTO ${WIPED_TABLE} (at) VALUES (?)`, this.wipedAt);
+    await this.ctx.storage.setAlarm(this.wipedAt + WIPED_REFUSE_MS);
     return { ok: { wiped: true } };
   }
 

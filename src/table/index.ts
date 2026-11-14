@@ -351,6 +351,14 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
 
   // ---- Splits ----
 
+  protected override forgetStorage(): void {
+    this.migrated = false;
+    this.keyIndex = "";
+    this.deletedAt = null;
+    this.indexDefs = null;
+    super.forgetStorage();
+  }
+
   /** Deletes rows (and counts) of hashes this shard gave away, a batch at a time. */
   protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
     this.migrate();
