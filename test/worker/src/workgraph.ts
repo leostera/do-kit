@@ -34,6 +34,10 @@ export class GraphCoordinators extends WorkGraphCoordinator<GraphEnv> {
   async restart(): Promise<void> {
     this.ctx.abort("test restart");
   }
+  /** Loses this coordinator's alarm, as a failed setAlarm or an alarm the runtime gave up on would. */
+  async dropAlarm(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+  }
 }
 
 /** The storage calls a runner's log records: the writes, and sync. */
@@ -147,7 +151,7 @@ export class GraphResults extends WorkGraphResults<GraphEnv> {
 const RESULT_SHARDS = ["", "01", "10", "11"];
 
 export interface GraphRequest {
-  op: "start" | "status" | "results" | "delete" | "storage" | "restart" | "ops";
+  op: "start" | "status" | "results" | "delete" | "storage" | "restart" | "ops" | "dropCoordinatorAlarm";
   run: string;
   /** A shared results store; without it, the run's own. */
   results?: string;
@@ -180,6 +184,7 @@ export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unk
     await Promise.allSettled(stubs.map((stub) => stub.restart()));
     return null;
   }
+  if (body.op === "dropCoordinatorAlarm") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).dropAlarm().then(() => null);
   if (body.op === "ops") return Promise.all(Array.from({ length: body.runners ?? 4 }, (_, i) => env.GRAPH_RUNNERS.get(env.GRAPH_RUNNERS.idFromName(runnerName(body.run, i))).opLog()));
   if (body.op === "storage") {
     // Everything the run may have touched: its coordinator, each runner, each results shard.

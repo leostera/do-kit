@@ -497,6 +497,11 @@ class CounterBase extends ShardedObject<Env, number> {
     return keys.map(() => null);
   }
 
+  /** Ends this instance (an eviction): what it kept in memory is gone. Called on the object, not routed. */
+  async evict(): Promise<void> {
+    this.ctx.abort("test: evicted");
+  }
+
   /** The stub options this shard would make its stubs with now (see `stubOptions`). */
   async seenStubOptions(keys: readonly string[], _payloads: null): Promise<unknown[]> {
     return keys.map(() => this.stubOptions());
@@ -623,6 +628,9 @@ class CounterBase extends ShardedObject<Env, number> {
   /** Adds each payload to its key's counter; returns the new values. */
   async add(keys: readonly string[], payloads: readonly number[]): Promise<number[]> {
     return this.update(keys, (current): UpdateResult<number, number[]> => {
+      // (Made in the constructor too; again here, for an instance whose storage was wiped.)
+      this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY)");
+      this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS listing (key TEXT PRIMARY KEY)");
       for (const k of keys) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO history (key) VALUES (?)", k);
       for (const k of keys) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO listing (key) VALUES (?)", k);
       const writes = new Map<string, number>();
@@ -1037,6 +1045,9 @@ export default {
           return Response.json((await tableOp(env, body as never)) ?? null);
         case "/wipeAll":
           return Response.json(await sharded(ns, body.name).wipe());
+        case "/evict":
+          await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).evict().catch(() => {});
+          return Response.json(null);
         case "/storage":
           return Response.json(await ns.get(ns.idFromName(shardObjectName(body.name, body.bits))).storage());
         case "/wipe":
