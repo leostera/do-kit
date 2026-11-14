@@ -7,6 +7,7 @@
 // A runner leaves nothing behind: told the run is over (by its answer, or by the coordinator's
 // stop), it deletes its storage and its alarm. A stop waits for the chunk in hand to stop writing.
 import { DurableObject } from "cloudflare:workers";
+import { pendingAlarm } from "../sharded/alarms.js";
 import { sharded } from "../sharded/client.js";
 import { decodeBody } from "./body.js";
 import type { Finished, NextAnswer, WorkGraphCoordinator } from "./coordinator.js";
@@ -89,7 +90,7 @@ export abstract class WorkGraphRunner<Env = unknown> extends DurableObject<Env> 
     if (this.stopping || this.inflight) return;
     const state = await this.ctx.storage.get<RunnerState>("state");
     if (!state || state.stopped) return;
-    const at = await this.ctx.storage.getAlarm();
+    const at = await pendingAlarm(this.ctx.storage);
     if (at === null || at > Date.now()) await this.ctx.storage.setAlarm(Date.now());
   }
 

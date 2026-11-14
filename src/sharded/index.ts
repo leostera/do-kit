@@ -21,10 +21,12 @@ import { DurableObject } from "cloudflare:workers";
 import { ATOMIC_OUTCOME_TTL_MS, olderTx, type AtomicAnswer, type AtomicMethod, type AtomicStep, type Outcome } from "./atomic.js";
 import { sharded, type ShardedClient } from "./client.js";
 import { hashBit, keyHash } from "./hash.js";
+import { pendingAlarm } from "./alarms.js";
 import { storedJson } from "./values.js";
 
 export { ATOMIC_HOLD_MS, ATOMIC_OUTCOME_TTL_MS, type AtomicMethod, type AtomicOutcome, type AtomicShardResult, type Prepared } from "./atomic.js";
 export { hashBit, keyHash } from "./hash.js";
+export { pendingAlarm, STRANDED_ALARM_MS } from "./alarms.js";
 export { RouteMismatch, SpansShards, ShardedClient, sharded, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 
 declare global {
@@ -1631,7 +1633,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    */
   private async armAlarm(time: number): Promise<void> {
     if (time <= Date.now()) return this.ctx.storage.setAlarm(time);
-    const current = await this.ctx.storage.getAlarm();
+    const current = await pendingAlarm(this.ctx.storage);
     if (current === null || time < current) await this.ctx.storage.setAlarm(time);
   }
 
@@ -1650,7 +1652,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     const due = meta.activate || meta.cleanup.length > 0 || meta.foreign ? Date.now() : later.length > 0 ? Math.max(Date.now(), Math.min(...later)) : null;
     if (due === null) return;
     this.alarmCheckedAt = Date.now();
-    void this.ctx.storage.getAlarm().then((at) => (at === null || at > due ? this.ctx.storage.setAlarm(due) : undefined));
+    void pendingAlarm(this.ctx.storage).then((at) => (at === null || at > due ? this.ctx.storage.setAlarm(due) : undefined));
   }
   private alarmCheckedAt = 0;
 
