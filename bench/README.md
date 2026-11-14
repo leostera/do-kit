@@ -104,7 +104,7 @@ When a result looks wrong, `bench/probe.ts` asks the deployed Workers why, befor
 
 ```sh
 bun bench/probe.ts placement '{"target":"table-16","objectName":"t"}'
-bun bench/probe.ts measure '{"target":"table-16","operation":"list","concurrency":256,"durationSeconds":15,"drivers":16}'
+bun bench/probe.ts measure '{"target":"table-16","operation":"list","concurrency":256,"durationMs":15000,"drivers":16}'
 bench/errors.sh do-kit-workgraph-bench 30
 ```
 

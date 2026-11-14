@@ -10,7 +10,7 @@
 //       their burns run one after another.
 //   runner-placement {run, runners, burnIterations?}   (on the work graph bench Worker)
 //       The same, for a run's runners.
-//   measure {target, operation, concurrency, durationSeconds, drivers?, …}
+//   measure {target, operation, concurrency, durationMs, drivers?, …}
 //       One /measure point. `drivers` overrides the default driver count, to tell the load
 //       generator's limits from the target's.
 //   timeline {run, runners, out?}   (on the work graph bench Worker)
