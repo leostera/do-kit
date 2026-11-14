@@ -187,7 +187,7 @@ export interface ApplyRequest {
 
 export type Op = "=" | "!=" | "<" | "<=" | ">" | ">=" | "isNull" | "notNull" | "prefix" | "contains";
 
-/** A condition on one column; conditions are ANDed. `contains` ignores case. */
+/** A condition on one column; conditions are ANDed. `contains` ignores ASCII case (as SQLite's lower() does). */
 export interface Condition {
   readonly column: string;
   readonly op: Op;

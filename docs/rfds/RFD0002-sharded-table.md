@@ -73,7 +73,7 @@ const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 81
 ```
 
 `where` conditions are `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix`, and
-`contains` (case-insensitive substring). They are ANDed.
+`contains` (substring, ignoring ASCII case). They are ANDed.
 
 ## Reference-level explanation
 

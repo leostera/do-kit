@@ -217,10 +217,18 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 - **Commands** run a conditional update inside the row's shard, in one call: register pure, synchronous `(row, args) => { result, write? }` functions with `defineCommands`, and `apply(key, "ensure", args)` reads the row, decides, writes and answers in one transaction, with no version retries however many callers update the row at once. The client infers each command's argument and result types. Pass the time in `args`: a command reads nothing but its row and arguments ([RFD0010](docs/rfds/RFD0010-table-commands.md)). On one hot row at 128 in flight, `apply` commits 698 updates/s with p99 447 ms, where a `get` and a `put(ifVersion)` retried up to 8 times commit 10/s and run out of attempts on 611 calls.
 
   ![Updates of one hot row](docs/bench/apply-hot-throughput.svg)
-- **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring case). `order: "shard"` walks the table shard by shard instead, one shard a page, listing every row that existed when the walk began once, through splits ([RFD0009](docs/rfds/RFD0009-walks-in-shard-order.md)).
+- **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring ASCII case). `order: "shard"` walks the table shard by shard instead, one shard a page, listing every row that existed when the walk began once, through splits ([RFD0009](docs/rfds/RFD0009-walks-in-shard-order.md)).
 - **Counts** are kept per hash prefix with every write, so `count()` is cheap and exact at any depth up to 16. Declare `counts` groups to also count rows per value of a column: `countBy("byCancelled")` returns `[{ value: false, count: 812 }, { value: true, count: 40 }]`, just as cheaply. A listing takes `withCount: true` (or a group's name) and returns `total` (and `counts`) from the same calls to the shards, so a page with its total costs one fan-out, not two. Counts don't take `where`: counting arbitrary conditions would read every row of every shard.
 - **Schema changes:** add columns and indexes in the schema; each shard applies them the first time it runs the new code.
 - Custom transactional methods use `getRow`, `putRow`, `patchRow` and `deleteRow` inside `transact`.
+
+### What is atomic
+
+- **One row**: every write is one transaction with its index entries and counts, and its versions are linearizable: a read that starts after a write is acknowledged sees it or something later.
+- **One shard's part of a batch**: `putMany`, `patch` and `delete` batches are one transaction per shard.
+- **A batch across shards** is not, and can fail partway (partial): if one shard fails, the others' parts stay written, and the error says which rows are unknown. Use `atomically` ([RFD0008](docs/rfds/RFD0008-atomic-calls-across-shards.md)) when rows in several shards must change together.
+- **Reads across shards** (`getMany`, a page) are not a snapshot: one shard's answer can include a write that another's, asked a moment earlier, does not.
+- **`count()`** may count a row twice, or miss it, at the moment a split commits; it is exact otherwise.
 
 ### What a table buys you, measured
 
@@ -508,6 +516,14 @@ The default threshold is about half of what one object handles on the edge, whic
     - Calls the runtime sheds as overloaded never reach the object, so they appear nowhere: compare what you sent with `calls` plus the arrival answers.
 
   Reach any shard with `env.NS.get(env.NS.idFromName(shardObjectName(name, bits))).shardedDescribe()`.
+
+## Upgrading
+
+Objects accept calls from the previous release's client, but a new client may call methods the previous release's objects don't have. So:
+
+- **Deploy the objects before clients**: the release, with its classes, before any client that uses what it adds. In one Worker that holds both, that is one deploy.
+- **Keep the default `deferred` code update strategy** (`code_update_strategy` in the Wrangler configuration's `durable_objects`). An active object then runs its old code for up to 300 s while new code is deployed, which a split in flight needs to finish. Don't use `immediate` while splits may be running: it resets every object at once, and splits in flight are abandoned.
+- Schema changes are applied by each shard the first time it runs the new code, and an older release leaves schema it doesn't know alone, so a rollback and the roll forward after it rebuild nothing.
 
 ## Development
 

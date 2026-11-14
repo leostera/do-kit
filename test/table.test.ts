@@ -29,6 +29,8 @@ function makeDocs(n: number): Doc[] {
   }));
 }
 
+const asciiLower = (s: string) => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+
 /** SQLite's order: null, numbers, text by code point; then the key. */
 function sqliteCompare(a: unknown, b: unknown): number {
   const rank = (v: unknown) => (v === null ? 0 : typeof v === "number" || typeof v === "boolean" ? 1 : 2);
@@ -50,7 +52,8 @@ function expected(rows: Doc[], query: Query): string[] {
     (query.where ?? []).every((c) => {
       const v = r[c.column as keyof Doc];
       if (c.op === "=") return v === c.value;
-      if (c.op === "contains") return typeof v === "string" && v.toLowerCase().includes(String(c.value).toLowerCase());
+      // As SQLite's lower(): ASCII letters only.
+      if (c.op === "contains") return typeof v === "string" && asciiLower(v).includes(asciiLower(String(c.value)));
       if (c.op === "notNull") return v !== null;
       throw new Error(`no reference for ${c.op}`);
     });
