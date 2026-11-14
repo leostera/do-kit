@@ -1066,7 +1066,7 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     await ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).deployRoute(body.args[0] as number).catch(() => {});
     return null;
   }
-  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, { ...(body.cls === "routedTable" ? { routeOf: route } : {}), commands: docCommands as never }) as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, { ...(body.cls === "routedTable" ? { routeOf: route } : {}), commands: docCommands as never, ...((body as { options?: object }).options ?? {}) }) as unknown as Record<string, (...a: unknown[]) => unknown>;
   if (body.op === "all") {
     const rows: unknown[] = [];
     for await (const row of (t.all as (q: ListQuery) => AsyncGenerator<unknown>).call(t, body.args[0] as ListQuery)) rows.push(row);
