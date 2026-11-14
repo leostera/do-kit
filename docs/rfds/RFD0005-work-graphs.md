@@ -353,7 +353,10 @@ Methods:
   them would never start them. A runner its call does not reach is started by the alarm, and a
   start made again for a run already running arms the next tick (the alarm the submission set,
   for an unstarted run's end, is a day off): a start that fails partway, made again, still leaves
-  a run that finishes. The meta in memory changes only once it is stored.
+  a run that finishes. The meta in memory changes only once it is stored. Its alarm, when a tick fails, re-arms a
+  tick later; if that fails too, the alarm throws so the platform retries it, since an alarm that
+  returned unarmed would leave a run no runner calls with nothing to wake it. `graphStatus` re-arms
+  a running run's alarm if it is gone, so an app's polls bring such a run back as well.
 - `graphNext(runner, finished)` completes the runner's `finished` chunk, if any (with its counts or
   its error), and leases it the next one. It answers:
   - `{ chunk, attempt }`;

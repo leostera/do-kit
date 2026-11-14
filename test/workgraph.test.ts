@@ -108,6 +108,32 @@ test("a start whose alarm and runner starts all fail, made again, runs the graph
   await expectResults(run, shape, run);
 }, 60_000);
 
+test("a tick whose runner starts fail, and whose alarm fails to re-arm twice, still runs the graph", async () => {
+  const run = `tick-unarmed-${unique()}`;
+  const shape: Shape = { trees: 12, size: 10, chainy: 0.3, joins: 0, seed: 6 };
+  await post("/workgraph", { op: "status", run });
+  // The start arms its tick; its runner starts fail, and so do the tick's (4 in all); the tick's
+  // setAlarm fails, and so does its re-arm.
+  await post("/workgraph", { op: "failStarts", run, runners: 4, skipAlarms: 1, failAlarms: 2 });
+  await start(run, shape, { runners: 2, tickMs: 200, wakeAfterMs: 500 });
+  // No status polls meanwhile (they re-arm a lost alarm too): the platform's retry of the alarm does.
+  await Bun.sleep(10_000);
+  expect(((await post("/workgraph", { op: "status", run })) as { state: string }).state).toBe("done");
+  await expectResults(run, shape, run);
+}, 60_000);
+
+test("a run whose alarm is gone, with no runner calling, is brought back by status polls", async () => {
+  const run = `status-backstop-${unique()}`;
+  const shape: Shape = { trees: 12, size: 10, chainy: 0.3, joins: 0, seed: 7 };
+  await post("/workgraph", { op: "status", run });
+  // Both runner starts fail, then the alarm is lost before its first tick.
+  await post("/workgraph", { op: "failStarts", run, runners: 2, skipAlarms: 1000, failAlarms: 0 });
+  await start(run, shape, { runners: 2, tickMs: 200, wakeAfterMs: 500 });
+  await post("/workgraph", { op: "dropCoordinatorAlarm", run });
+  expect((await finished(run, 30_000)).state).toBe("done");
+  await expectResults(run, shape, run);
+}, 60_000);
+
 test("a long chain runs one chunk after another", async () => {
   const run = `chain-${unique()}`;
   const shape: Shape = { trees: 1, size: 400, chainy: 1, joins: 0, seed: 3, exact: true };

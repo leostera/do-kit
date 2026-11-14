@@ -46,14 +46,20 @@ export class GraphCoordinators extends WorkGraphCoordinator<GraphEnv> {
       },
     });
   }
-  /** The next `n` runner starts fail; and the next setAlarm for within a minute (a tick), once. */
-  async failStarts(n: number): Promise<void> {
+  /**
+   * The next `n` runner starts fail; and of the setAlarm calls for within a minute (ticks), the
+   * `fail` after the first `skip` (by default the next one).
+   */
+  async failStarts(n: number, skip = 0, fail = 1): Promise<void> {
     this.failingStarts = n;
     const storage = this.ctx.storage;
     const setAlarm = storage.setAlarm.bind(storage);
+    let seen = 0;
     storage.setAlarm = (async (time: number | Date, options?: DurableObjectSetAlarmOptions) => {
       if (Number(time) > Date.now() + 60_000) return setAlarm(time, options);
-      storage.setAlarm = setAlarm;
+      seen++;
+      if (seen <= skip) return setAlarm(time, options);
+      if (seen >= skip + fail) storage.setAlarm = setAlarm;
       throw new Error("test: setAlarm failed");
     }) as typeof storage.setAlarm;
   }
@@ -200,6 +206,9 @@ export interface GraphRequest {
   /** For "failCoordinatorStatementOnce": text of the statement to fail, and of one of its bound values. */
   text?: string;
   binding?: string;
+  /** For "failStarts": tick alarms let through first, and then failed. */
+  skipAlarms?: number;
+  failAlarms?: number;
   /** For "next": the runner that calls, and what it reports. */
   runner?: number;
   finished?: unknown;
@@ -241,7 +250,7 @@ export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unk
     // The body is bytes: only whether there is one.
     return { ...answer, ...("body" in answer ? { body: answer.body.byteLength } : {}) };
   }
-  if (body.op === "failStarts") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).failStarts(body.runners ?? 2).then(() => null);
+  if (body.op === "failStarts") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).failStarts(body.runners ?? 2, body.skipAlarms ?? 0, body.failAlarms ?? 1).then(() => null);
   if (body.op === "failCoordinatorStatementOnce") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).failStatementOnce(body.text ?? "", body.binding).then(() => null);
   if (body.op === "dropCoordinatorAlarm") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).dropAlarm().then(() => null);
   if (body.op === "ops") return Promise.all(Array.from({ length: body.runners ?? 4 }, (_, i) => env.GRAPH_RUNNERS.get(env.GRAPH_RUNNERS.idFromName(runnerName(body.run, i))).opLog()));

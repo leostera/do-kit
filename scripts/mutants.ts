@@ -338,6 +338,20 @@ const MUTANTS: Mutant[] = [
     test: "test/workgraph.test.ts",
     pattern: "seal whose run",
   },
+  {
+    name: "graph-alarm-swallows",
+    breaks: "a coordinator alarm that fails to re-arm throws, so the platform retries it",
+    edits: [{ file: "src/workgraph/coordinator.ts", find: "      await this.ctx.storage.setAlarm(Date.now() + (this.meta?.tickMs || 5_000));\n    }\n  }", replace: "      await this.ctx.storage.setAlarm(Date.now() + (this.meta?.tickMs || 5_000)).catch(() => undefined);\n    }\n  }" }],
+    test: "test/workgraph.test.ts",
+    pattern: "fails to re-arm",
+  },
+  {
+    name: "graph-status-no-backstop",
+    breaks: "a status poll re-arms a running run's lost alarm",
+    edits: [{ file: "src/workgraph/coordinator.ts", find: "    if (this.meta.state === \"running\") await this.backstopAlarm(Date.now()).catch(() => undefined);\n", replace: "" }],
+    test: "test/workgraph.test.ts",
+    pattern: "brought back by status polls",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

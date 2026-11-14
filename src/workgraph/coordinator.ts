@@ -333,7 +333,11 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
   }
 
   async graphStatus(): Promise<RunStatus | null> {
-    return this.meta ? this.status() : null;
+    if (!this.meta) return null;
+    // A run under way whose alarm is gone (it failed to re-arm): the app's polls bring it back, as
+    // its runners' calls do, when no runner is calling.
+    if (this.meta.state === "running") await this.backstopAlarm(Date.now()).catch(() => undefined);
+    return this.status();
   }
 
   /** A chunk's body, from its parts. */
@@ -477,15 +481,16 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
 
   /**
    * Leases that ran out go back to ready, quiet runners are woken, and the deadline is kept; once
-   * the run ends, its cleanup. Never throws: the platform retries a failing alarm only a few
-   * times, so a failure re-arms it a tick later.
+   * the run ends, its cleanup. A failure re-arms it a tick later: the platform retries a failing
+   * alarm only a few times. If that fails too, it throws, and the platform retries it; an alarm
+   * that returned without re-arming would leave a run no runner calls with nothing to wake it.
    */
   override async alarm(): Promise<void> {
     try {
       await this.tick();
     } catch (error) {
       console.error(JSON.stringify({ event: "graph-alarm-failed", run: this.meta?.name ?? null, error: String(error).slice(0, 200) }));
-      await this.ctx.storage.setAlarm(Date.now() + (this.meta?.tickMs || 5_000)).catch(() => undefined);
+      await this.ctx.storage.setAlarm(Date.now() + (this.meta?.tickMs || 5_000));
     }
   }
 
