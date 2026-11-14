@@ -235,6 +235,13 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     const meta = this.existing(name);
     if (!meta) throw new Error(`run ${name} was not submitted (or is gone)`);
     if (meta.state === "submitting") throw new Error(`run ${name} is not sealed`);
+    // Started already: a start made again because the first failed after storing the run (its
+    // alarm, or its runners' calls). Its next tick is made sure of: the alarm starts the runners
+    // that have not called. (The alarm the submission set, for an unstarted run's end, is hours off.)
+    if (meta.state === "running") {
+      await this.armTick(Date.now());
+      return this.status();
+    }
     if (meta.state !== "ready") return this.status();
     if (!(options.runners >= 1)) throw new Error("a run needs at least one runner");
     // A chunk may run longer than planned (units vary, an eviction restarts it): a lease shorter
@@ -246,9 +253,18 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     const own = options.results === undefined;
     const results = options.results ?? ownResultsName(name);
     const started: Meta = { ...meta, state: "running", runners: options.runners, results, ownResults: own, leaseMs: options.leaseMs ?? Math.max(120_000, 3 * chunkMs), maxAttempts: options.maxAttempts ?? 3, maxLeases: options.maxLeases ?? 5, wakeAfterMs: options.wakeAfterMs ?? 30_000, tickMs: options.tickMs ?? 5_000, logChunks: options.logChunks ?? false, startedAt: now, deadlineAt: now + (options.deadlineMs ?? DAY_MS), keepStatusMs: options.keepStatusMs ?? HOUR_MS };
-    this.save(started);
-    this.finishIfDone(); // an empty run
-    for (let i = 0; i < options.runners; i++) this.sql.exec("INSERT OR REPLACE INTO graph_runners (runner, seen_at, waiting) VALUES (?, ?, 0)", i, now);
+    // The run and its runners, all or nothing: a run stored as running without a runner's row
+    // would never start that runner (the alarm wakes the runners it has rows of).
+    try {
+      this.ctx.storage.transactionSync(() => {
+        this.save(started);
+        this.finishIfDone(); // an empty run
+        for (let i = 0; i < options.runners; i++) this.sql.exec("INSERT OR REPLACE INTO graph_runners (runner, seen_at, waiting) VALUES (?, ?, 0)", i, now);
+      });
+    } catch (error) {
+      this.meta = meta; // rolled back: as stored, ready to start
+      throw error;
+    }
     await this.ctx.storage.setAlarm(now + (this.meta!.cleanup ? 0 : started.tickMs));
     // A runner this call fails to start is started by the alarm, like one that went quiet.
     // A start that fails (the first call to a new object sometimes does) is made again by the alarm,
@@ -308,6 +324,13 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
     if ((await pendingAlarm(this.ctx.storage)) === null) await this.ctx.storage.setAlarm(now + m.tickMs);
   }
   private alarmCheckedAt = 0;
+
+  /** Arms the alarm for the next tick, unless it is set for sooner. */
+  private async armTick(now: number): Promise<void> {
+    const at = await pendingAlarm(this.ctx.storage);
+    const tick = now + this.meta!.tickMs;
+    if (at === null || at > tick) await this.ctx.storage.setAlarm(tick);
+  }
 
   async graphStatus(): Promise<RunStatus | null> {
     return this.meta ? this.status() : null;
@@ -552,8 +575,9 @@ export abstract class WorkGraphCoordinator<Env = unknown> extends DurableObject<
   }
 
   private save(meta: Meta): void {
-    this.meta = meta;
+    // Stored first: a write that fails leaves the meta in memory as it is in storage.
     this.sql.exec("INSERT INTO graph_meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", JSON.stringify(meta));
+    this.meta = meta;
   }
 
   private liveCounts(): Counts {

@@ -348,8 +348,12 @@ Methods:
 - `graphStart(name, { runners, results?, deadlineMs?, keepStatusMs?, ... })` records the runner
   count, the results store (the run's own, `ownResultsName(run)`, unless one is named), the
   deadline (24 h by default) and how long to keep the status (1 h), starts each runner, and arms
-  the alarm. It refuses a run never submitted. A runner its call does not reach is started by the
-  alarm, so a start that fails partway still leaves a run that finishes.
+  the alarm. It refuses a run never submitted. The run and its runners' rows are stored in one
+  transaction: the alarm starts the runners it has rows of, so a run stored as running without
+  them would never start them. A runner its call does not reach is started by the alarm, and a
+  start made again for a run already running arms the next tick (the alarm the submission set,
+  for an unstarted run's end, is a day off): a start that fails partway, made again, still leaves
+  a run that finishes. The meta in memory changes only once it is stored.
 - `graphNext(runner, finished)` completes the runner's `finished` chunk, if any (with its counts or
   its error), and leases it the next one. It answers:
   - `{ chunk, attempt }`;

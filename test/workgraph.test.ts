@@ -65,6 +65,49 @@ test("big trees cut into chunks, with replayed and stored cuts, and joins across
   await expectResults(run, shape, run, options);
 }, 90_000);
 
+/** A start that fails writing a runner's row, then made again as an app would: in the same instance, or a new one. */
+async function startFailsPartway(restart: boolean): Promise<void> {
+  const run = `start-fails-${restart ? "restart" : "same"}-${unique()}`;
+  const shape: Shape = { trees: 12, size: 10, chainy: 0.3, joins: 0, seed: 3 };
+  await post("/workgraph", { op: "status", run }); // the coordinator object exists
+  await post("/workgraph", { op: "failCoordinatorStatementOnce", run, text: "INTO graph_runners" });
+  const first = await start(run, shape, { runners: 2, tickMs: 200, wakeAfterMs: 500 }).then(() => "started", (error: unknown) => String(error));
+  expect(first).toContain("storage error");
+  // A new instance reads the run as stored: started whole, or not at all.
+  if (restart) await post("/workgraph", { op: "restart", run, runners: 2 });
+  await start(run, shape, { runners: 2, tickMs: 200, wakeAfterMs: 500 });
+  expect((await finished(run, 30_000)).state).toBe("done");
+  await expectResults(run, shape, run);
+}
+
+test("a start that fails partway, made again in the same instance, runs the graph to the end", () => startFailsPartway(false), 60_000);
+test("a start that fails partway, made again after a restart, runs the graph to the end", () => startFailsPartway(true), 60_000);
+
+test("a seal whose run fails to store, made again, runs the graph to the end", async () => {
+  const run = `seal-fails-${unique()}`;
+  const shape: Shape = { trees: 12, size: 10, chainy: 0.3, joins: 0, seed: 5 };
+  await post("/workgraph", { op: "status", run });
+  await post("/workgraph", { op: "failCoordinatorStatementOnce", run, text: "INTO graph_meta", binding: '"state":"ready"' });
+  const first = await start(run, shape, { runners: 2, tickMs: 200, wakeAfterMs: 500 }).then(() => "started", (error: unknown) => String(error));
+  expect(first).toContain("storage error");
+  await start(run, shape, { runners: 2, tickMs: 200, wakeAfterMs: 500 });
+  expect((await finished(run, 30_000)).state).toBe("done");
+  await expectResults(run, shape, run);
+}, 60_000);
+
+test("a start whose alarm and runner starts all fail, made again, runs the graph to the end", async () => {
+  const run = `start-unarmed-${unique()}`;
+  const shape: Shape = { trees: 12, size: 10, chainy: 0.3, joins: 0, seed: 4 };
+  // Stored as running, then its alarm and both runners' starts fail: nothing will call it.
+  await post("/workgraph", { op: "status", run });
+  await post("/workgraph", { op: "failStarts", run, runners: 2 });
+  const first = await start(run, shape, { runners: 2, tickMs: 200, wakeAfterMs: 500 }).then(() => "started", (error: unknown) => String(error));
+  expect(first).toContain("setAlarm failed");
+  await start(run, shape, { runners: 2, tickMs: 200, wakeAfterMs: 500 });
+  expect((await finished(run, 30_000)).state).toBe("done");
+  await expectResults(run, shape, run);
+}, 60_000);
+
 test("a long chain runs one chunk after another", async () => {
   const run = `chain-${unique()}`;
   const shape: Shape = { trees: 1, size: 400, chainy: 1, joins: 0, seed: 3, exact: true };

@@ -21,8 +21,41 @@ export interface GraphEnv {
 }
 
 export class GraphCoordinators extends WorkGraphCoordinator<GraphEnv> {
+  /** Runner starts (graphRun) still to fail, as a first call to a new object sometimes does. */
+  private failingStarts = 0;
   protected runners() {
-    return this.env.GRAPH_RUNNERS;
+    if (this.failingStarts === 0) return this.env.GRAPH_RUNNERS;
+    const ns = this.env.GRAPH_RUNNERS;
+    return new Proxy(ns, {
+      get: (target, prop) => {
+        if (prop !== "get") return (Reflect.get(target, prop) as (...a: unknown[]) => unknown).bind(target);
+        return (id: DurableObjectId) => {
+          const stub = target.get(id);
+          return new Proxy(stub, {
+            get: (t, p) => {
+              if (p === "graphRun" && this.failingStarts > 0) {
+                this.failingStarts--;
+                return async () => {
+                  throw new Error("test: runner start failed");
+                };
+              }
+              return Reflect.get(t, p);
+            },
+          });
+        };
+      },
+    });
+  }
+  /** The next `n` runner starts fail; and the next setAlarm for within a minute (a tick), once. */
+  async failStarts(n: number): Promise<void> {
+    this.failingStarts = n;
+    const storage = this.ctx.storage;
+    const setAlarm = storage.setAlarm.bind(storage);
+    storage.setAlarm = (async (time: number | Date, options?: DurableObjectSetAlarmOptions) => {
+      if (Number(time) > Date.now() + 60_000) return setAlarm(time, options);
+      storage.setAlarm = setAlarm;
+      throw new Error("test: setAlarm failed");
+    }) as typeof storage.setAlarm;
   }
   protected results() {
     return this.env.GRAPH_RESULTS;
@@ -37,6 +70,16 @@ export class GraphCoordinators extends WorkGraphCoordinator<GraphEnv> {
   /** Loses this coordinator's alarm, as a failed setAlarm or an alarm the runtime gave up on would. */
   async dropAlarm(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
+  }
+  /** The next SQL statement containing `text` (and a bound value containing `binding`) throws, once. */
+  async failStatementOnce(text: string, binding?: string): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const exec = sql.exec.bind(sql);
+    sql.exec = ((query: string, ...bindings: unknown[]) => {
+      if (!query.includes(text) || (binding !== undefined && !bindings.some((b) => typeof b === "string" && b.includes(binding)))) return exec(query, ...bindings);
+      sql.exec = exec;
+      throw new Error("test: storage error");
+    }) as typeof sql.exec;
   }
 }
 
@@ -153,7 +196,10 @@ export class GraphResults extends WorkGraphResults<GraphEnv> {
 const RESULT_SHARDS = ["", "01", "10", "11"];
 
 export interface GraphRequest {
-  op: "start" | "status" | "results" | "delete" | "storage" | "restart" | "ops" | "dropCoordinatorAlarm" | "next";
+  op: "start" | "status" | "results" | "delete" | "storage" | "restart" | "ops" | "dropCoordinatorAlarm" | "next" | "failCoordinatorStatementOnce" | "failStarts";
+  /** For "failCoordinatorStatementOnce": text of the statement to fail, and of one of its bound values. */
+  text?: string;
+  binding?: string;
   /** For "next": the runner that calls, and what it reports. */
   runner?: number;
   finished?: unknown;
@@ -195,6 +241,8 @@ export async function graphRoute(env: GraphEnv, body: GraphRequest): Promise<unk
     // The body is bytes: only whether there is one.
     return { ...answer, ...("body" in answer ? { body: answer.body.byteLength } : {}) };
   }
+  if (body.op === "failStarts") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).failStarts(body.runners ?? 2).then(() => null);
+  if (body.op === "failCoordinatorStatementOnce") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).failStatementOnce(body.text ?? "", body.binding).then(() => null);
   if (body.op === "dropCoordinatorAlarm") return env.GRAPH_COORDINATORS.get(env.GRAPH_COORDINATORS.idFromName(body.run)).dropAlarm().then(() => null);
   if (body.op === "ops") return Promise.all(Array.from({ length: body.runners ?? 4 }, (_, i) => env.GRAPH_RUNNERS.get(env.GRAPH_RUNNERS.idFromName(runnerName(body.run, i))).opLog()));
   if (body.op === "storage") {

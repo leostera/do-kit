@@ -310,6 +310,34 @@ const MUTANTS: Mutant[] = [
     test: "test/size.test.ts",
     pattern: "batch was cut",
   },
+  {
+    name: "restarted-run-unticked",
+    breaks: "a start made again for a run stored as running arms its next tick",
+    edits: [{ file: "src/workgraph/coordinator.ts", find: "    if (meta.state === \"running\") {\n      await this.armTick(Date.now());", replace: "    if (meta.state === \"running\") {" }],
+    test: "test/workgraph.test.ts",
+    pattern: "all fail",
+  },
+  {
+    name: "start-meta-after-rollback",
+    breaks: "a start rolled back leaves the run ready in memory, as stored",
+    edits: [{ file: "src/workgraph/coordinator.ts", find: "      this.meta = meta; // rolled back: as stored, ready to start\n", replace: "" }],
+    test: "test/workgraph.test.ts",
+    pattern: "same instance",
+  },
+  {
+    name: "start-not-atomic",
+    breaks: "a start stores the run and its runners all or nothing",
+    edits: [{ file: "src/workgraph/coordinator.ts", find: "      this.ctx.storage.transactionSync(() => {\n        this.save(started);", replace: "      ((f: () => void) => f())(() => {\n        this.save(started);" }],
+    test: "test/workgraph.test.ts",
+    pattern: "after a restart",
+  },
+  {
+    name: "graph-meta-set-before-stored",
+    breaks: "a coordinator's meta write that fails leaves the meta in memory as stored",
+    edits: [{ file: "src/workgraph/coordinator.ts", find: "    this.sql.exec(\"INSERT INTO graph_meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value\", JSON.stringify(meta));\n    this.meta = meta;", replace: "    this.meta = meta;\n    this.sql.exec(\"INSERT INTO graph_meta (key, value) VALUES ('meta', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value\", JSON.stringify(meta));" }],
+    test: "test/workgraph.test.ts",
+    pattern: "seal whose run",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */
