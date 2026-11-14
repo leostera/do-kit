@@ -27,6 +27,14 @@ export interface TableSchema<Row extends RowShape> {
    */
   readonly maxRowBytes?: number;
   /**
+   * The schema's version, a whole number: raise it with every change. A shard records the highest
+   * it has run, and code with a lower one (a rollback, or a deploy halfway) leaves the indexes it
+   * doesn't know alone instead of dropping them, and marks the rows it writes, so the newer code
+   * brings their index entries up to date without rebuilding. Without versions every schema is 0,
+   * and a deploy drops what its schema no longer declares.
+   */
+  readonly version?: number;
+  /**
    * IndexedTable only: index name to a global index, kept apart from the rows on its own shards
    * (see RFD0003). A write returns once its entries are written.
    */
@@ -103,6 +111,7 @@ export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): Tab
     if (!["text", "integer", "real", "boolean", "json"].includes(type)) throw new Error(`column ${name}: unknown type ${type}`);
   }
   if (schema.columns[schema.primaryKey] !== "text") throw new Error(`primary key ${schema.primaryKey} must be a text column`);
+  if (schema.version !== undefined && !(Number.isSafeInteger(schema.version) && schema.version >= 0)) throw new Error("version must be a whole number, 0 or more");
   for (const [name, cols] of Object.entries(schema.indexes ?? {})) {
     if (!IDENTIFIER.test(name)) throw new Error(`index ${JSON.stringify(name)}: a plain identifier`);
     if (cols.length === 0) throw new Error(`index ${name}: no columns`);

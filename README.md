@@ -523,7 +523,7 @@ Objects accept calls from the previous release's client, but a new client may ca
 
 - **Deploy the objects before clients**: the release, with its classes, before any client that uses what it adds. In one Worker that holds both, that is one deploy.
 - **Keep the default `deferred` code update strategy** (`code_update_strategy` in the Wrangler configuration's `durable_objects`). An active object then runs its old code for up to 300 s while new code is deployed, which a split in flight needs to finish. Don't use `immediate` while splits may be running: it resets every object at once, and splits in flight are abandoned.
-- Schema changes are applied by each shard the first time it runs the new code, and an older release leaves schema it doesn't know alone, so a rollback and the roll forward after it rebuild nothing.
+- **Give the schema a `version`, and raise it with every change.** Each shard applies a change the first time it runs the new code, building what it adds over the rows it has a bounded step at a time, while it keeps serving. Code with a lower version than a shard has run (a rollback) leaves the indexes it doesn't know alone and marks the rows it writes, so the roll forward after it refreshes those rows instead of rebuilding.
 
 ## Development
 

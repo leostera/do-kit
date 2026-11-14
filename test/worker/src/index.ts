@@ -38,6 +38,7 @@ interface Env extends GraphEnv {
 
 export type Doc = { name: string; id: string; createdAt: number; lastEditAt: number | null; deleted: boolean; meta: unknown };
 export const docs = defineTable<Doc>({
+  version: 1,
   primaryKey: "name",
   columns: { name: "text", id: "text", createdAt: "integer", lastEditAt: "integer", deleted: "boolean", meta: "json" },
   indexes: { byCreated: ["createdAt"], byEdit: ["lastEditAt"], byDeletedCreated: ["deleted", "createdAt"] },
@@ -207,6 +208,7 @@ export class RoutedDocs extends Docs {
 
 export type User = { id: string; email: string | null; name: string; team: string; createdAt: number; active: boolean };
 export const users = defineTable<User>({
+  version: 2,
   primaryKey: "id",
   columns: { id: "text", email: "text", name: "text", team: "text", createdAt: "integer", active: "boolean" },
   indexes: { byName: ["name"] },
@@ -337,6 +339,12 @@ function savePolicyOverride(storage: DurableObjectStorage, change: Record<string
   const merged = { ...(loadPolicyOverride(storage) ?? {}), ...change };
   storage.sql.exec("DELETE FROM test_policy");
   storage.sql.exec("INSERT INTO test_policy (policy) VALUES (?)", JSON.stringify(merged));
+}
+
+/** The schema version `upgrade` deployed to this object (1 before any). */
+function deployedVersion(storage: DurableObjectStorage): number {
+  storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
+  return storage.sql.exec<{ version: number }>("SELECT version FROM test_schema").toArray()[0]?.version ?? 1;
 }
 
 /** Plain SQL statements on `storage`: the rows of each. For references, ANALYZE, and corrupting state on purpose. */
@@ -521,9 +529,9 @@ export class UserIndexes extends GlobalIndex<Env> {
 }
 
 /** Users listed by team, then (after `upgrade`) also unique by email: an index added to a table that has rows. */
-const usersV1 = defineTable<User>({ primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "createdAt"], partition: 1 } } });
+const usersV1 = defineTable<User>({ version: 1, primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "createdAt"], partition: 1 } } });
 /** After a second upgrade: byEmail dropped, and byTeam redefined (ordered by name). */
-export const usersV3 = defineTable<User>({ primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "name"], partition: 1 } } });
+export const usersV3 = defineTable<User>({ version: 3, primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "name"], partition: 1 } } });
 
 export class EvolvingUsers extends IndexedTable<Env, User> {
   private readonly log = new StatementLog(this.ctx.storage);
@@ -532,10 +540,11 @@ export class EvolvingUsers extends IndexedTable<Env, User> {
     return this.log.report(filter, reset);
   }
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
+  /** The deployed schema's version: read once an instance, as a deploy restarts it (see upgrade). */
+  private deployed: number | null = null;
   protected get table(): TableSchema<User> {
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
-    const version = this.ctx.storage.sql.exec<{ version: number }>("SELECT version FROM test_schema").toArray()[0]?.version ?? 1;
-    return version === 3 ? usersV3 : version === 2 ? users : usersV1;
+    this.deployed ??= deployedVersion(this.ctx.storage);
+    return this.deployed === 3 ? usersV3 : this.deployed === 2 ? users : usersV1;
   }
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.EVOLVING_USERS as never;
@@ -575,6 +584,7 @@ export class EvolvingUserIndexes extends GlobalIndex<Env> {
 /** The docs table, then (after `upgrade`) with a `stars` column and a `byStars` index instead of `byEdit`. */
 type DocV2 = Doc & { stars: number | null };
 const docsV2 = defineTable<DocV2>({
+  version: 2,
   primaryKey: "name",
   columns: { ...docs.columns, stars: "integer" },
   indexes: { byCreated: ["createdAt"], byStars: ["stars"], byDeletedCreated: ["deleted", "createdAt"] },
@@ -619,14 +629,21 @@ export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   async ownedPage(after: string | null, limit: number): Promise<string[]> {
     return this.ownedRowsAfter(after, limit).map((r) => String((r.row as { name: string }).name));
   }
-  /** One step of the migration, as one call's would be: true once it is done, false if it answered not ready. */
+  /** While set, the alarm takes no build steps: only calls do (kept across restarts). */
+  async pauseAlarmBuilds(paused: boolean): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarm_builds (paused INTEGER NOT NULL)");
+    this.ctx.storage.sql.exec("DELETE FROM test_alarm_builds");
+    this.ctx.storage.sql.exec("INSERT INTO test_alarm_builds (paused) VALUES (?)", paused ? 1 : 0);
+  }
+  protected override async onAlarm(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarm_builds (paused INTEGER NOT NULL)");
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM test_alarm_builds WHERE paused = 1").toArray().length) return;
+    await super.onAlarm();
+  }
+  /** The migration, and one build step, as one call's would be: true once nothing is left to build. */
   async migrateOnce(): Promise<boolean> {
-    try {
-      this.migrate();
-      return true;
-    } catch {
-      return false;
-    }
+    this.migrate();
+    return !this.buildStep();
   }
   /** What this object holds (tables, keys, alarm). */
   async storage(): Promise<StorageReport> {
@@ -642,10 +659,11 @@ export class EvolvingDocs extends ShardedTable<Env, DocV2> {
     this.ctx.abort("test: restart");
   }
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6 };
+  /** The deployed schema's version: read once an instance, as a deploy restarts it (see upgrade). */
+  private deployed: number | null = null;
   protected get table(): TableSchema<DocV2> {
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_schema (version INTEGER NOT NULL)");
-    const version = this.ctx.storage.sql.exec<{ version: number }>("SELECT version FROM test_schema").toArray()[0]?.version ?? 1;
-    return (version === 2 ? docsV2 : docs) as TableSchema<DocV2>;
+    this.deployed ??= deployedVersion(this.ctx.storage);
+    return (this.deployed === 2 ? docsV2 : docs) as TableSchema<DocV2>;
   }
   protected nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.EVOLVING as never;

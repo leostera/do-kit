@@ -78,6 +78,8 @@ for (const statement of MIGRATION_STATEMENTS) {
 test("a new count group is counted in bounded steps: no call reads more than a few build pages", async () => {
   const name = `count-group-steps-${unique()}`;
   const rows = docs(3_000);
+  // Calls only: the alarm's steps would land between two calls' and be counted with them.
+  await post("/object", { cls: "evolving", name, bits: "", method: "pauseAlarmBuilds", args: [true] });
   await seedAndUpgrade("evolving", name, rows);
   await table("evolving", name, "rowsRead", "");
   // The first call after the deploy, and each after it: each does at most a step of the work.
@@ -95,6 +97,7 @@ test("a new local index is built in bounded steps: no call reads more than a few
   // One step at a time, as calls that each get "not ready" would take them: a client call retries
   // until the build is done, so it would measure the whole build.
   const rows = docs(3_000);
+  await post("/object", { cls: "evolving", name, bits: "", method: "pauseAlarmBuilds", args: [true] });
   await seedAndUpgrade("evolving", name, rows);
   const step = () => post<boolean>("/object", { cls: "evolving", name, bits: "", method: "migrateOnce", args: [] });
   await step(); // the count groups, measured above

@@ -4,7 +4,7 @@
 import { keyHash, sharded } from "../sharded/index.js";
 import type { Untyped } from "../table/client.js";
 import { ShardedTable } from "../table/index.js";
-import type { RowShape, WriteResult } from "../table/schema.js";
+import type { RowShape, Versioned, WriteResult } from "../table/schema.js";
 import { addressKey, entriesOf, entryOf, globalIndexes, indexIdOfRoute, indexNameOfId, routeRangeOf, type GlobalIndexInfo, type ApplyAnswer, type IndexOp, type IndexStatus, type ResolveAnswer, type StoredOp } from "./entries.js";
 
 const OUTBOX = "indexed_outbox";
@@ -328,6 +328,7 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
    * writes still delivering them. Call `super.onAlarm()`.
    */
   protected override async onAlarm(): Promise<void> {
+    await super.onAlarm();
     this.migrate();
     this.wakeAt = null;
     // This shard's own keys only. Entries of keys a split gave away went with the copy, which
@@ -367,6 +368,8 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
     // Built once every page is read and delivered: a page still in the outbox may yet bring back
     // a duplicate, and the last page is read before it is delivered.
     const building = new Set(this.store.exec<{ name: string }>(`SELECT name FROM ${GLOBALS} WHERE done = 0`).toArray().map((r) => r.name));
+    // Rows a rollback's code wrote are refreshed (their entries sent) a step at a time.
+    if (this.rowsToRefresh()) for (const ix of globalIndexes(this.table)) building.add(ix.name);
     const [lo, hi] = this.ownedHashRange();
     for (const { op } of this.store.exec<{ op: string }>(`SELECT op FROM ${OUTBOX} WHERE hash >= ? AND hash <= ? AND op LIKE '%"backfill":true%'`, lo, hi)) {
       const stored = JSON.parse(op) as StoredOp;
@@ -384,7 +387,8 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
   private async backfill(): Promise<boolean> {
     const indexes = new Map(globalIndexes(this.table).map((ix) => [ix.name, ix]));
     for (let page = 0; page < BACKFILL_PAGES; page++) {
-      const next = this.store.exec<{ name: string; after: string | null }>(`SELECT name, after FROM ${GLOBALS} WHERE done = 0 ORDER BY name LIMIT 1`).toArray()[0];
+      // Only indexes this code knows: a rollback's code leaves the others for the newer code.
+      const next = this.store.exec<{ name: string; after: string | null }>(`SELECT name, after FROM ${GLOBALS} WHERE done = 0 ORDER BY name`).toArray().find((r) => indexes.has(r.name));
       if (!next) return false;
       const ix = indexes.get(next.name)!;
       const rows = this.ownedRowsAfter(next.after, BACKFILL_ROWS);
@@ -422,9 +426,16 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
     const seen = recorded
       ? this.store.exec<{ name: string; id: string | null }>(`SELECT name, id FROM ${GLOBALS}`).toArray().map((r) => ({ name: r.name, id: r.id ?? r.name }))
       : fresh ? [] : [...wanted.keys()].map((name) => ({ name, id: name }));
+    this.unknownGlobals = false;
     for (const { name, id } of seen) {
       if (wanted.get(name)?.id === id) {
         wanted.delete(name);
+        continue;
+      }
+      // Code older than the schema that recorded it (a rollback): left alone, and the rows this
+      // code writes are marked, so the newer code sends their entries (see refreshRow).
+      if (this.schemaRollback() && !wanted.has(name)) {
+        this.unknownGlobals = true;
         continue;
       }
       // Dropped, or redefined (built again, as a new one, under another id): its entries are dropped.
@@ -477,6 +488,31 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
    * The copy keeps the outbox entries of its own keys, and delivers them: it has those rows from
    * here on, and a put is sent with its row. The rest are the original's. Call `super.afterClone`.
    */
+  private unknownGlobals = false;
+
+  protected override keepsUnknownSchema(): boolean {
+    return this.unknownGlobals;
+  }
+
+  /** A row a rollback's code wrote: its entries of every global index go in the outbox, as a build's would. */
+  protected override refreshRow(key: string, current: Versioned<Row> | null): void {
+    // Deleted: its entries are left, as a write the index never saw (lookups read the row).
+    if (!current) return;
+    const now = Date.now();
+    for (const ix of globalIndexes(this.table)) {
+      const e = entryOf(this.table, ix, current.row);
+      if (!e) continue;
+      const op: StoredOp = { kind: "put", route: e.route, entry: e.entry, owner: key, version: current.version, token: null, backfill: true };
+      this.refreshed.push(this.store.exec<{ id: number }>(`INSERT INTO ${OUTBOX} (key, hash, op, at) VALUES (?, ?, ?, ?) RETURNING id`, key, keyHash(key), JSON.stringify(op), now).one().id);
+    }
+  }
+  private refreshed: number[] = [];
+
+  protected override afterBuildStep(): void {
+    const ids = this.refreshed.splice(0);
+    if (ids.length > 0) void this.deliver(ids).catch((error) => console.error(JSON.stringify({ event: "index-refresh-delivery-failed", node: this.nodeLabel(), error: String(error) })));
+  }
+
   protected override forgetStorage(): void {
     this.indexMigrated = false;
     this.batch = null;

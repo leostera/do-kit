@@ -96,16 +96,30 @@ const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 81
   counted as UTF-8: a larger one throws `RowTooLarge` and writes nothing.
 
 **Schema changes.** Each shard brings its storage up to the schema the first time it runs code
-of that version. It adds missing columns, creates declared indexes and fills in their keys a page
-at a time, drops indexes no longer declared, and counts new count groups from the rows stored.
-Removing or retyping a column is not supported: add a new one. A cursor is refused once its
-index is redefined.
+of that version, with cheap statements only: it adds missing columns, records the indexes and
+count groups it must build, drops the SQL indexes no longer declared (their key columns stay:
+dropping a column rewrites every row), and records dropped count groups. Removing or retyping a
+column is not supported: add a new one. A cursor is refused once its index is redefined.
 
-A new index over rows that are already there is built at most `indexBuildRows` (10,000) rows a
-call. A shard with more stores how far it got and answers "not ready"; the client retries, and the
-next call goes on from there. So an index over millions of rows is built in slices, each within
-one call's CPU, and the shard serves again once every row is in it. (New count groups are still
-counted in one call.)
+What is proportional to the rows is done in build steps, each one transaction of at most
+`indexBuildRows` (10,000) rows: deleting a dropped group's counts, filling in a new index's keys
+in key order, and counting a new group in key order. Each call takes a step (the call that
+migrates takes none), and so does the alarm, so a shard that gets few calls still finishes. A
+step that fails is rolled back and taken again; it never fails the call. Meanwhile the shard
+serves gets, writes and other listings: only a listing by an index being built, or a count of a
+group being counted, answers "not ready". A write during a count counts its change only for a
+row the count has passed: the count reaches the others with their value then. On a shard with
+no rows, what is new is built at once. The last step of a new index makes its SQL index over
+the whole table, in one statement.
+
+**Versions and rollbacks.** `version` in the schema is a whole number, raised with every change.
+A shard records the highest it ran. Code with a lower one (a rollback, or a deploy halfway)
+leaves the indexes it doesn't know alone, and marks every row it writes. The newer code then
+refreshes the marked rows a step at a time (their index keys, and an IndexedTable's global
+entries), with listings by an index waiting until done, instead of rebuilding. Count groups the
+older code doesn't know are dropped, since its writes would not keep them, and counted again by
+the newer code. Without versions every schema is 0, and each deploy drops what it no longer
+declares.
 
 ### Writes
 
