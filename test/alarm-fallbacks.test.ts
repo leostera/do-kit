@@ -32,8 +32,10 @@ for (const loss of ["dropAlarm", "strandAlarm"] as const) {
     };
     const before = await parentCalls();
     // Only keys of the new shard are called, routed straight to it: none of those calls reaches the parent.
+    // Each gives up waiting before 1 s: a client that waits longer forgets its map (it may be
+    // stale), and its next call would start at the parent.
     for (let i = 0; i < 100 && (await state(name, "1")) !== "shard"; i++) {
-      await table("flaky", name, "try:get", moved[i % moved.length]);
+      await post("/table", { cls: "flaky", name, op: "try:get", args: [moved[i % moved.length]], options: { notReadyWaitMs: 500 } });
       await Bun.sleep(100);
     }
     expect(await state(name, "1")).toBe("shard");
