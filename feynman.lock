@@ -105,6 +105,7 @@
     "src/workgraph/coordinator.ts#WorkGraphCoordinator.alarm": "92abc2d8db26",
     "src/workgraph/coordinator.ts#WorkGraphCoordinator.cleanUpOnce": "6f3842440157",
     "src/workgraph/coordinator.ts#WorkGraphCoordinator.complete": "f4a909954efa",
+    "src/workgraph/coordinator.ts#WorkGraphCoordinator.fail": "a17c0ad62790",
     "src/workgraph/coordinator.ts#WorkGraphCoordinator.graphDelete": "eeda6b96c15e",
     "src/workgraph/coordinator.ts#WorkGraphCoordinator.graphNext": "29d271b011b8",
     "src/workgraph/coordinator.ts#WorkGraphCoordinator.lease": "a1b175a2a516",
