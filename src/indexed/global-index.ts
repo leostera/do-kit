@@ -281,7 +281,7 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
     let last: string | null = request.after;
     let scanned = 0;
     // In statements each read to its end: a page that stops early leaves none open (see readToEnd).
-    for (const found of readToEnd(request.budget, (n) => this.db.exec<{ entry: string; row: string; version: number; _m: number }>(sqlAfter(last), ...params, route, ...(last === null ? [] : [last]), n))) {
+    for (const found of readToEnd(request.budget, (n) => this.db.exec<{ entry: string; row: string; version: number; _m: number }>(sqlAfter(last), ...params, route, ...(last === null ? [] : [last]), n), request.limit)) {
       scanned++;
       last = found.entry;
       if (found._m) {

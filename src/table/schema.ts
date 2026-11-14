@@ -548,14 +548,19 @@ export function redact(error: unknown): string {
 const READ_CHUNK = 64;
 
 /**
- * Up to `limit` rows, read in statements of READ_CHUNK rows, each to its end: `chunk(n)` runs the
- * next one (from the last row its caller saw). SQLite refuses DROP and ALTER TABLE while any
- * statement on the connection is unfinished, and a cursor left part-read stays open until it is
- * collected: a page that stopped early would block every drop and rename of its shard.
+ * Up to `limit` rows, read in statements each read to its end: `chunk(n)` runs the next one (from
+ * the last row its caller saw). SQLite refuses DROP and ALTER TABLE while any statement on the
+ * connection is unfinished, and a cursor left part-read stays open until it is collected: a page
+ * that stopped early would block every drop and rename of its shard.
+ *
+ * The first statement reads `first` rows, what the caller expects to need (a page's limit), and
+ * each after it twice the one before, up to READ_CHUNK: a page of a few rows reads a few rows,
+ * and one whose filter skips rows reads on in larger steps.
  */
-export function* readToEnd<T>(limit: number, chunk: (n: number) => SqlStorageCursor<T & Record<string, SqlStorageValue>>): Generator<T> {
-  for (let read = 0; read < limit; ) {
-    const n = Math.min(READ_CHUNK, limit - read);
+export function* readToEnd<T>(limit: number, chunk: (n: number) => SqlStorageCursor<T & Record<string, SqlStorageValue>>, first = READ_CHUNK): Generator<T> {
+  let size = Math.max(1, Math.min(first, READ_CHUNK));
+  for (let read = 0; read < limit; size = Math.min(READ_CHUNK, size * 2)) {
+    const n = Math.min(size, limit - read);
     const rows = chunk(n).toArray();
     read += rows.length;
     yield* rows;

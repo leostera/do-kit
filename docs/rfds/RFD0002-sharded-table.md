@@ -180,8 +180,11 @@ A page:
    match. That is its last row if it returned its limit, or rows holding 4 MiB of text (it says
    `full`, and the client ends its page there), the last row it scanned if it ran out of budget,
    or the end.
-   A page reads its rows in statements of 64, each read to its end before the next, seeking
-   from the last row seen. SQLite refuses DROP and ALTER TABLE while any statement on the
+   A page reads its rows in statements each read to its end before the next, seeking from the
+   last row seen: the first of the rows the page asks for, each after it twice the one before,
+   up to 64. A shard of a wide table is asked for a few rows a page (50 over 64 shards is 4),
+   and statements of 64 from the start read and copied up to 16 times them, which on the edge
+   tripled a scan's CPU and halved a 64-shard table's listings. SQLite refuses DROP and ALTER TABLE while any statement on the
    connection is unfinished, and a cursor left part-read stays open until it is collected: a
    page that stopped early once blocked its shard's key-table drops, compactions and schema
    changes, the alarm failing on them again and again.

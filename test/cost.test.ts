@@ -34,6 +34,29 @@ test("a put that changes no indexed column writes one row", async () => {
   expect(written).toBe(1);
 }, 30_000);
 
+test("a page reads about the rows it answers, by an index and by the key: not a statement's worth more", async () => {
+  // A shard of a wide table is asked for a few rows a page (50 over 64 shards: 4): a page that
+  // read in statements of a fixed size read, and copied, up to 16 times the rows it answered.
+  const name = `cost-page-${unique()}`;
+  await seed(name, 500);
+  for (const query of [{ index: "byCreated", direction: "desc", limit: 4 }, { limit: 4 }]) {
+    const { read, statements } = await costOf("evolving", name, () => table("evolving", name, "list", query));
+    const pages = statements.filter((s) => /^SELECT (t\.\*|\*), /.test(s.query));
+    expect(pages.length, JSON.stringify(query)).toBe(1);
+    // The rows answered and their lookups (a key table's entry, then its row), and the seek.
+    expect(read, JSON.stringify(query)).toBeLessThanOrEqual(3 * 4 + 2);
+  }
+}, 60_000);
+
+test("a global index's page reads about the entries it answers", async () => {
+  const name = `cost-index-page-${unique()}`;
+  for (let i = 0; i < 200; i += 50) await post("/indexed", { name, op: "putMany", args: [Array.from({ length: 50 }, (_, j) => ({ row: { id: `u${i + j}`, email: `u${i + j}@example.com`, name: `u${i + j}`, team: "core", createdAt: i + j, active: true } }))] });
+  await object("userIndexes", name, "", "statements", "", true);
+  await post("/indexed", { name, op: "list", args: [{ index: "byTeam", partition: ["core"], direction: "desc", limit: 4 }] });
+  const statements = (await object<StatementCost[]>("userIndexes", name, "", "statements", "", true)).filter((s) => !s.query.includes("test_"));
+  expect(statements.reduce((n, s) => n + s.rowsRead, 0)).toBeLessThanOrEqual(2 * 4 + 2);
+}, 60_000);
+
 test("a count reads at most a row after the first, and stays exact through writes and a command that throws", async () => {
   const name = `cost-count-${unique()}`;
   await seed(name, 5_000);

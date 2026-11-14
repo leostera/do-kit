@@ -299,7 +299,7 @@ const MUTANTS: Mutant[] = [
   {
     name: "page-cursor-left-open",
     breaks: "a listing page reads each statement to its end, so a page that stops early blocks no DROP or ALTER TABLE",
-    edits: [{ file: "src/table/schema.ts", find: "    const n = Math.min(READ_CHUNK, limit - read);\n    const rows = chunk(n).toArray();\n    read += rows.length;\n    yield* rows;\n    if (rows.length < n) return;", replace: "    for (const row of chunk(limit)) yield row;\n    return;" }],
+    edits: [{ file: "src/table/schema.ts", find: "    const n = Math.min(size, limit - read);\n    const rows = chunk(n).toArray();\n    read += rows.length;\n    yield* rows;\n    if (rows.length < n) return;", replace: "    for (const row of chunk(limit)) yield row;\n    return;" }],
     test: "test/schema-statements.test.ts",
     pattern: "stops early",
   },
@@ -372,6 +372,27 @@ const MUTANTS: Mutant[] = [
     edits: [{ file: "bench/worker/src/index.ts", find: "      concurrency: input.concurrency,", replace: "      concurrency: Math.max(...lanesFor(input.concurrency, driverCount)) * driverCount," }],
     test: "test/bench-worker.test.ts",
     pattern: "load asked for",
+  },
+  {
+    name: "page-reads-whole-chunks",
+    breaks: "a page reads about the rows it answers, not a statement's worth more",
+    edits: [{ file: "src/table/index.ts", find: "lo, hi, n), request.limit)) {", replace: "lo, hi, n))) {" }],
+    test: "test/cost.test.ts",
+    pattern: "a page reads about",
+  },
+  {
+    name: "index-page-reads-whole-chunks",
+    breaks: "a global index's page reads about the entries it answers",
+    edits: [{ file: "src/indexed/global-index.ts", find: "...(last === null ? [] : [last]), n), request.limit)) {", replace: "...(last === null ? [] : [last]), n))) {" }],
+    test: "test/cost.test.ts",
+    pattern: "global index's page reads",
+  },
+  {
+    name: "read-chunks-not-doubled",
+    breaks: "a read starts with the rows asked for, then doubles them",
+    edits: [{ file: "src/table/schema.ts", find: "size = Math.min(READ_CHUNK, size * 2)", replace: "size = Math.min(READ_CHUNK, size)" }],
+    test: "test/schema.test.ts",
+    pattern: "then doubles them",
   },
 ];
 

@@ -1,7 +1,7 @@
 // A sharded table's schema helpers: column values checked against their type (never silently
 // changed into something else), and what a listing cursor belongs to.
 import { expect, test } from "bun:test";
-import { assertRowFits, defineTable, encodeValue, queryFingerprint, rowBytes } from "../src/table/schema.ts";
+import { assertRowFits, defineTable, encodeValue, queryFingerprint, readToEnd, rowBytes } from "../src/table/schema.ts";
 
 const schema = defineTable<{ id: string; n: number; x: number; ok: boolean; data: unknown }>({
   primaryKey: "id",
@@ -73,4 +73,20 @@ test("a row well under maxRowBytes is checked without encoding its text", () => 
   } finally {
     TextEncoder.prototype.encode = encode;
   }
+});
+
+// ---- Reading to the end ----
+
+test("a read starts with a statement of the rows asked for, then doubles them, and reads each to its end", () => {
+  const sizes: number[] = [];
+  const rows = (n: number) => {
+    sizes.push(n);
+    return { toArray: () => Array.from({ length: n }, (_, i) => ({ i })) } as unknown as SqlStorageCursor<{ i: number }>;
+  };
+  expect([...readToEnd(1_000, rows, 4)].length).toBe(1_000);
+  expect(sizes.slice(0, 6)).toEqual([4, 8, 16, 32, 64, 64]);
+  sizes.length = 0;
+  // No first size: statements of the most rows one reads.
+  [...readToEnd(100, rows)];
+  expect(sizes).toEqual([64, 36]);
 });

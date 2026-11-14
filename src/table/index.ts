@@ -533,7 +533,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     let last: string | null = request.after;
     let scanned = 0;
     let bytes = 0;
-    for (const found of readToEnd(request.budget, (n) => this.db.exec<Record<string, SqlValue>>(sqlAfter(last), ...params, ...(last === null ? [] : [last]), lo, hi, n))) {
+    for (const found of readToEnd(request.budget, (n) => this.db.exec<Record<string, SqlValue>>(sqlAfter(last), ...params, ...(last === null ? [] : [last]), lo, hi, n), request.limit)) {
       scanned++;
       last = found._pos as string;
       if (found._m) {
