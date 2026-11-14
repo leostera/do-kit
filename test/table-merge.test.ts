@@ -14,7 +14,7 @@ test("a page that stops at a row whose key is the empty string has more to come"
 
 test("a walk in shard order goes from a shard to the node right after it, by its bits alone, and wraps around to its start", () => {
   type At = Parameters<typeof nextShard>[0];
-  const at = (leaf: string, rest: Partial<At> = {}): At => ({ leaf, after: "p", floor: null, start: "", wrapped: false, ...rest });
+  const at = (leaf: string, rest: Partial<At> = {}): At => ({ leaf, after: "p", floors: [], start: "", wrapped: false, ...rest });
   // The sibling of the nearest left half: whatever the client's map knows of the tree.
   expect(nextShard(at("0101", { start: "0100" }))).toEqual(at("011", { after: null, start: "0100" }));
   expect(nextShard(at("0111", { start: "0100" }))).toEqual(at("1", { after: null, start: "0100" }));
@@ -26,7 +26,12 @@ test("a walk in shard order goes from a shard to the node right after it, by its
   expect(nextShard(at("1", { start: "0" }))).toEqual(at("", { after: null, start: "0", wrapped: true }));
   expect(nextShard(at("", { start: "" }))).toBeNull();
   // A shard that split partway: its other shards go on from where it was; past it, from the start.
-  const floor = { bits: "01", after: "p" };
-  expect(nextShard(at("010", { after: "q", floor, start: "01" }))).toEqual(at("011", { after: "p", floor, start: "01" }));
-  expect(nextShard(at("011", { after: "q", floor, start: "01" }))).toEqual(at("1", { after: null, start: "01" }));
+  const floors = [{ bits: "01", after: "p" }];
+  expect(nextShard(at("010", { after: "q", floors, start: "01" }))).toEqual(at("011", { after: "p", floors, start: "01" }));
+  expect(nextShard(at("011", { after: "q", floors, start: "01" }))).toEqual(at("1", { after: null, start: "01" }));
+  // A shard that split again under a floor: its second half starts from the nearer, later floor;
+  // past it, the outer floor's other half from the outer floor.
+  const nested = [{ bits: "", after: "c" }, { bits: "0", after: "k" }];
+  expect(nextShard(at("00", { after: "z", floors: nested }))).toEqual(at("01", { after: "k", floors: nested }));
+  expect(nextShard(at("01", { after: "z", floors: nested }))).toEqual(at("1", { after: "c", floors: [nested[0]!] }));
 });

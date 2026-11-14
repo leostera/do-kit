@@ -54,7 +54,7 @@ const SHARD_CALLS_PER_PAGE = 3;
 /** A walk in shard order that has not begun, from one of these shards picked at random. */
 function fromAnyShard(leaves: readonly string[]): ShardCursor {
   const start = leaves[Math.floor(Math.random() * leaves.length)]!;
-  return { leaf: start, after: null, floor: null, start, wrapped: false };
+  return { leaf: start, after: null, floors: [], start, wrapped: false };
 }
 
 
@@ -197,7 +197,7 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
         // A walk not yet begun starts at any of its shards.
         if (!at.wrapped && at.leaf === at.start && at.after === null) at = fromAnyShard(answer.split);
         // Otherwise the shard split since: its shards, in order, each from where it was.
-        else at = { ...at, leaf: answer.split[0]!, floor: at.floor ?? (at.after === null ? null : { bits: at.leaf, after: at.after }) };
+        else at = { ...at, leaf: answer.split[0]!, floors: at.after === null ? at.floors : [...at.floors, { bits: at.leaf, after: at.after }] };
         // Wrapped around to the root, which has split down to the start: done.
         if (at.wrapped && at.leaf.startsWith(at.start)) at = null;
         continue;

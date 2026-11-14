@@ -61,8 +61,10 @@ other (the query fingerprint includes it).
 The cursor holds where the walk is, and where it began:
 - `leaf`: the shard being listed, as its bits;
 - `after`: the position of the last row listed from it, or null for its start;
-- `floor`: set when `leaf`'s shard split partway through it, `{ bits, after }`: every shard under
-  `bits` is listed from after `after`;
+- `floors`: one `{ bits, after }` per shard that split partway through the walk: every shard
+  under `bits` is listed from after `after`, the nearest floor's when several are over it. A
+  shard that splits again under a floor gets a floor of its own, further on: with one floor, its
+  second half would start from the first split's position and list rows twice;
 - `start` and `wrapped`: the node the walk began at, and whether it has gone past the last shard
   back to the first.
 
@@ -74,7 +76,7 @@ shard and otherwise answers the shards it split into, and `knownLeaves()`.
 A page:
 1. Asks the cursor's shard for up to `limit` rows after `after` (`tablePage`, as a page in query
    order asks each shard). A shard lists only rows it owns, as in RFD0002.
-2. If the shard has split since, its first half takes over, from the same position (`floor`
+2. If the shard has split since, its first half takes over, from the same position (a floor
    remembers it for the other half). A walk that has not listed anything yet instead starts at a
    random one of the halves.
 3. If the shard has more, the cursor moves to its frontier. If it has run out, the walk moves to
@@ -91,7 +93,8 @@ otherwise end the walk early.
 
 - **Every row once.** A row is owned by one shard at a time. Positions are per row, and a split's
   new shard holds its rows at their positions. So a shard that splits after its rows up to `p` were
-  listed has, between its halves, exactly the rows after `p` left to list, which the floor lists.
+  listed has, between its halves, exactly the rows after `p` left to list, which its floor lists.
+  `specs/shard-walk.ts` checks this through a split under a split: the rule `floorPerSubtree`.
   The walk visits each node of the tree's cyclic order once, from `start` back to it.
 - **Order within a shard.** Each shard's rows come in the query's order, so a walk goes back in
   that order at most once per shard.

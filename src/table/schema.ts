@@ -349,18 +349,27 @@ export function encodeCursor(fingerprint: string, position: Position): string {
 }
 
 /**
- * Where a listing in shard order is: in shard `leaf`, after `after`; every shard under `floor.bits`
- * from after `floor.after`. A walk starts at the node `start`, goes to the last shard, wraps around
+ * Where a listing in shard order is: in shard `leaf`, after `after`; every shard under a floor's
+ * `bits` from after its `after` (the nearest floor's, when several are over it). A walk starts at the node `start`, goes to the last shard, wraps around
  * (`wrapped`) to the first, and ends when it is back under `start`: walks that start together
  * spread over the shards instead of all asking the first one.
  */
 export interface ShardCursor {
   readonly leaf: string;
   readonly after: Position | null;
-  /** Set once a shard split partway through it: its shards go on from where it was. */
-  readonly floor: { readonly bits: string; readonly after: Position | null } | null;
+  /**
+   * One per shard that split partway through the walk, outermost first: that shard's shards go on
+   * from where the walk was in it. A shard that splits again under a floor gets a floor of its own,
+   * further on: one floor alone would send its second half back to the first split's position.
+   */
+  readonly floors: readonly ShardFloor[];
   readonly start: string;
   readonly wrapped: boolean;
+}
+
+export interface ShardFloor {
+  readonly bits: string;
+  readonly after: Position;
 }
 
 export function encodeShardCursor(fingerprint: string, at: ShardCursor): string {
@@ -374,20 +383,23 @@ export function decodeShardCursor(cursor: string, fingerprint: string): ShardCur
   } catch {
     throw new Error("not a cursor of this table");
   }
-  const { f, s } = (parsed ?? {}) as { f?: unknown; s?: Partial<ShardCursor> };
+  const { f, s } = (parsed ?? {}) as { f?: unknown; s?: Partial<ShardCursor> & { floor?: ShardFloor | null } };
   if (f !== fingerprint) throw new Error("the cursor belongs to another query (index, direction, conditions or order)");
   const bits = (b: unknown) => typeof b === "string" && /^[01]*$/.test(b);
   const position = (p: unknown) => p === null || typeof p === "string";
-  if (!s || !bits(s.leaf) || !position(s.after) || !bits(s.start) || typeof s.wrapped !== "boolean" || !(s.floor === null || (s.floor !== undefined && bits(s.floor.bits) && position(s.floor.after)))) throw new Error("not a cursor of this table");
-  return s as ShardCursor;
+  const floor = (x: unknown) => typeof x === "object" && x !== null && bits((x as ShardFloor).bits) && typeof (x as ShardFloor).after === "string";
+  // A cursor from before floors were kept per shard has one `floor`, or none.
+  const floors = s?.floors ?? (s?.floor ? [s.floor] : []);
+  if (!s || !bits(s.leaf) || !position(s.after) || !bits(s.start) || typeof s.wrapped !== "boolean" || !Array.isArray(floors) || !floors.every(floor)) throw new Error("not a cursor of this table");
+  return { leaf: s.leaf!, after: s.after!, floors, start: s.start!, wrapped: s.wrapped };
 }
 
 /**
  * Where a walk in shard order goes once shard `at.leaf` is done: the node right after its subtree
  * (the sibling of its nearest ancestor-or-self that is a left half), which exists since splits make
  * both halves; after the last shard, the root (its first shard, once asked), unless the walk
- * already wrapped. From that node's start, or from the floor's position if it is under the shard
- * that split. Null once the walk is back under its start: done. Found from the bits alone, not the
+ * already wrapped. From that node's start, or from the nearest floor's position if it is under a
+ * shard that split. Null once the walk is back under its start: done. Found from the bits alone, not the
  * client's map of splits, which may know less than the cursor does.
  */
 export function nextShard(at: ShardCursor): ShardCursor | null {
@@ -396,8 +408,9 @@ export function nextShard(at: ShardCursor): ShardCursor | null {
   const next = left < 0 ? "" : `${at.leaf.slice(0, left)}1`;
   const wrapped = at.wrapped || left < 0;
   if (wrapped && next.startsWith(at.start)) return null;
-  const floor = at.floor !== null && next.startsWith(at.floor.bits) ? at.floor : null;
-  return { ...at, leaf: next, after: floor?.after ?? null, floor, wrapped };
+  // The floors over `next`; the walk never comes back under the others. The nearest is the last.
+  const floors = at.floors.filter((f) => next.startsWith(f.bits));
+  return { ...at, leaf: next, after: floors.at(-1)?.after ?? null, floors, wrapped };
 }
 
 export function decodeCursor(cursor: string, fingerprint: string): Position {

@@ -83,7 +83,7 @@ test("a shard-order walk goes on past pages over only empty shards, and finds th
   const query = { order: "shard", limit: 5, budget: 5 };
   const any = await table<Page>(name, "list", query);
   const { f } = JSON.parse(Buffer.from(any.cursor!, "base64url").toString()) as { f: string };
-  let cursor: string | null = encodeShardCursor(f, { leaf: "001", after: null, floor: null, start: "001", wrapped: false });
+  let cursor: string | null = encodeShardCursor(f, { leaf: "001", after: null, floors: [], start: "001", wrapped: false });
   const first = await table<Page>(name, "list", { ...query, cursor });
   expect(first.rows).toEqual([]);
   expect(first.cursor).not.toBeNull();
