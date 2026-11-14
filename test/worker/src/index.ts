@@ -110,6 +110,13 @@ export class Docs extends ShardedTable<Env, Doc> {
 
   protected override commands = docCommands;
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 1e9, windowSeconds: 2, maxDepth: 6, holdWaitMs: 0 };
+  async sqlRun(statements: readonly { query: string; bindings?: readonly unknown[] }[]): Promise<unknown[][]> {
+    return sqlRun(this.ctx.storage, statements);
+  }
+  /** When this object's alarm is set for (null: none). */
+  async alarmAt(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
   /** Tests hold cleanup back, to list while shards still store rows they gave away. */
   protected override cleanupForeign(owns: (key: string) => boolean, limit: number): number {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_flags (paused INTEGER NOT NULL)");
@@ -332,6 +339,22 @@ function savePolicyOverride(storage: DurableObjectStorage, change: Record<string
   storage.sql.exec("INSERT INTO test_policy (policy) VALUES (?)", JSON.stringify(merged));
 }
 
+/** Plain SQL statements on `storage`: the rows of each. For references, ANALYZE, and corrupting state on purpose. */
+function sqlRun(storage: DurableObjectStorage, statements: readonly { query: string; bindings?: readonly unknown[] }[]): unknown[][] {
+  return statements.map(({ query, bindings }) => storage.sql.exec(query, ...((bindings ?? []) as never[])).toArray());
+}
+
+/** Counts `storage`'s setAlarm calls from now on. */
+function countSetAlarm(storage: DurableObjectStorage): { sets: number } {
+  const count = { sets: 0 };
+  const set = storage.setAlarm.bind(storage);
+  storage.setAlarm = ((time: number | Date, options?: DurableObjectSetAlarmOptions) => {
+    count.sets++;
+    return set(time, options);
+  }) as typeof storage.setAlarm;
+  return count;
+}
+
 /** The next SQL statement on `storage` containing `text` throws, once, as a storage error would. */
 function failStatementOnce(storage: DurableObjectStorage, text: string): void {
   const sql = storage.sql;
@@ -374,6 +397,13 @@ function assertApplyAllowed(storage: DurableObjectStorage): void {
 export class Users extends IndexedTable<Env, User> {
   protected table = users;
   private readonly log = new StatementLog(this.ctx.storage);
+  private readonly alarms = countSetAlarm(this.ctx.storage);
+  /** setAlarm calls of this instance since the last reset. */
+  async alarmSets(reset: boolean): Promise<number> {
+    const n = this.alarms.sets;
+    if (reset) this.alarms.sets = 0;
+    return n;
+  }
   /** The statements this instance ran whose text contains `filter`, since the last reset. */
   async statements(filter: string, reset: boolean): Promise<StatementCost[]> {
     return this.log.report(filter, reset);
@@ -556,6 +586,9 @@ export class EvolvingDocs extends ShardedTable<Env, DocV2> {
   /** A new index is built over a few hundred rows a call, so tests see it take several. */
   protected override indexBuildRows = 300;
   protected override commands = docCommands as never;
+  async sqlRun(statements: readonly { query: string; bindings?: readonly unknown[] }[]): Promise<unknown[][]> {
+    return sqlRun(this.ctx.storage, statements);
+  }
   private readonly log: StatementLog;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -788,8 +821,32 @@ class CounterBase extends ShardedObject<Env, number> {
    * this way is a reference (a plain SQLite Durable Object), never a shard.
    */
   async sqlRun(statements: readonly { query: string; bindings?: readonly unknown[] }[]): Promise<unknown[][]> {
-    return statements.map(({ query, bindings }) => this.ctx.storage.sql.exec(query, ...((bindings ?? []) as never[])).toArray());
+    return sqlRun(this.ctx.storage, statements);
   }
+  /** When this object's alarm is set for (null: none). */
+  async alarmAt(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
+  /** Rows each alarm run here deleted (a split's cleanup), in order: those that deleted any. */
+  private readonly deletedByAlarm: number[] = [];
+  async cleanupPerAlarm(): Promise<number[]> {
+    return this.deletedByAlarm;
+  }
+  // Wrapped on the instance (the class may not override alarm): what each run deleted.
+  private readonly countsAlarmDeletes = (() => {
+    const alarm = this.alarm.bind(this);
+    const stored = () => (this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'sharded_rows'").one().n ? this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_rows").one().n : 0);
+    this.alarm = async (...args: Parameters<typeof alarm>) => {
+      const before = stored();
+      try {
+        await alarm(...args);
+      } finally {
+        const deleted = before - stored();
+        if (deleted > 0) this.deletedByAlarm.push(deleted);
+      }
+    };
+    return true;
+  })();
   /** How many rows allRows() returns here (it loads them all). */
   async allRowsCount(): Promise<number> {
     return this.allRows().size;
