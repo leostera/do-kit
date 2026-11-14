@@ -219,6 +219,29 @@ function losingCoordinateAnswers<T extends Rpc.DurableObjectBranded>(ns: Durable
   });
 }
 
+/** Timers set and not fired or cleared yet, in this isolate: to count what a split's held writes cost. */
+const liveTimers = new Set<unknown>();
+{
+  const set = globalThis.setTimeout;
+  const clear = globalThis.clearTimeout;
+  globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+    const id: unknown = set(
+      (...a: unknown[]) => {
+        liveTimers.delete(id);
+        fn(...a);
+      },
+      ms,
+      ...rest,
+    );
+    liveTimers.add(id);
+    return id;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id: unknown) => {
+    liveTimers.delete(id);
+    clear(id as never);
+  }) as typeof clearTimeout;
+}
+
 /** A statement an object ran: its text, its bindings, and what its cursor read and wrote. */
 export interface StatementCost {
   readonly query: string;
@@ -358,6 +381,32 @@ export class Users extends IndexedTable<Env, User> {
   async outboxKeys(): Promise<{ key: string; owned: boolean }[]> {
     return this.ctx.storage.sql.exec<{ key: string }>("SELECT DISTINCT key FROM indexed_outbox ORDER BY key").toArray().map(({ key }) => ({ key, owned: this.owns(key) }));
   }
+  /** While set, this subclass's onAlarm throws before it calls super (app code that fails). */
+  async throwOnAlarm(on: boolean): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_throw_alarm (x INTEGER)");
+    this.ctx.storage.sql.exec("DELETE FROM test_throw_alarm");
+    if (on) this.ctx.storage.sql.exec("INSERT INTO test_throw_alarm (x) VALUES (1)");
+  }
+  /** Index changes each alarm delivered, in order (this instance's). */
+  private delivered: number[] = [];
+  async deliveredPerAlarm(): Promise<number[]> {
+    return this.delivered;
+  }
+  protected override async onAlarm(): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_throw_alarm (x INTEGER)");
+    if (this.ctx.storage.sql.exec("SELECT x FROM test_throw_alarm").toArray().length) throw new Error("test: the app's onAlarm failed");
+    const size = () => (this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'indexed_outbox'").one().n ? this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM indexed_outbox").one().n : 0);
+    const before = size();
+    try {
+      await super.onAlarm();
+    } finally {
+      this.delivered.push(before - size());
+    }
+  }
+  /** Ends this instance: what it kept in memory (sends in flight, retries) is gone. */
+  async restart(): Promise<void> {
+    this.ctx.abort("test: restart");
+  }
   /** Index changes not delivered yet, on this object (owned or not). */
   async outboxSize(): Promise<number> {
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM indexed_outbox").one().n;
@@ -408,7 +457,16 @@ export class UserIndexes extends GlobalIndex<Env> {
   async failApply(fail: boolean): Promise<void> {
     setFailApply(this.ctx.storage, fail);
   }
+  /** The next `n` deliveries to this instance never answer (an index shard that hangs). */
+  private hangs = 0;
+  async hangApplies(n: number): Promise<void> {
+    this.hangs = n;
+  }
   override async indexApply(...args: Parameters<GlobalIndex<Env>["indexApply"]>): ReturnType<GlobalIndex<Env>["indexApply"]> {
+    if (this.hangs > 0) {
+      this.hangs--;
+      return new Promise(() => {});
+    }
     assertApplyAllowed(this.ctx.storage);
     return super.indexApply(...args);
   }
@@ -602,7 +660,20 @@ export class FlakyDocs extends EvolvingDocs {
       return `refused: ${String(error)}`;
     }
   }
+  /** onAlarm runs this instance made, and whether they throw. */
+  private alarmRuns = 0;
+  async onAlarmRuns(): Promise<number> {
+    return this.alarmRuns;
+  }
+  async failOnAlarm(on: boolean): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_fail_alarm (x INTEGER)");
+    this.ctx.storage.sql.exec("DELETE FROM test_fail_alarm");
+    if (on) this.ctx.storage.sql.exec("INSERT INTO test_fail_alarm (x) VALUES (1)");
+  }
   protected override async onAlarm(): Promise<void> {
+    this.alarmRuns++;
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_fail_alarm (x INTEGER)");
+    if (this.ctx.storage.sql.exec("SELECT x FROM test_fail_alarm").toArray().length) throw new Error("test: onAlarm failed");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_crash (n INTEGER NOT NULL)");
     if (this.ctx.storage.sql.exec("SELECT n FROM test_crash").toArray().length) {
       this.ctx.storage.sql.exec("DELETE FROM test_crash");
@@ -623,7 +694,13 @@ export class FlakyDocs extends EvolvingDocs {
     this.ctx.storage.sql.exec("DELETE FROM test_activate");
     this.ctx.storage.sql.exec("INSERT INTO test_activate (fail) VALUES (?)", fail ? 1 : 0);
   }
+  /** Activations this instance was asked for. */
+  private activations = 0;
+  async activationAttempts(): Promise<number> {
+    return this.activations;
+  }
   override async shardedActivate(name: string, bits: string, epoch: number): Promise<boolean> {
+    this.activations++;
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_activate (fail INTEGER NOT NULL)");
     if (this.ctx.storage.sql.exec("SELECT fail FROM test_activate WHERE fail = 1").toArray().length) throw new Error("test: activation failed");
     return super.shardedActivate(name, bits, epoch);
@@ -655,6 +732,33 @@ class CounterBase extends ShardedObject<Env, number> {
     return this.batches;
   }
 
+  /** Timers live in this isolate now. */
+  async liveTimers(): Promise<number> {
+    return liveTimers.size;
+  }
+  /** Inserts `n` atomic outcomes recorded at `at` (as old calls' would be). */
+  async seedOutcomes(n: number, at: number): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS sharded_atomic_outcomes (tx TEXT PRIMARY KEY, outcome TEXT NOT NULL, at INTEGER NOT NULL)");
+    for (let i = 0; i < n; i++) this.ctx.storage.sql.exec("INSERT OR REPLACE INTO sharded_atomic_outcomes (tx, outcome, at) VALUES (?, 'abort', ?)", `seed-${i}`, at);
+  }
+  async outcomeCount(): Promise<number> {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'sharded_atomic_outcomes'").one().n ? this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sharded_atomic_outcomes").one().n : 0;
+  }
+  /** Runs this shard's alarm now. */
+  async alarmNow(): Promise<void> {
+    await this.alarm();
+  }
+  /** The next getAlarm() ends the instance, as an eviction there would. */
+  async abortOnNextGetAlarm(): Promise<void> {
+    const storage = this.ctx.storage;
+    const getAlarm = storage.getAlarm.bind(storage);
+    storage.getAlarm = (async (options?: DurableObjectGetAlarmOptions) => {
+      storage.getAlarm = getAlarm;
+      await storage.sync(); // what was written so far is durable, as it would be by then
+      this.ctx.abort("test: evicted at getAlarm");
+      return getAlarm(options);
+    }) as typeof storage.getAlarm;
+  }
   /** Stores text values (the class's values are numbers; the base table takes any JSON). */
   async putText(keys: readonly string[], payloads: readonly string[]): Promise<null[]> {
     return this.update(keys, () => ({ writes: new Map(keys.map((k, i) => [k, payloads[i] as unknown as number])), result: keys.map(() => null) }));
@@ -726,6 +830,11 @@ class CounterBase extends ShardedObject<Env, number> {
   /** The stub options this shard would make its stubs with now (see `stubOptions`). */
   async seenStubOptions(keys: readonly string[], _payloads: null): Promise<unknown[]> {
     return keys.map(() => this.stubOptions());
+  }
+
+  /** As failNextStatement, called on the object (not routed: no call checks its alarm on the way). */
+  async failStatementOnce(text: string): Promise<void> {
+    failStatementOnce(this.ctx.storage, text);
   }
 
   /** The next SQL statement here containing `payloads[0]` throws, once, as a storage error would. */
@@ -1218,7 +1327,8 @@ export default {
           // A call, and what its error says if it throws: which shards' answers it still carries.
           const hint = (body as { presplitHint?: number }).presplitHint;
           try {
-            return Response.json({ ok: await sharded(ns, body.name, hint === undefined ? {} : { presplitHint: hint }).call(body.keys, body.method as "get", (body.payloads ?? null) as null) });
+            const clientOptions = (body as { clientOptions?: object }).clientOptions ?? {};
+            return Response.json({ ok: await sharded(ns, body.name, { ...(hint === undefined ? {} : { presplitHint: hint }), ...clientOptions }).call(body.keys, body.method as "get", (body.payloads ?? null) as null) });
           } catch (error) {
             return Response.json(outcomeOf(error));
           }

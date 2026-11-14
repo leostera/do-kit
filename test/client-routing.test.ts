@@ -117,3 +117,12 @@ test("describeTree makes its stubs with the client's stub options", async () => 
   expect(tree.stubOptions.length).toBeGreaterThan(0);
   expect(tree.stubOptions.every((o) => o !== null)).toBe(true);
 });
+
+test("a call to a shard that never answers throws OutcomeUnknown after callTimeoutMs, naming its shard and keys", async () => {
+  const tree = fakeTree([""], () => new Promise<Answer>(() => {}));
+  const client = sharded(tree.namespace, `hung-${unique()}`, { callTimeoutMs: 50 } as never) as unknown as Calls;
+  const started = Date.now();
+  const error = (await Promise.race([client.call(["a"], "get", null).then(() => null, (e: Error) => e), Bun.sleep(1_000).then(() => "still waiting")])) as (Error & { bits?: string; keys?: string[] }) | string | null;
+  expect(typeof error === "object" && error !== null ? { name: error.name, bits: error.bits, keys: error.keys } : error).toEqual({ name: "OutcomeUnknown", bits: "", keys: ["a"] });
+  expect(Date.now() - started).toBeLessThan(500);
+});
