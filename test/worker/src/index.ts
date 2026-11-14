@@ -126,10 +126,27 @@ export class Docs extends ShardedTable<Env, Doc> {
 /** Git refs that can conflict (refs/heads/a and refs/heads/a/b) share their first 3 components. */
 export const refRoute = (key: string): string => key.split("/").slice(0, 3).join("/");
 
+/** A later deploy's routeOf: by the first 2 components, so refs/heads/a and refs/heads/b share a route. */
+export const refRouteV2 = (key: string): string => key.split("/").slice(0, 2).join("/");
+
 /** Docs routed like refs: every doc under refs/x/y lives in one shard. */
 export class RoutedDocs extends Docs {
+  /** Which deploy's routeOf this instance runs: 1, or 2 once `deployRoute` restarted it on it. */
+  private readonly routeVersion: number;
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_route (version INTEGER NOT NULL)");
+    this.routeVersion = ctx.storage.sql.exec<{ version: number }>("SELECT version FROM test_route").toArray()[0]?.version ?? 1;
+  }
   protected override routeOf(key: string): string {
-    return refRoute(key);
+    return this.routeVersion === 2 ? refRouteV2(key) : refRoute(key);
+  }
+  /** A deploy that changes routeOf: this shard restarts running `version`'s. */
+  async deployRoute(version: number): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM test_route");
+    this.ctx.storage.sql.exec("INSERT INTO test_route (version) VALUES (?)", version);
+    await this.ctx.storage.sync();
+    this.ctx.abort("test: deployed another routeOf");
   }
   protected override nodes(): DurableObjectNamespace<ShardedObject<Env, never>> {
     return this.env.ROUTED_DOCS as never;
@@ -949,7 +966,13 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
 async function tableOp(env: Env, body: { cls: string; name: string; op: string; args: unknown[] }): Promise<unknown> {
   // "try:<op>": the op, and what its error says if it throws.
   if (body.op.startsWith("try:")) return tableOp(env, { ...body, op: body.op.slice(4) }).then((ok) => ({ ok }), outcomeOf);
-  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, { ...(body.cls === "routedTable" ? { routeOf: refRoute } : {}), commands: docCommands as never }) as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const route = (body as { route?: number }).route === 2 ? refRouteV2 : refRoute;
+  if (body.op === "deployRoute") { // [version, bits]: of a routedTable shard
+    const ns = env.ROUTED_DOCS as unknown as DurableObjectNamespace<RoutedDocs>;
+    await ns.get(ns.idFromName(shardObjectName(body.name, (body.args[1] as string) ?? ""))).deployRoute(body.args[0] as number).catch(() => {});
+    return null;
+  }
+  const t = table(namespace(env, body.cls) as never, body.name, (body.cls === "evolving" || body.cls === "flaky" ? docsV2 : docs) as never, { ...(body.cls === "routedTable" ? { routeOf: route } : {}), commands: docCommands as never }) as unknown as Record<string, (...a: unknown[]) => unknown>;
   if (body.op === "all") {
     const rows: unknown[] = [];
     for await (const row of (t.all as (q: ListQuery) => AsyncGenerator<unknown>).call(t, body.args[0] as ListQuery)) rows.push(row);
