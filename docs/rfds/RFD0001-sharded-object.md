@@ -89,17 +89,40 @@ the write against splits (see Invariants).
   router.
 - The client keeps the set of prefixes it knows have split, per object and isolate, for at most
   10,000 objects (`MAX_KNOWN_OBJECTS`). It shares them in the colo through the Cache API. To route
-  a key, it walks down its known splits to the deepest known shard.
+  a key, it walks down its known splits to the deepest known shard. Splits are final, so a save
+  writes the union of what the isolate and the colo know, and forgetting deletes the colo's
+  entry rather than writing an empty one.
 - A shard answers:
   - `ok`: it served the call;
   - `moved`: it split since the caller last knew, and the answer names the deepest split it
     knows of;
-  - `notReady`: a new shard not activated yet, or a write held too long by a split;
+  - `notReady`: a new shard not activated yet, or a write held too long by a split (with
+    `until`, when the split ends at the latest);
   - `stale`: the caller knows splits this storage never had, because the object was deleted
-    and its name reused.
+    and its name reused;
+  - `expired`: the call reached its write past its deadline, and nothing was applied;
+  - `absent`: a scan of a presplit shard that was never called (it holds nothing, and is not
+    made to answer).
 
-  The client learns from `moved` and retries. It backs off on `notReady` with jitter. After 1 s of
-  `notReady`, it forgets the object's splits once and routes from the root.
+  The client learns from `moved` and retries. It backs off on `notReady` with jitter, each shard
+  of a scan on its own. A `notReady` with `until` comes from a shard that exists and is busy, so
+  the client keeps waiting on it. After 1 s of `notReady` without `until`, the client forgets the
+  object's splits once and routes from the root. An answer it does not know (a newer release's)
+  throws `UnknownAnswer` at once.
+- A call over several shards waits for every shard's answer. If one fails, the call throws that
+  shard's error, with `settled` (the answers of the shards that applied their share) and
+  `unknown` (the keys of the shards that failed, which may have applied as well). Keys in
+  neither were not applied. The client does not send a call again after an error, since the
+  method may have run. The exceptions are the runtime's refusal of a stub made in another
+  request, which never sent the call, and `read`, for methods that write nothing, which is sent
+  again once after an error of unknown outcome. `classifyShardError` names an error
+  "overloaded", "unknown" or "app".
+- `callTimeoutMs` bounds a whole call, hops and waits included. Past it the client throws
+  `OutcomeUnknown`, naming the shard and keys. Each call carries a deadline a little before
+  that, and the shard checks it in the same synchronous turn as its transaction. A call that
+  gets there late (held by a split, or queued) answers `expired` and writes nothing. So a call
+  its caller gave up on never applies afterwards.
+- A scan keeps at most 32 shard calls in flight.
 - Shards make stubs of other shards (to split, presplit and activate) in their own
   jurisdiction (`ctx.id.jurisdiction`): an object reached through `namespace.jurisdiction("eu")`
   keeps every shard there. The same name in the plain namespace is another object.

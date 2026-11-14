@@ -44,7 +44,7 @@ type Payload<F> = F extends (keys: never, payloads: infer P, ...args: never[]) =
 type Result<F> = F extends (...args: never[]) => infer R ? Awaited<R> : never;
 
 /** One routed call to one shard, for `route`: a method of the subclass, or a step of an atomic call. */
-type Invoke = (stub: DurableObjectStub<ShardedObject<never, unknown>>, bits: string, keys: readonly string[], payloads: readonly unknown[] | null, hashes: readonly string[]) => Promise<CallAnswer<unknown>>;
+type Invoke = (stub: DurableObjectStub<ShardedObject<never, unknown>>, bits: string, keys: readonly string[], payloads: readonly unknown[] | null, hashes: readonly string[], deadline: number | null) => Promise<CallAnswer<unknown>>;
 /** What resolving an atomic call's shares returned: whether every shard answered, and the results of those that applied. */
 type Resolutions = { all: boolean; results: AtomicShardResult<unknown>[] };
 
@@ -64,6 +64,79 @@ export class RouteMismatch extends Error {
     super(`key ${JSON.stringify(key)}: the client routes it to hash ${clientHash}, the object to ${objectHash}; declare the same routeOf on both`);
     this.name = "RouteMismatch";
   }
+}
+
+/**
+ * A shard answered something this client does not know: the object runs a newer release than
+ * the client, or a bug. An error at once, not a wait: a client that took it for "not ready"
+ * would wait out its whole limit for nothing.
+ */
+export class UnknownAnswer extends Error {
+  constructor(
+    readonly bits: string,
+    readonly answer: unknown,
+  ) {
+    super(`shard ${bits || "root"} answered ${String(JSON.stringify(answer)).slice(0, 200)}, which this client does not know: deploy the objects' release to clients too`);
+    this.name = "UnknownAnswer";
+  }
+}
+
+/**
+ * A shard did not answer within `callTimeoutMs`: its call may have applied or not. The shard
+ * refuses it if it gets to it later, past the call's deadline, so it will not apply then.
+ */
+export class OutcomeUnknown extends Error {
+  constructor(
+    readonly bits: string,
+    readonly keys: readonly string[],
+    readonly ms: number,
+  ) {
+    super(`shard ${bits || "root"} did not answer in ${ms} ms, for ${keys.length} key(s): the outcome is unknown`);
+    this.name = "OutcomeUnknown";
+  }
+}
+
+/** A shard got to a call past its deadline, and refused it: nothing was applied there. */
+export class DeadlineExpired extends Error {
+  constructor(
+    readonly bits: string,
+    readonly keys: readonly string[],
+  ) {
+    super(`shard ${bits || "root"} got to the call past its deadline: not applied`);
+    this.name = "DeadlineExpired";
+  }
+}
+
+/**
+ * What kind of failure a shard call's error is: "overloaded" (the runtime shed it; it did not
+ * run), "unknown" (the connection or the runtime failed: it may have run), or "app" (the method
+ * threw). Reads `overloaded` and `retryable` on the error first, then the runtime's messages,
+ * with or without the `jsg.Error: ` or `Error: ` they come with.
+ */
+export type ShardErrorKind = "overloaded" | "unknown" | "app";
+export function classifyShardError(error: unknown): ShardErrorKind {
+  const e = error as { overloaded?: unknown; retryable?: unknown; message?: unknown } | null;
+  if (e?.overloaded === true) return "overloaded";
+  if (error instanceof OutcomeUnknown) return "unknown";
+  const message = String(e?.message ?? error).replace(/^(jsg\.)?Error: /, "");
+  if (/^Durable Object is overloaded|^too many concurrent storage operations|Too many requests queued/i.test(message)) return "overloaded";
+  if (/^Network connection lost|^internal error; reference =/i.test(message)) return "unknown";
+  if (e?.retryable === true) return "unknown";
+  return "app";
+}
+
+/** The runtime's refusal of a stub made in another request: the call was never sent. */
+const OTHER_REQUEST = /^Cannot perform I\/O on behalf of a different request/;
+
+/**
+ * The failure of a call over several shards: the error of the first shard that failed, with
+ * what every shard did. `settled` holds the answers of the shards that returned (their share
+ * applied); `unknown` the keys of those that failed, which may have applied as well. Attached to
+ * the error itself, so its type and message stay the shard's.
+ */
+export interface CallOutcomes<R> {
+  readonly settled: readonly ShardResult<R>[];
+  readonly unknown: readonly { readonly keys: readonly string[]; readonly positions: readonly number[]; readonly error: string }[];
 }
 
 /** v2: the splits and the presplit depth (v1 entries, splits only, are left to expire). */
@@ -137,7 +210,17 @@ export interface ShardedClientOptions {
    * refused with RouteMismatch.
    */
   readonly routeOf?: (key: string) => string;
+  /**
+   * How long a call waits for a shard's answer before it throws OutcomeUnknown, naming the shard
+   * and its keys. The call carries a deadline a little before that: a shard that gets to it later
+   * (a write held by a split, say) refuses it, so a call given up on never applies afterwards.
+   * Off by default: a call waits as long as its shard takes.
+   */
+  readonly callTimeoutMs?: number;
 }
+
+/** How long before the caller's own timer a call's deadline is (at most half the timeout): the shard's clock may be behind. */
+const DEADLINE_MARGIN_MS = 50;
 /**
  * After waiting this long on shards that are not ready, a call forgets the splits it knows of this
  * object, once, and routes from the root again: an object whose storage was deleted is not ready
@@ -153,6 +236,26 @@ function spread(took: number[]): Record<string, number> {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Calls a scan keeps in flight at most: a scan of a wide tree would otherwise open one per shard at once. */
+const SCAN_IN_FLIGHT = 32;
+
+/** At most `size` tasks at once; the rest wait their turn, in order. */
+class Slots {
+  private busy = 0;
+  private readonly waiting: (() => void)[] = [];
+  constructor(private readonly size: number) {}
+  async run<A>(task: () => Promise<A>): Promise<A> {
+    if (this.busy >= this.size) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    this.busy++;
+    try {
+      return await task();
+    } finally {
+      this.busy--;
+      this.waiting.shift()?.();
+    }
+  }
+}
 
 /** Waits a little longer each time a shard is not ready; throws once that has gone on too long. */
 class Backoff {
@@ -192,6 +295,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   private readonly presplitHint: number;
   private readonly routeOf: ((key: string) => string) | null;
+  private readonly callTimeoutMs: number | null;
   constructor(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}) {
     this.namespace = namespace;
     this.name = name;
@@ -201,6 +305,8 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     this.logShardErrors = options.logShardErrors ?? false;
     this.presplitHint = options.presplitHint ?? 0;
     this.routeOf = options.routeOf ?? null;
+    if (options.callTimeoutMs !== undefined && !(options.callTimeoutMs > 0 && options.callTimeoutMs <= 2 ** 31 - 1)) throw new Error(`sharded ${name}: callTimeoutMs must be a positive number of ms`);
+    this.callTimeoutMs = options.callTimeoutMs ?? null;
     this.identity = objectId(namespace, nodeName(name, "")).text;
   }
 
@@ -266,17 +372,38 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
    * it; if another request uses it, its kept stubs are that first request's and cannot be used, so
    * the call is made again on a stub of this request's (nothing was sent on the other).
    */
-  private async onShard<A>(bits: string, call: (stub: DurableObjectStub<ShardedObject<never, unknown>>) => Promise<A>): Promise<A> {
+  private async onShard<A>(bits: string, keys: readonly string[], call: (stub: DurableObjectStub<ShardedObject<never, unknown>>) => Promise<A>, giveUpAt = this.giveUpAt()): Promise<A> {
     const kept = this.stubs.get(bits);
     const stub = kept ?? this.keep(bits);
     try {
-      return await call(stub);
+      return await this.timed(bits, keys, call(stub), giveUpAt);
     } catch (error) {
       if (this.stubs.get(bits) === stub) this.stubs.delete(bits);
-      if (kept && /different request/i.test(String(error))) return call(this.keep(bits));
-      if (this.logShardErrors) console.error(JSON.stringify({ event: "sharded-shard-error", object: this.name, bits, error: String(error).slice(0, 200) }));
+      // Only the runtime's own refusal, never a method's error that says the same: it may have run.
+      const refused = kept && (error as { remote?: unknown })?.remote !== true && OTHER_REQUEST.test(String((error as Error)?.message ?? ""));
+      if (refused) return this.timed(bits, keys, call(this.keep(bits)), giveUpAt);
+      if (this.logShardErrors) console.error(JSON.stringify({ event: "sharded-shard-error", object: this.name, bits, kind: classifyShardError(error), error: String(error).slice(0, 200) }));
       throw error;
     }
+  }
+
+  /** `answer`, or OutcomeUnknown at `giveUpAt`. */
+  private timed<A>(bits: string, keys: readonly string[], answer: Promise<A>, giveUpAt: number | null): Promise<A> {
+    if (giveUpAt === null) return answer;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new OutcomeUnknown(bits, keys, this.callTimeoutMs!)), Math.max(0, giveUpAt - Date.now()))));
+    return Promise.race([answer, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  /** When a call that starts now is given up on: callTimeoutMs from now, or never. */
+  private giveUpAt(): number | null {
+    return this.callTimeoutMs === null ? null : Date.now() + this.callTimeoutMs;
+  }
+
+  /** The deadline a call given up on at `giveUpAt` carries: a margin before, for the shard's clock. */
+  private deadlineFor(giveUpAt: number | null): number | null {
+    if (giveUpAt === null) return null;
+    return giveUpAt - Math.min(DEADLINE_MARGIN_MS, this.callTimeoutMs! / 2);
   }
   private keep(bits: string): DurableObjectStub<ShardedObject<never, unknown>> {
     const stub = this.stub(bits);
@@ -295,6 +422,15 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   }
 
   /**
+   * Like `call`, for a method that writes nothing: a shard's call that fails with an error of
+   * unknown outcome (a lost connection) is sent again, once. Not one shed as overloaded: sending
+   * it again adds to the load that shed it.
+   */
+  async read<M extends KeyMethods<T>>(keys: readonly string[], method: M, payloads: readonly Payload<T[M]>[] | null, ...args: Rest<T[M]>): Promise<ShardResult<Result<T[M]>>[]> {
+    return this.route<Result<T[M]>>(false, keys, method, payloads, this.method(method, args), true);
+  }
+
+  /**
    * Like `call`, for keys that must be handled together by one shard (an all-or-nothing update):
    * throws SpansShards, before anything is applied, if they belong to more than one.
    */
@@ -306,7 +442,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
 
   /** How `route` calls a shard for a method of the subclass. */
   private method(method: string, args: readonly unknown[]): Invoke {
-    return (stub, bits, keys, payloads, hashes) => stub.shardedCall(this.name, bits, method, keys, payloads, args, this.stubOptions, this.presplitTo, hashes) as Promise<CallAnswer<unknown>>;
+    return (stub, bits, keys, payloads, hashes, deadline) => stub.shardedCall(this.name, bits, method, keys, payloads, args, this.stubOptions, this.presplitTo, hashes, deadline) as Promise<CallAnswer<unknown>>;
   }
 
   /** How `route` calls a shard for a step of an atomic call. */
@@ -362,15 +498,27 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private async atomicAtPrimary<R, A>(keys: readonly string[], method: string, payloads: readonly unknown[] | null, args: readonly unknown[], startedAt: number): Promise<AtomicOutcome<R, A> | "again" | "contended"> {
     const tx = atomicTxId(startedAt);
     const primaryKey = [...keys].sort()[0]!;
+    // Nothing applied: the primary's abort is no longer needed (the coordination resolved every
+    // share before it answered; one it could not tell recovers by asking, and finds no outcome:
+    // an abort is recorded again).
+    const forgetAbort = () => this.atomicTo(primaryKey, { step: "forget", tx }).catch(() => undefined);
     let answer: AtomicAnswer;
     try {
       answer = await this.atomicTo(primaryKey, { step: "coordinate", tx, method, keys, payloads }, args);
     } catch (error) {
-      const outcome = await this.atomicOutcome(tx, primaryKey).catch(() => null);
-      if (outcome === "commit") return { committed: true, results: [] };
+      const found = (await this.atomicTo(primaryKey, { step: "outcome", tx }).catch(() => null)) as { outcome: Outcome; recorded?: true } | null;
+      if (found?.outcome === "commit") return { committed: true, results: [] };
+      // An abort the primary had recorded: nothing applied anywhere. One recorded by this
+      // question may be a commit that every share resolved and the primary then forgot: unknown.
+      if (found?.outcome === "abort" && !found.recorded) {
+        await forgetAbort();
+        return { committed: false, refusals: [] };
+      }
       throw error;
     }
-    return (answer as { coordinated: AtomicOutcome<R, A> | "again" | "contended" }).coordinated;
+    const coordinated = (answer as { coordinated: AtomicOutcome<R, A> | "again" | "contended" }).coordinated;
+    if (coordinated === "again" || coordinated === "contended" || !coordinated.committed) await forgetAbort();
+    return coordinated;
   }
 
   /**
@@ -431,7 +579,9 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       if (outcome === null) throw error;
       const resolved = await this.resolveAll(prepared, tx, outcome);
       log(outcome, { lostCommitAnswer: true });
-      if (outcome === "abort") throw error;
+      // Aborted (by the primary's check, or by this question): nothing applied. Only this
+      // coordination forgets an outcome, so an abort here is not a forgotten commit.
+      if (outcome === "abort") return { committed: false, refusals: [] };
       return { committed: true, results: resolved.results as AtomicShardResult<A>[] };
     }
     if ("contended" in answer) {
@@ -489,7 +639,13 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     return { all, results };
   }
 
-  private async route<R>(oneShard: boolean, keys: readonly string[], method: string, payloads: readonly unknown[] | null, invoke: Invoke): Promise<ShardResult<R>[]> {
+  /**
+   * Calls the shards owning `keys`, routing again what comes back "moved", "stale" or "not
+   * ready". A shard that fails fails the call, once every other shard of that hop answered: the
+   * error carries what each did (CallOutcomes). `idempotent`: a call that writes nothing, sent
+   * again once after an error of unknown outcome.
+   */
+  private async route<R>(oneShard: boolean, keys: readonly string[], method: string, payloads: readonly unknown[] | null, invoke: Invoke, idempotent = false): Promise<ShardResult<R>[]> {
     if (payloads && payloads.length !== keys.length) throw new Error(`sharded ${this.name}: ${payloads.length} payloads for ${keys.length} keys (payloads line up with keys)`);
     await this.loadCache();
     const hashes = keys.map((key) => this.routeHash(key));
@@ -497,9 +653,17 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     let pending = keys.map((_, i) => i);
     const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
     let forgot = false;
+    // One deadline for the whole call, its hops and waits included: a write held by a split
+    // that the caller gave up on must not land once the split is done.
+    const giveUpAt = this.giveUpAt();
+    const deadline = this.deadlineFor(giveUpAt);
+    const failed: { keys: string[]; positions: number[]; error: unknown }[] = [];
     for (let hop = 0; pending.length > 0; hop++) {
       if (hop > MAX_HOPS) throw new Error(`sharded ${this.name}: routing did not settle`);
       let waiting = false;
+      // A shard that said when it will serve exists and is busy (a split holding writes): no
+      // reason to forget the map and ask the root, however long it takes.
+      let held = false;
       let stale = false;
       const groups = new Map<string, number[]>();
       for (const i of pending) {
@@ -512,36 +676,63 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       const hopStarted = Date.now();
       const took: number[] = [];
       const retry: number[] = [];
-      await Promise.all(
+      const settled = await Promise.allSettled(
         [...groups].map(async ([bits, positions]) => {
           const groupKeys = positions.map((i) => keys[i]!);
           const groupPayloads = payloads ? positions.map((i) => payloads[i]) : null;
           const called = Date.now();
           const groupHashes = positions.map((i) => hashes[i]!);
-          const answer = (await this.onShard(bits, (stub) => invoke(stub, bits, groupKeys, groupPayloads, groupHashes))) as CallAnswer<R>;
+          const send = () => this.onShard(bits, groupKeys, (stub) => invoke(stub, bits, groupKeys, groupPayloads, groupHashes, deadline), giveUpAt);
+          let answer: CallAnswer<R>;
+          try {
+            answer = (await send()) as CallAnswer<R>;
+          } catch (error) {
+            if (!idempotent || classifyShardError(error) !== "unknown") throw error;
+            answer = (await send()) as CallAnswer<R>;
+          }
           took.push(Date.now() - called);
           if ("ok" in answer) out.push({ keys: groupKeys, positions, result: answer.ok });
           else if ("routeMismatch" in answer) throw new RouteMismatch(answer.routeMismatch.key, answer.routeMismatch.client, answer.routeMismatch.object);
+          else if ("expired" in answer) throw new DeadlineExpired(bits, groupKeys);
           else if ("moved" in answer) {
             this.learn(answer.moved, answer.presplit);
             retry.push(...positions);
           } else if ("stale" in answer) {
             stale = true;
             retry.push(...positions);
-          } else {
+          } else if ("notReady" in answer) {
             waiting = true; // not serving yet: the same shard, a little later
+            if (answer.until !== undefined) held = true;
             backoff.extend(answer.until);
             retry.push(...positions);
-          }
+          } else throw new UnknownAnswer(bits, answer);
         }),
       );
+      [...groups.values()].forEach((positions, g) => {
+        const result = settled[g]!;
+        if (result.status === "rejected") failed.push({ keys: positions.map((i) => keys[i]!), positions, error: result.reason });
+      });
+      // Nothing was called for a key the client routes differently from the object.
+      const mismatch = failed.find((f) => f.error instanceof RouteMismatch);
+      if (mismatch) throw mismatch.error;
+      if (failed.length > 0) {
+        const error = failed[0]!.error;
+        // Keys in neither list were not applied: answered moved, stale or not ready, not sent again.
+        const outcomes: CallOutcomes<R> = { settled: out, unknown: failed.map((f) => ({ keys: f.keys, positions: f.positions, error: String(f.error).slice(0, 200) })) };
+        if (typeof error === "object" && error !== null) Object.assign(error, outcomes);
+        throw error;
+      }
       // A routed call that fans out wide: how long its hop took, and its slowest shard.
       if (this.logWideHops > 0 && groups.size >= this.logWideHops) console.log(JSON.stringify({ event: "sharded-wide-hop", object: this.name, method: String(method), hop, shards: groups.size, keys: pending.length, ms: Date.now() - hopStarted, ...spread(took), retries: retry.length }));
-      if (stale || (waiting && !forgot && backoff.waited >= FORGET_AFTER_MS)) {
+      if (stale || (waiting && !held && !forgot && backoff.waited >= FORGET_AFTER_MS)) {
         forgot = true;
         this.forget();
       } else if (waiting) {
+        // Out of time: what was held answered "not ready", but a shard that was slow before may
+        // still apply its share, so the outcome is unknown, not "not applied".
+        if (giveUpAt !== null && Date.now() >= giveUpAt) throw new OutcomeUnknown("", retry.map((i) => keys[i]!), this.callTimeoutMs!);
         await backoff.next();
+        if (giveUpAt !== null && Date.now() >= giveUpAt) throw new OutcomeUnknown("", retry.map((i) => keys[i]!), this.callTimeoutMs!);
         hop--;
       }
       pending = retry;
@@ -549,22 +740,28 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     return out;
   }
 
-  /** Calls `method(...args)` on every shard. */
+  /**
+   * Calls `method(...args)` on every shard, at most SCAN_IN_FLIGHT at a time: one result per
+   * shard that holds anything. A presplit shard never called holds nothing, and is not made by
+   * the scan (its result is left out).
+   */
   async scan<M extends ScanMethods<T>>(method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<Result<T[M]>[]> {
     await this.loadCache();
+    const slots = new Slots(SCAN_IN_FLIGHT);
     for (let attempt = 0; ; attempt++) {
       const out: Result<T[M]>[] = [];
-      const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
       let stale = false;
-      const visit = async (bits: string, depth: number): Promise<void> => {
+      // Each shard waits on its own: many shards not ready at once wait no longer than one.
+      const visit = async (bits: string, depth: number, backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs)): Promise<void> => {
         if (depth > MAX_HOPS) throw new Error(`sharded ${this.name}: scan did not settle`);
         if (stale) return;
         if (this.isSplit(bits)) {
           await Promise.all([visit(`${bits}0`, depth + 1), visit(`${bits}1`, depth + 1)]);
           return;
         }
-        const answer = (await this.onShard(bits, (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo) as Promise<unknown>)) as CallAnswer<Result<T[M]>>;
+        const answer = (await slots.run(() => this.onShard(bits, [], (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo) as Promise<unknown>))) as CallAnswer<Result<T[M]>>;
         if ("ok" in answer) out.push(answer.ok);
+        else if ("absent" in answer) return;
         else if ("moved" in answer) {
           this.learn(answer.moved, answer.presplit);
           await visit(bits, depth + 1);
@@ -572,10 +769,11 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           // A scan always reaches the root (its leftmost shard), which says so when the map is
           // stale: start over from it, once the other visits stop.
           stale = true;
-        } else {
+        } else if ("notReady" in answer) {
+          backoff.extend(answer.until);
           await backoff.next();
-          await visit(bits, depth);
-        }
+          await visit(bits, depth, backoff);
+        } else throw new UnknownAnswer(bits, answer);
       };
       await visit("", 0);
       if (!stale) return out;
@@ -589,13 +787,15 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
    * shards it is known to have split into, in order (one may since have split further: ask them).
    * A walk over shards one at a time uses it, where `scan` would call every shard at once.
    */
-  async scanShard<M extends ScanMethods<T>>(bits: string, method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<{ ok: Result<T[M]> } | { split: string[] }> {
+  async scanShard<M extends ScanMethods<T>>(bits: string, method: M, ...args: T[M] extends (...a: infer A) => unknown ? A : never): Promise<{ ok: Result<T[M]> } | { split: string[] } | { absent: true }> {
     await this.loadCache();
     const backoff = new Backoff(`sharded ${this.name}`, this.notReadyWaitMs);
     for (let attempt = 0; ; attempt++) {
       if (this.isSplit(bits)) return { split: this.leavesUnder(bits) };
-      const answer = (await this.onShard(bits, (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo) as Promise<unknown>)) as CallAnswer<Result<T[M]>>;
+      const answer = (await this.onShard(bits, [], (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo) as Promise<unknown>)) as CallAnswer<Result<T[M]>>;
       if ("ok" in answer) return { ok: answer.ok };
+      // A presplit shard never called: it holds nothing, and is not made to say so.
+      if ("absent" in answer) return { absent: true };
       if ("moved" in answer) {
         this.learn(answer.moved, answer.presplit);
         // Moved, yet not known to be split below `bits`: this client's map is behind; the root says.
@@ -603,7 +803,10 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       } else if ("stale" in answer) {
         if (attempt >= 3) throw new Error(`sharded ${this.name}: shard ${bits} is not part of the object (was it wiped?)`);
         this.forget();
-      } else await backoff.next();
+      } else if ("notReady" in answer) {
+        backoff.extend(answer.until);
+        await backoff.next();
+      } else throw new UnknownAnswer(bits, answer);
     }
   }
 
@@ -701,7 +904,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     this.splits.clear();
     knownPresplit.delete(this.identity);
     if (this.presplitHint > 0) hintRejected.add(this.identity);
-    void this.saveCache();
+    void this.dropCache();
   }
 
   private learn(bits: string, presplit: number | undefined): void {
@@ -724,7 +927,8 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   async describeTree(): Promise<ShardDescription[]> {
     const describe = async (bits: string): Promise<ShardDescription> => {
       const id = this.namespace.idFromName(shardObjectName(this.name, bits));
-      const stub = (this.namespace as unknown as DurableObjectNamespace<ShardedObject<never, unknown>>).get(id);
+      const ns = this.namespace as unknown as DurableObjectNamespace<ShardedObject<never, unknown>>;
+      const stub = this.stubOptions ? ns.get(id, this.stubOptions) : ns.get(id);
       const node = await stub.shardedDescribe();
       return { ...node, bits: node.state === "new" ? bits : node.bits, object: id.toString() };
     };
@@ -761,11 +965,30 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     }
   }
 
+  /**
+   * Saves what this isolate knows of the splits, with what the colo already had: splits are
+   * final, so the union is right, and an isolate that knows less must not overwrite one that
+   * knows more. (Two saves at once can still lose one's news: it costs that isolate's clients hops.)
+   */
   private async saveCache(): Promise<void> {
     if (typeof caches === "undefined") return;
     try {
+      const cache = (caches as CacheStorage & { default: Cache }).default;
+      const hit = await cache.match(CACHE_ORIGIN + this.identity);
+      const cached = hit ? ((await hit.json()) as { splits?: string[] }) : null;
+      for (const bits of cached?.splits ?? []) this.splits.add(bits);
       const body = JSON.stringify({ splits: [...this.splits], presplit: this.presplitTo });
       await (caches as CacheStorage & { default: Cache }).default.put(CACHE_ORIGIN + this.identity, new Response(body, { headers: { "cache-control": "max-age=86400", "content-type": "application/json" } }));
+    } catch {
+      // the cache is an optimisation only
+    }
+  }
+
+  /** Drops this object's entry from the colo: what it held was stale. */
+  private async dropCache(): Promise<void> {
+    if (typeof caches === "undefined") return;
+    try {
+      await (caches as CacheStorage & { default: Cache }).default.delete(CACHE_ORIGIN + this.identity);
     } catch {
       // the cache is an optimisation only
     }

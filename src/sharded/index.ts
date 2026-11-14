@@ -15,6 +15,7 @@
 // routes straight to depth N without asking the shards above (which never exist).
 //
 // The protocol is modelled in specs/snapshot-split.ts and specs/lazy-presplit.ts.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { DurableObject } from "cloudflare:workers";
 
 import { ATOMIC_OUTCOME_TTL_MS, olderTx, type AtomicAnswer, type AtomicMethod, type AtomicStep, type Outcome } from "./atomic.js";
@@ -117,6 +118,10 @@ export type CallAnswer<R> =
   | { readonly moved: string; readonly presplit?: number }
   | { readonly notReady: string; readonly until?: number }
   | { readonly stale: string }
+  /** The shard got to the call past its deadline (the caller gave up on it): nothing was applied. */
+  | { readonly expired: string }
+  /** A scan of a presplit shard never called: it holds nothing, and was not made to answer. */
+  | { readonly absent: string }
   /** The client routed `key` by another `routeOf` than this object's: nothing was called. */
   | { readonly routeMismatch: { readonly key: string; readonly client: string; readonly object: string } };
 
@@ -235,7 +240,14 @@ function addHold(held: Map<string, HeldKey>, h: AtomicHold): void {
 const ATOMIC_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sharded_atomic_holds (tx TEXT PRIMARY KEY, primary_key TEXT NOT NULL, deadline INTEGER NOT NULL, method TEXT NOT NULL, keys TEXT NOT NULL, staged TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sharded_atomic_outcomes (tx TEXT PRIMARY KEY, outcome TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sharded_atomic_outcomes_at ON sharded_atomic_outcomes (at);
 `;
+
+/**
+ * Outcomes one alarm purges at most: a backlog goes over several, each a bounded transaction.
+ * A deleted outcome costs about five rows (four read through the table and its index, one written).
+ */
+const PURGE_BATCH = 250;
 
 /** How many split attempts a shard remembers. */
 const SPLIT_HISTORY = 8;
@@ -293,6 +305,10 @@ export function shardObjectName(name: string, bits: string): string {
 
 /** Thrown inside a method when its keys left this shard; the dispatcher answers "moved". */
 class Moved extends Error {}
+/** A call reached its write past its caller's deadline: refused, nothing applied. */
+class Expired extends Error {}
+/** The routed call being served: its caller's deadline, checked just before its transaction. */
+const callContext = new AsyncLocalStorage<{ readonly deadline: number | null }>();
 /**
  * A write waited on a split for `holdWaitMs`: nothing was applied, the client retries later, until
  * the split is done or gives up at `until`.
@@ -525,7 +541,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
    */
   protected async update<R>(keys: readonly string[], decide: (current: Map<string, V>) => UpdateResult<V, R>): Promise<R> {
     await this.waitForHold(keys);
-    // No await from here on: the check and the transaction see the same split state.
+    // No await from here on: the checks and the transaction see the same split state and time.
+    this.assertBeforeDeadline();
     this.assertOwner(keys);
     return this.ctx.storage.transactionSync(() => {
       const current = new Map<string, V>();
@@ -554,9 +571,19 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   protected async transact<R>(keys: readonly string[], fn: () => R): Promise<R> {
     // As `update`, without reading the keys' rows of `read`/`update`: `fn` reads what it needs.
     await this.waitForHold(keys);
-    // No await from here on: the check and the transaction see the same split state.
+    // No await from here on: the checks and the transaction see the same split state and time.
+    this.assertBeforeDeadline();
     this.assertOwner(keys);
     return this.ctx.storage.transactionSync(fn);
+  }
+
+  /**
+   * Throws Expired past the deadline of the routed call being served: its caller has given up on
+   * it (OutcomeUnknown), and a write applied now would land after that.
+   */
+  private assertBeforeDeadline(): void {
+    const deadline = callContext.getStore()?.deadline;
+    if (deadline !== null && deadline !== undefined && Date.now() > deadline) throw new Expired(`past the caller's deadline by ${Date.now() - deadline} ms`);
   }
 
   /**
@@ -663,7 +690,12 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   }
 
   private hasAtomicTables(): boolean {
-    this.atomicReady ??= this.schemaReady && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sharded_atomic_holds'").one().n > 0;
+    if (this.atomicReady === null) {
+      const exists = this.schemaReady && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sharded_atomic_holds'").one().n > 0;
+      // Tables made by an earlier release: brought up to this one's (the outcomes' index on time).
+      if (exists) this.sql.exec(ATOMIC_SCHEMA);
+      this.atomicReady = exists;
+    }
     return this.atomicReady;
   }
 
@@ -794,9 +826,11 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       case "abort":
       case "outcome": {
         this.assertOwner(keys);
+        const found = this.outcomeOf(step.tx);
+        if (found) return { outcome: found };
         const outcome = this.recordOutcome(step.tx, "abort");
         await this.armOutcomeExpiry();
-        return { outcome };
+        return { outcome, recorded: true };
       }
       case "forget":
         this.assertOwner(keys);
@@ -835,8 +869,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private async atomicPrepare(step: Extract<AtomicStep, { step: "prepare" }>, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[]): Promise<AtomicAnswer> {
     // A prepare delivered twice: the first holds already.
     if (this.loadHold(step.tx)) return { prepared: true };
+    // Past its deadline the hold would be recovered as soon as it is stored: hold nothing, and
+    // let the caller start again, as it does after meeting another call's hold.
+    if (Date.now() >= step.deadline) return { contended: true };
     const m = this.atomicMethod(step.method);
     const keysHeld = this.holdKeysOf(m, keys, payloads, args);
+    // The alarm first, the hold it ends after: an object stopped in between has an alarm and no
+    // hold (a wasted wake), never a hold and no alarm (held until a call happens by).
+    await this.armAlarm(step.deadline);
     let done: AtomicAnswer;
     try {
       done = await this.whenFree(keysHeld, undefined, this.gatherOf(m, keys, payloads, args), (gathered): AtomicAnswer => this.prepareShare(step, m, keysHeld, keys, payloads, gathered, args), step.tx);
@@ -844,7 +884,6 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       if (error instanceof Contended) return { contended: true };
       throw error;
     }
-    if ("prepared" in done) await this.armAlarm(step.deadline);
     return done;
   }
 
@@ -929,9 +968,10 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if (expiry !== null) await this.armAlarm(expiry);
   }
 
-  /** Deletes the outcomes past their TTL. */
+  /** Deletes up to PURGE_BATCH of the outcomes past their TTL, oldest first, through their index on time. */
   private purgeOutcomes(): void {
-    if (this.hasAtomicTables()) this.sql.exec("DELETE FROM sharded_atomic_outcomes WHERE at <= ?", Date.now() - this.atomicOutcomeTtlMs);
+    if (!this.hasAtomicTables()) return;
+    this.sql.exec("DELETE FROM sharded_atomic_outcomes WHERE rowid IN (SELECT rowid FROM sharded_atomic_outcomes WHERE at <= ? ORDER BY at LIMIT ?)", Date.now() - this.atomicOutcomeTtlMs, PURGE_BATCH);
   }
 
   /** A share prepared here: applied (commit) or dropped (abort), and its keys released, in one transaction. */
@@ -1056,7 +1096,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   // ---- The routed call ----
 
   /** A call routed by the client: `method(keys, payloads, ...args)` if this shard owns the keys. */
-  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0, hashes: readonly string[] | null = null): Promise<CallAnswer<unknown>> {
+  async shardedCall(name: string, bits: string, method: string, keys: readonly string[], payloads: readonly unknown[] | null, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0, hashes: readonly string[] | null = null, deadline: number | null = null): Promise<CallAnswer<unknown>> {
     this.assertNotWiped();
     this.callerStubOptions = stubOptions;
     // Routed by another routeOf: even where it would land here (the root owns every key), the
@@ -1074,12 +1114,13 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     this.countCall(keys.length);
     const fn = this.routedMethod(method);
     try {
-      const ok = await (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args);
+      const ok = await callContext.run({ deadline }, () => (fn as (...a: unknown[]) => Promise<unknown>).call(this, keys, payloads, ...args));
       this.counters.ok++;
       return { ok };
     } catch (error) {
       if (error instanceof Moved) return this.answered(this.moved(bits));
       if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
+      if (error instanceof Expired) return { expired: bits };
       throw error;
     }
   }
@@ -1114,6 +1155,8 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   async shardedScan(name: string, bits: string, method: string, args: readonly unknown[], stubOptions: StubOptions | null = null, presplitTo = 0): Promise<CallAnswer<unknown>> {
     this.assertNotWiped();
     this.callerStubOptions = stubOptions;
+    // A presplit shard never called holds nothing: say so, rather than make it (and its schema).
+    if (!this.meta && hostBits(bits) !== "" && presplitTo > 0 && bits.length <= presplitTo) return { absent: bits };
     const answer = await this.arriveOrCreate(name, bits, presplitTo);
     if (answer) return this.answered(answer);
     this.counters.calls++;
@@ -1654,8 +1697,14 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       console.error(JSON.stringify({ event: "split-cleanup-failed", node: this.nodeLabel(), error: String(error) }));
     }
     // Atomic holds past their deadline ask their primary, and outcomes past their TTL go (RFD0008).
+    // Each on its own: a purge that fails must not keep holds past their deadline from recovering.
     try {
       this.purgeOutcomes();
+    } catch (error) {
+      failed = true;
+      console.error(JSON.stringify({ event: "sharded-atomic-purge-failed", node: this.nodeLabel(), error: String(error) }));
+    }
+    try {
       await this.recoverHolds();
     } catch (error) {
       failed = true;

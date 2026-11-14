@@ -152,9 +152,14 @@ Tables, in every shard (created with the others):
    then `check` and `apply` in one transaction; no ids, no tables. Several: the `coordinate` step
    at the primary, which runs 2 to 5 (below, "the client" is the primary's). If its answer is lost,
    the caller asks the primary for the outcome (6): "commit" is a committed call (its results
-   unknown); anything else is the error, the outcome unknown to the caller, since once every share
-   resolved the primary forgets it, and the ask then records an abort no shard reads.
-2. **Prepare** every shard but the primary's, in parallel (`prepare` step). The shard waits out
+   unknown); an "abort" the primary had recorded is a call not committed, with no refusals (they
+   were in the lost answer). An abort the ask records itself is the error: the outcome is
+   unknown to the caller, since once every share of a commit resolved the primary forgets it.
+   The caller, not the coordination, forgets an abort, once it has the answer: a coordination
+   that forgot it before answering would leave a lost answer nothing to find.
+2. **Prepare** every shard but the primary's, in parallel (`prepare` step). A prepare that arrives
+   past its deadline holds nothing and answers "contended", so the call starts again. The shard
+   asks for its alarm at the deadline before it stores the hold. The shard waits out
    holds on these keys (a split's, or a younger atomic call's: two calls holding one key would each
    check against rows the other is about to change; an older call's hold it gives way to, see
    *Contention* below), runs `gather`, waits out any hold that
@@ -209,7 +214,8 @@ than any hold lives (its deadline, plus alarm retries). A recovery's ask can sti
 when the call commits, every share resolves and the primary forgets; arriving then, it records an
 "abort" for a call that committed. That record is never read: every shard of the call has
 resolved, and the only other asker, a client whose commit answer was lost, does not forget. It is
-purged with the outcomes past their TTL. The alarm purges them: a shard keeping outcomes keeps an
+purged with the outcomes past their TTL, 250 at a time through an index on their time, apart from
+the recovery of holds (a purge that fails does not hold recovery up). The alarm purges them: a shard keeping outcomes keeps an
 alarm for the oldest one's expiry (re-armed by the same check as holds' if it was lost), so they go
 whether or not any call reaches it again (a split
 half keeps copies of its source's outcomes, which only their TTL removes). Subclasses may change

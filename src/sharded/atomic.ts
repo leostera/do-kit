@@ -64,7 +64,11 @@ export type AtomicAnswer =
   | { readonly refused: unknown }
   | { readonly applied: unknown }
   | { readonly prepared: true }
-  | { readonly outcome: Outcome }
+  /**
+   * The outcome of a call at its primary. `recorded`: there was none, so this answer recorded an
+   * abort: the call had not committed, or committed and was forgotten (every share resolved).
+   */
+  | { readonly outcome: Outcome; readonly recorded?: true }
   /** A resolve for a share that is not held here (already resolved, or never prepared). */
   | { readonly gone: true }
   /** What the primary's coordination of the call came to: "again" and "contended" mean nothing applied, and the client calls again. */

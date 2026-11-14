@@ -35,6 +35,15 @@ test("a write held by a split past its caller's deadline writes nothing", async 
   expect(await call<number[]>("counters", name, "get", [right])).toEqual([1]);
 }, 30_000);
 
+test("a call that reaches its write past its deadline is refused as expired, and writes nothing", async () => {
+  const name = `deadline-late-${unique()}`;
+  await call("counters", name, "add", ["b"], [10]);
+  // As a client whose callTimeoutMs ran out while the call was on its way, or waiting on a hold.
+  const answer = await object("counters", name, "", "shardedCall", name, "", "add", ["b"], [1], [], null, 0, null, Date.now() - 1);
+  expect(answer).toEqual({ expired: "" });
+  expect(await call<number[]>("counters", name, "get", ["b"])).toEqual([10]);
+}, 30_000);
+
 test("a prepare that arrives after its deadline holds nothing", async () => {
   const name = `late-prepare-${unique()}`;
   await call("counters", name, "add", ["a", "b"], [10, 10]);

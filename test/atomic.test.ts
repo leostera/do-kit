@@ -74,7 +74,7 @@ test("a refusal by either shard applies nothing anywhere, and says why", async (
   expect([...l.holds, ...r.holds]).toEqual([]);
 }, 30_000);
 
-test("a call whose primary's answer is lost: committed if the primary still has the outcome, else an error", async () => {
+test("a call whose primary's answer is lost: committed or not if the primary has its outcome, else an error", async () => {
   const name = `atomic-lost-answer-${unique()}`;
   const { left, right } = keysByHalf(1);
   const [a, b] = [left[0]!, right[0]!].sort() as [string, string];
@@ -90,8 +90,8 @@ test("a call whose primary's answer is lost: committed if the primary still has 
   // Every share resolved, the outcome is forgotten: the caller can't tell, and hears the error.
   expect(await lost([-10, 10])).toEqual({ threw: expect.stringContaining("the answer was lost") });
   expect(await values(name, [a, b])).toEqual([60, 45]);
-  // Refused: nothing applied, and the caller hears the error.
-  expect(await lost([-1000, 1000])).toEqual({ threw: expect.stringContaining("the answer was lost") });
+  // Refused: the primary recorded an abort, so the caller hears that nothing applied.
+  expect(await lost([-1000, 1000])).toEqual({ committed: false, refusals: [] });
   expect(await values(name, [a, b])).toEqual([60, 45]);
   const [l, r] = await Promise.all([tables(name, "0"), tables(name, "1")]);
   expect([...l.holds, ...r.holds]).toEqual([]);
@@ -209,7 +209,8 @@ test("a recovery that reaches the primary first aborts the call, and the late co
   const { left, right } = keysByHalf(1);
   const [a, b] = [left[0]!, right[0]!].sort() as [string, string];
   await twoShards(name, { [a]: 10, [b]: 10 });
-  const tx = await prepareAndStop(name, half(b), b, 5, a, 50);
+  // Long enough to reach the shard on a loaded machine: a prepare past its deadline holds nothing.
+  const tx = await prepareAndStop(name, half(b), b, 5, a, 500);
   // The hold's deadline passes; its next write sets recovery off, which records the abort.
   expect(await call("counters", name, "add", [b], [1])).toEqual([11]);
   expect((await step(name, half(a), { step: "commit", tx, method: "transfer" }, [a], [-5])).ok).toEqual({ outcome: "abort" });
