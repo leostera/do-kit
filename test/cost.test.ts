@@ -90,7 +90,8 @@ test("defineTable refuses a schema past SQLite's 100 columns, counting the hidde
   // id and 97 more, with _hash and _version: 100, as many as SQLite takes (measured in workerd).
   expect(() => defineTable({ primaryKey: "id", columns: columns(97) } as never)).not.toThrow();
   expect(() => defineTable({ primaryKey: "id", columns: columns(98) } as never)).toThrow(/100/);
-  expect(() => defineTable({ primaryKey: "id", columns: columns(96), indexes: { a: ["c0"], b: ["c1"], c: ["c2"] } } as never)).toThrow(/100/);
+  // Indexes keep their keys in tables of their own, and take no column.
+  expect(() => defineTable({ primaryKey: "id", columns: columns(97), indexes: { a: ["c0"], b: ["c1"], c: ["c2"] } } as never)).not.toThrow();
 });
 
 test("a listing refuses more than 32 conditions", async () => {

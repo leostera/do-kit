@@ -37,15 +37,10 @@ const expectedByStars = (rows: Doc[], direction: "asc" | "desc") => {
 };
 
 /** Seeds `rows` under schema 1 (no stars, no byStars, no deletedAgain or byStars groups), then deploys schema 2. */
-/**
- * The rows a call read, since the last time asked, but for one statement: making a new index's
- * SQL index reads every row once (SQLite has no cheaper way to make an index over a table with
- * rows), and is made while its column is empty, so it sorts and writes nothing. The statement
- * tests bound it to that (schema-statements.test.ts).
- */
+/** The rows a call read, since the last time asked. */
 async function callReads(cls: string, name: string): Promise<number> {
   const all = await post<StatementCost[]>("/object", { cls, name, bits: "", method: "statements", args: ["", true] });
-  return all.filter((s) => !(s.query.startsWith("CREATE INDEX") && s.rowsWritten <= 1)).reduce((n, s) => n + s.rowsRead, 0);
+  return all.reduce((n, s) => n + s.rowsRead, 0);
 }
 
 async function seedAndUpgrade(cls: string, name: string, rows: Doc[]): Promise<void> {
@@ -55,16 +50,17 @@ async function seedAndUpgrade(cls: string, name: string, rows: Doc[]): Promise<v
 
 // Every statement the migration runs to add byStars and the count groups deletedAgain and byStars.
 const MIGRATION_STATEMENTS = [
-  "ALTER TABLE sharded_table ADD COLUMN \"_ix_",
+  "CREATE TABLE \"sharded_table_keys_",
   "INSERT OR REPLACE INTO sharded_table_builds",
-  "UPDATE sharded_table SET \"_ix_",
+  "INSERT OR REPLACE INTO \"sharded_table_keys_",
   "DELETE FROM sharded_table_builds",
-  "CREATE INDEX IF NOT EXISTS \"sharded_table_ix_",
+  "ALTER TABLE \"sharded_table_keys_",
+  "DELETE FROM \"sharded_table_dropped_",
+  "DROP TABLE IF EXISTS \"sharded_table_dropped_",
   "INSERT INTO sharded_table_group_counts",
   "INSERT INTO sharded_table_count_groups",
   "DELETE FROM sharded_table_group_counts",
   "DELETE FROM sharded_table_count_groups",
-  "DROP INDEX IF EXISTS",
 ];
 
 for (const statement of MIGRATION_STATEMENTS) {

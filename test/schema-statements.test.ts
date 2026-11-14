@@ -30,15 +30,10 @@ async function deploy(name: string, version: number): Promise<StatementCost[]> {
   return statements("evolving", name);
 }
 
-test("no statement of a new index's build touches more than a step of rows, but the one that makes its SQL index, which reads each row once and writes nothing", async () => {
+test("no statement of a new index's build touches more than a step of rows", async () => {
   const name = `build-statements-${unique()}`;
   await seed(name, 3_000);
-  const all = await deploy(name, 2);
-  // SQLite reads every row to make an index over a table with rows. Made while its column is
-  // empty, it holds nothing yet: no sort, no writes, and the build's pages fill it.
-  const creates = all.filter((s) => s.query.startsWith("CREATE INDEX") && s.query.includes("_ix_byStars"));
-  expect(creates.map((s) => ({ read: s.rowsRead <= 3_000 + 10, written: s.rowsWritten <= 1 }))).toEqual([{ read: true, written: true }]);
-  const w = worst(all.filter((s) => !creates.includes(s)));
+  const w = worst(await deploy(name, 2));
   expect({ query: w.query.slice(0, 80), cost: cost(w) }).toEqual({ query: w.query.slice(0, 80), cost: Math.min(cost(w), STEP_BOUND) });
 }, 120_000);
 
@@ -51,15 +46,16 @@ test("an index build's pages seek to where they start, not scan from the first r
   expect(Math.max(...pages.map((p) => p.rowsRead))).toBeLessThanOrEqual(STEP_BOUND);
 }, 120_000);
 
-test("an index's SQL index is made before its keys are filled, so no statement sorts every row", async () => {
-  const name = `build-partial-${unique()}`;
+test("a new index's key table is made empty, and its keys go in a page at a time", async () => {
+  const name = `build-keys-${unique()}`;
   await seed(name, 1_000);
   const all = await deploy(name, 2);
-  const create = all.findIndex((s) => s.query.startsWith("CREATE INDEX") && s.query.includes("_ix_byStars"));
-  const fill = all.findIndex((s) => s.query.startsWith("UPDATE sharded_table SET \"_ix_byStars"));
+  const create = all.findIndex((s) => s.query.startsWith("CREATE TABLE") && s.query.includes("_keys_byStars"));
+  const fills = all.filter((s) => s.query.startsWith("INSERT OR REPLACE INTO") && s.query.includes("_keys_byStars"));
+  const fill = all.findIndex((s) => fills.includes(s));
   expect(create).toBeGreaterThanOrEqual(0);
-  expect(fill).toBeGreaterThanOrEqual(0);
-  expect(create).toBeLessThan(fill);
+  expect(fill).toBeGreaterThan(create);
+  expect(Math.max(...fills.map(cost))).toBeLessThanOrEqual(STEP_BOUND);
 }, 120_000);
 
 test("a rollback runs no statement that rewrites every row", async () => {
@@ -68,30 +64,51 @@ test("a rollback runs no statement that rewrites every row", async () => {
   await deploy(name, 2);
   const all = await deploy(name, 1);
   expect(all.filter((s) => s.query.includes("DROP COLUMN")).map((s) => s.query)).toEqual([]);
-  // The index the rollback declares again is made over its column once cleared: one read of each
-  // row, and nothing written (the stale keys the drop left would have to be sorted).
-  const remade = all.filter((s) => s.query.startsWith("CREATE INDEX") && s.rowsRead > STEP_BOUND);
-  expect(remade.map((s) => s.rowsWritten <= 1)).toEqual(remade.map(() => true));
-  expect(cost(worst(all.filter((s) => !remade.includes(s))))).toBeLessThanOrEqual(STEP_BOUND);
+  expect(cost(worst(all))).toBeLessThanOrEqual(STEP_BOUND);
 }, 120_000);
 
-test("an index declared again before its old keys are cleared is made empty, and its keys cleared and filled in steps", async () => {
+test("an index declared again before its dropped keys are deleted starts empty, and every statement stays within a step", async () => {
   const name = `redeclare-${unique()}`;
   // Steps by calls only, and none between the deploys: the dropped index's keys are all still there.
   await object("evolving", name, "pauseAlarmBuilds", true);
   await seed(name, 3_000);
   await deploy(name, 2);
-  const all = await deploy(name, 1);
-  const remade = all.filter((s) => s.query.startsWith("CREATE INDEX") && s.query.includes("_ix_byEdit"));
-  expect(remade.map((s) => s.rowsWritten <= 1)).toEqual(remade.map(() => true));
-  // The build still ends, a step a call, and the index lists every row.
+  const redeployed = await deploy(name, 1);
+  // The build still ends, a step a call, and the index lists every row once.
   let steps = 0;
-  while (!(await object<boolean>("evolving", name, "migrateOnce")) && steps < 60) steps++;
-  const after = await statements("evolving", name);
-  expect(cost(worst(after.filter((s) => !s.query.startsWith("CREATE INDEX"))))).toBeLessThanOrEqual(STEP_BOUND);
-  expect(after.filter((s) => s.query.startsWith("CREATE INDEX") && s.rowsWritten > 1).map((s) => s.query)).toEqual([]);
-  const listed = await table<{ rows: unknown[] }>(name, "list", { index: "byEdit", limit: 1_000 });
-  expect(listed.rows.length).toBe(1_000);
+  while (!(await object<boolean>("evolving", name, "migrateOnce")) && steps < 100) steps++;
+  const all = [...redeployed, ...(await statements("evolving", name))];
+  expect(cost(worst(all))).toBeLessThanOrEqual(STEP_BOUND);
+  const rows: unknown[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await table<{ rows: { row: { name: string } }[]; cursor: string | null }>(name, "list", { index: "byEdit", limit: 1_000, ...(cursor ? { cursor } : {}) });
+    rows.push(...page.rows.map((r) => r.row.name));
+    cursor = page.cursor ?? undefined;
+  } while (cursor);
+  expect(new Set(rows).size).toBe(3_000);
+  expect(rows.length).toBe(3_000);
+}, 120_000);
+
+test("a shard in the earlier layout (index keys in a hidden column) moves its keys to key tables in steps, and lists the same", async () => {
+  const name = `legacy-${unique()}`;
+  const rows = await seed(name, 1_000);
+  await object("evolving", name, "legacyLayout").catch(() => undefined);
+  await statements("evolving", name);
+  const listed: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await table<{ rows: { row: { name: string } }[]; cursor: string | null }>(name, "list", { index: "byEdit", limit: 300, ...(cursor ? { cursor } : {}) });
+    listed.push(...page.rows.map((r) => r.row.name));
+    cursor = page.cursor ?? undefined;
+  } while (cursor);
+  // lastEditAt is null for every row: byEdit is in key order.
+  expect(listed).toEqual(rows.map((r) => r.name));
+  for (let i = 0; i < 50 && (await object<{ keyed: number }>("evolving", name, "legacyLeft")).keyed > 0; i++) await Bun.sleep(100);
+  expect(await object("evolving", name, "legacyLeft")).toEqual({ keyed: 0, indexes: 0 });
+  // Not counting legacyLeft's own count of keyed rows.
+  const w = worst((await statements("evolving", name)).filter((s) => !s.query.startsWith("SELECT COUNT(*) AS n FROM sharded_table WHERE")));
+  expect({ query: w.query.slice(0, 80), cost: cost(w) }).toEqual({ query: w.query.slice(0, 80), cost: Math.min(cost(w), STEP_BOUND) });
 }, 120_000);
 
 test("a new index is built by the shard's alarm, with no calls after the first", async () => {

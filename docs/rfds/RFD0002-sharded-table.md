@@ -90,21 +90,22 @@ const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 81
   past 2^53, text that is not well-formed UTF-16 (SQLite would store U+FFFD, and a key read back
   would route elsewhere), and in `json` columns anything `JSON.stringify` changes (non-finite
   numbers, `undefined`, functions, bigints, a `Date` or other non-plain object, at any depth).
-- **Limits.** A table has at most 100 columns with its hidden ones (`_hash`, `_version`, one per
-  index): SQLite's limit in a Durable Object, checked by `defineTable`. A listing takes at most 32
+- **Limits.** A table has at most 100 columns with its hidden ones (`_hash`, `_version`):
+  SQLite's limit in a Durable Object, checked by `defineTable`. Indexes take no column. A listing takes at most 32
   conditions. A row is at most `maxRowBytes` (default and maximum 2 MB, SQLite's row limit), text
   counted as UTF-8: a larger one throws `RowTooLarge` and writes nothing.
 
 **Schema changes.** Each shard brings its storage up to the schema the first time it runs code
-of that version, with cheap statements only: it adds missing columns, records the indexes and
-count groups it must build, drops the SQL indexes no longer declared, and records dropped count
-groups. A dropped index's key column stays (dropping a column rewrites every row), and is cleared
-to null in steps, which frees its space. Removing or retyping a
-column is not supported: add a new one. A cursor is refused once its index is redefined.
+of that version, with cheap statements only: it adds missing columns, makes an empty key table for
+each new index (see Positions and index keys) and records the build, renames the key tables of
+indexes no longer declared out of the way, and records dropped count groups. Removing or
+retyping a column is not supported: add a new one. A cursor is refused once its index is
+redefined.
 
 What is proportional to the rows is done in build steps, each one transaction of at most
 `indexBuildRows` (10,000) rows: deleting a dropped group's counts, filling in a new index's keys
-in key order, and counting a new group in key order. Each call takes a step (the call that
+in key order, deleting a dropped index's keys (and then its empty table), and counting a new
+group in key order. Each call takes a step (the call that
 migrates takes none), and so does the alarm, so a shard that gets few calls still finishes. A
 step that fails is rolled back and taken again; it never fails the call. Meanwhile the shard
 serves gets, writes and other listings: only a listing by an index being built, or a count of a
@@ -112,11 +113,16 @@ group being counted, answers "not ready". A write during a count counts its chan
 row the count has passed: the count reaches the others with their value then. On a shard with
 no rows, what is new is built at once.
 
-A new index's SQL index is made at migration, while its column is empty, and holds only the
-keys that are set: SQLite reads each row once to make it, but sorts and writes nothing, and each
-step adds its page's keys. It is the one statement of a schema change that reads every row, and
-SQLite has no cheaper way to make an index over a table with rows. An index declared again over
-a column a drop left is made once the column is cleared, so it too starts empty.
+No statement of a schema change touches more than a step of rows. That is why an index keeps
+its keys in a table of its own rather than a column of the row table: SQLite makes an index over
+a table with rows only by reading all of them, while an empty table is filled a page at a time.
+An index declared again while its old keys are still being deleted starts from a new empty
+table. If the migration's request for the alarm fails, the next call asks again.
+
+Shards written by releases before key tables kept each index as a hidden column of the row table
+with an SQL index on it. Their migration drops those SQL indexes, builds the key tables like any
+new index (listings by an index answer "not ready" until it is built), and clears the old
+columns to null in steps, to free their space. The columns stay: dropping one rewrites every row.
 
 A shard that has nothing left to build records the schema it migrated to. Woken with the same
 schema, it reads that record, one statement, instead of checking every table and index.
@@ -187,14 +193,16 @@ The guarantee is for rows whose sort columns do not change during the listing. A
 value changes between pages moves in the order, and may be seen twice or not at all, as with any
 keyset pagination.
 
-**Positions and index keys.** Each index keeps one hidden column per row: its index key, which is
-the index's values and the primary key in an order-preserving encoding, as hex.
+**Positions and index keys.** Each index keeps a table of keys, one per row (`sharded_table_keys_*`:
+`_key`, its primary key, with the row's primary key and routing hash, and an index on the row's
+key for refreshes and split cleanup). A row's index key is the index's values and the primary key
+in an order-preserving encoding, as hex.
 - Null is `00`.
 - A number is `01` and an order-preserving float64.
 - Text is `02`, its UTF-8 with `00` escaped as `00 FF`, then `00`.
 
-The SQL index is on that column alone, and a page is one range seek
-(`INDEXED BY`, `key > cursor`). Comparing the index columns one by one with null-aware `OR`s could
+A page is one range seek in the key table (`_key > cursor`), and a lookup of each row by its
+primary key. A write changes an index's keys only if the row's key in it changed. Comparing the index columns one by one with null-aware `OR`s could
 not seek, and got slower as the table grew. A property test checks the encoding against SQLite's
 order on random tuples.
 

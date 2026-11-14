@@ -687,8 +687,33 @@ export class EvolvingDocs extends ShardedTable<Env, DocV2> {
     await this.ctx.storage.sync();
     this.ctx.abort("upgrade");
   }
+  /**
+   * Puts this shard's byEdit index back in the earlier layout, as a release before key tables
+   * left it: a hidden key column on the table, filled, with an SQL index, no key table, and no
+   * record that a migration finished. Ends the instance, so the next call migrates.
+   */
+  async legacyLayout(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const keys = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'sharded\\_table\\_keys\\_byEdit%' ESCAPE '\\'").toArray()[0]!.name;
+    const id = keys.slice("sharded_table_keys_".length);
+    sql.exec(`ALTER TABLE sharded_table ADD COLUMN "_ix_${id}" TEXT`);
+    sql.exec(`UPDATE sharded_table SET "_ix_${id}" = (SELECT _key FROM "${keys}" WHERE _pk = sharded_table.name)`);
+    sql.exec(`CREATE INDEX "sharded_table_ix_${id}" ON sharded_table ("_ix_${id}")`);
+    sql.exec(`DROP TABLE "${keys}"`);
+    sql.exec("DROP TABLE IF EXISTS sharded_table_ready");
+    await this.ctx.storage.sync();
+    this.ctx.abort("legacy layout");
+  }
+  /** Rows whose earlier layout's key column still holds a key, and that layout's SQL indexes. */
+  async legacyLeft(): Promise<{ keyed: number; indexes: number }> {
+    const sql = this.ctx.storage.sql;
+    const column = sql.exec<{ name: string }>("PRAGMA table_info(sharded_table)").toArray().find((c) => c.name.startsWith("_ix_"))?.name;
+    const keyed = column ? sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM sharded_table WHERE "${column}" IS NOT NULL`).one().n : 0;
+    const indexes = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name LIKE 'sharded\\_table\\_ix\\_%' ESCAPE '\\'").one().n;
+    return { keyed, indexes };
+  }
   async indexNames(): Promise<string[]> {
-    return this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sharded_table' AND name LIKE 'sharded_table_ix_%' ORDER BY name").toArray().map((r) => r.name);
+    return this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'sharded\\_table\\_keys\\_%' ESCAPE '\\' ORDER BY name").toArray().map((r) => r.name);
   }
 }
 

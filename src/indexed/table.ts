@@ -365,7 +365,8 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
         break;
       }
       const old = Date.now() - DELIVERY_RETRY_MS;
-      const page = this.store.exec<{ id: number }>(`SELECT id FROM ${OUTBOX} WHERE id > ? AND at <= ? AND hash >= ? AND hash <= ? ORDER BY id LIMIT ?`, after, old, lo, hi, DELIVERY_BATCH).toArray().map((r) => r.id);
+      // In id order (`+hash` keeps SQLite off the hash's index, which would sort the whole range).
+      const page = this.store.exec<{ id: number }>(`SELECT id FROM ${OUTBOX} WHERE id > ? AND at <= ? AND +hash >= ? AND +hash <= ? ORDER BY id LIMIT ?`, after, old, lo, hi, DELIVERY_BATCH).toArray().map((r) => r.id);
       if (page.length === 0) break;
       after = page[page.length - 1]!;
       sent += page.length;
@@ -382,7 +383,9 @@ export abstract class IndexedTable<Env, Row extends RowShape> extends ShardedTab
     if (!(await this.sendDrops())) await this.wake(Date.now() + DELIVERY_RETRY_MS);
     if (await this.backfill()) return void (await this.wake(Date.now()));
     // Whatever is still there: due once it is old enough (and in flight now, most likely).
-    const oldest = this.store.exec<{ at: number | null }>(`SELECT min(at) AS at FROM ${OUTBOX} WHERE hash >= ? AND hash <= ?`, lo, hi).one().at;
+    // The first entry by id, not by time: ids grow with time, so the wake is late by at most a
+    // retry's wait, and reading it reads one entry (min(at) would read every one of the range).
+    const oldest = this.store.exec<{ at: number }>(`SELECT at FROM ${OUTBOX} WHERE +hash >= ? AND +hash <= ? ORDER BY id LIMIT 1`, lo, hi).toArray()[0]?.at ?? null;
     if (oldest !== null) await this.wake(Math.max(oldest + DELIVERY_RETRY_MS, Date.now() + DELIVERY_RETRY_MS));
   }
 

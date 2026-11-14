@@ -149,8 +149,9 @@ export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): Tab
     if (!Number.isInteger(partition) || partition < 1 || partition > def.columns.length) throw new Error(`global index ${name}: partition must be from 1 to ${def.columns.length}`);
     if (def.unique && partition !== def.columns.length) throw new Error(`global index ${name}: a unique index is partitioned by all its columns`);
   }
-  const width = columns.length + 2 + Object.keys(schema.indexes ?? {}).length;
-  if (width > MAX_TABLE_COLUMNS) throw new Error(`a table of ${columns.length} columns and ${Object.keys(schema.indexes ?? {}).length} indexes has ${width} columns with its hidden ones (_hash, _version, one per index); SQLite in a Durable Object takes ${MAX_TABLE_COLUMNS}`);
+  // Indexes keep their keys in tables of their own: they add no column.
+  const width = columns.length + 2;
+  if (width > MAX_TABLE_COLUMNS) throw new Error(`a table of ${columns.length} columns has ${width} with its hidden ones (_hash, _version); SQLite in a Durable Object takes ${MAX_TABLE_COLUMNS}`);
   if (schema.maxRowBytes !== undefined && (!Number.isInteger(schema.maxRowBytes) || schema.maxRowBytes < 1 || schema.maxRowBytes > DEFAULT_MAX_ROW_BYTES)) throw new Error(`maxRowBytes must be an integer from 1 to ${DEFAULT_MAX_ROW_BYTES}`);
   for (const [name, col] of Object.entries(schema.counts ?? {})) {
     if (!IDENTIFIER.test(name)) throw new Error(`count group ${JSON.stringify(name)}: a plain identifier`);

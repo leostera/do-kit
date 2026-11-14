@@ -26,15 +26,20 @@ const COUNT_BUILDS = "sharded_table_count_builds";
 const COUNT_DROPS = "sharded_table_count_drops";
 /** Rows written by code older than the schema the shard recorded: their index keys may be stale. */
 const DIRTY = "sharded_table_dirty";
-/** Key columns of dropped indexes being cleared to null, a page at a time: how far each got. */
-const KEY_CLEARS = "sharded_table_key_clears";
+/**
+ * Key columns of the earlier layout (an index was a hidden column of the table), cleared to null a
+ * page at a time to free their space: how far each got, and whether it is done.
+ */
+const KEY_CLEARS = "sharded_table_legacy_clears";
+/** Key tables of dropped indexes, renamed out of the way, emptied a batch at a time, then dropped. */
+const KEY_DROPS = "sharded_table_key_drops";
 /**
  * One row once a migration has nothing left to build: the schema it applied, and what the
  * migration found. A shard that wakes with the same schema reads it, and nothing else.
  */
 const READY = "sharded_table_ready";
 /** Raised when what migrate() does changes, so shards that recorded an older one migrate again. */
-const MIGRATION_LAYOUT = 1;
+const MIGRATION_LAYOUT = 2;
 
 /** What a migration found, kept with the ready record. */
 interface ReadyState {
@@ -57,16 +62,23 @@ export class OperationMismatch extends Error {
     this.name = "OperationMismatch";
   }
 }
-const INDEX_PREFIX = "sharded_table_ix_";
-/** Each index keeps one hidden column of index keys (see encodeIndexKey), indexed alone. */
-const KEY_COLUMN_PREFIX = "_ix_";
+/**
+ * Each index keeps a table of its keys (see encodeIndexKey): `_key` the key, its primary key, with
+ * the row's primary key and hash. A listing reads it in order and looks up each row. A new index
+ * is an empty table filled a page at a time, so no statement of a build reads every row.
+ */
+const KEYS_PREFIX = "sharded_table_keys_";
+/** A dropped index's key table is renamed to this prefix while it is emptied. */
+const DROPPED_PREFIX = "sharded_table_dropped_";
+/** The earlier layout: an SQL index on a hidden key column of the table. */
+const LEGACY_INDEX_PREFIX = "sharded_table_ix_";
+const LEGACY_COLUMN_PREFIX = "_ix_";
 
-/** A declared index: its columns, its hidden key column and the SQL index on it. */
+/** A declared index: its columns and its key table. */
 interface IndexDef {
   readonly name: string;
   readonly columns: readonly string[];
-  readonly keyColumn: string;
-  readonly sqlIndex: string;
+  readonly keys: string;
 }
 /** Rows per hash prefix are counted with this many hex digits (16 bits: exact to depth 16). */
 const BUCKET_DIGITS = 4;
@@ -272,8 +284,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       const refused = this.refuseRowWrite(key, watched.before, watched.after);
       if (refused !== null) return { ok: false, version: current, refused };
     }
-    const before = current === 0 ? null : this.storedGroupValues(key);
-    for (const ix of this.indexes()) stored[ix.keyColumn] = this.indexKey(ix, stored);
+    const before = current === 0 ? null : this.storedRow(key);
     const names = Object.keys(stored);
     const version = (current === 0 ? this.deletedVersion() : current) + 1;
     this.db.exec(
@@ -285,6 +296,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     );
     if (current === 0) this.countRow(key, 1);
     this.countGroups(key, before, stored);
+    this.updateKeys(key, before, stored);
     this.markDirty(key);
     if (watched) this.rowWritten(key, watched.before, watched.after, version);
     return { ok: true, version };
@@ -318,7 +330,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       const refused = this.refuseRowWrite(key, watched.before, watched.after);
       if (refused !== null) return { ok: false, version: current, refused };
     }
-    for (const ix of this.indexes()) if (ix.columns.some((c) => changed.includes(c))) updates[ix.keyColumn] = this.indexKey(ix, stored);
     const names = Object.keys(updates);
     const version = current + 1;
     this.db.exec(
@@ -328,6 +339,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       key,
     );
     this.countGroups(key, before, stored);
+    this.updateKeys(key, before, stored);
     this.markDirty(key);
     if (watched) this.rowWritten(key, watched.before, watched.after, version);
     return { ok: true, version };
@@ -344,10 +356,11 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       const refused = this.refuseRowWrite(key, watched.before, null);
       if (refused !== null) return { ok: false, version: current, refused };
     }
-    const before = this.storedGroupValues(key);
+    const before = this.storedRow(key);
     this.db.exec(`DELETE FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key);
     this.countRow(key, -1);
     this.countGroups(key, before, null);
+    this.updateKeys(key, before, null);
     this.markDirty(key);
     // Watched, the delete is a write of its own, at one past the row's last version: a row written
     // after it starts above that, so the two never share a version.
@@ -384,6 +397,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   protected override forgetStorage(): void {
     this.migrated = false;
     this.keyIndex = "";
+    this.buildAlarm = "none";
     this.deletedAt = null;
     this.indexDefs = null;
     super.forgetStorage();
@@ -394,7 +408,17 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.migrate();
     const [lo, hi] = this.ownedHashRange();
     const pk = this.q(this.table.primaryKey);
-    let deleted = this.db.exec(`DELETE FROM ${TABLE} WHERE ${pk} IN (SELECT ${pk} FROM ${TABLE} WHERE _hash < ? OR _hash > ? LIMIT ?)`, lo, hi, Math.min(limit, CLEANUP_BATCH)).rowsWritten;
+    // A batch of rows given away, with their keys in every key table (by the table's index on _pk).
+    const gone = this.db.exec<{ k: string }>(`SELECT ${pk} AS k FROM ${TABLE} WHERE _hash < ? OR _hash > ? LIMIT ?`, lo, hi, Math.min(limit, CLEANUP_BATCH)).toArray().map((r) => r.k);
+    let deleted = 0;
+    const keyTables = gone.length > 0 ? this.keyTables() : [];
+    // A statement binds at most 100 values.
+    for (let i = 0; i < gone.length; i += 100) {
+      const part = gone.slice(i, i + 100);
+      const marks = part.map(() => "?").join(", ");
+      for (const keys of keyTables) this.db.exec(`DELETE FROM "${keys}" WHERE _pk IN (${marks})`, ...part);
+      deleted += this.db.exec(`DELETE FROM ${TABLE} WHERE ${pk} IN (${marks})`, ...part).rowsWritten;
+    }
     if (deleted === 0) {
       const [blo, bhi] = [lo.slice(0, BUCKET_DIGITS), hi.slice(0, BUCKET_DIGITS)];
       const batch = Math.min(limit, CLEANUP_BATCH);
@@ -415,26 +439,24 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     if (request.index !== null && !ix) throw new Error(`no index ${request.index}`);
     // An index being built, or with rows whose keys may be stale, lists nothing yet: the alarm
     // and the calls meanwhile build it, a step each.
-    if (ix && (this.building.has(ix.keyColumn) || this.dirtyRows)) this.notReady();
-    // One column holds each row's position: its index key, or its primary key. SQLite seeks to the
-    // cursor in that column's index and reads on in order.
-    const column = this.q(ix ? ix.keyColumn : pk);
-    const sqlIndex = ix ? ix.sqlIndex : this.keyIndex;
+    if (ix && (this.building.has(ix.keys) || this.dirtyRows)) this.notReady();
     const [lo, hi] = this.ownedHashRange();
     const params: SqlValue[] = [];
     const matches = request.where.length ? request.where.map((c) => this.condition(c, params)).join(" AND ") : "1";
-    const after = request.after === null ? "" : `${column} ${request.direction === "asc" ? ">" : "<"} ? AND `;
-    // Every row has its key once built; the condition lets SQLite use the index, which holds only those.
-    const keyed = ix ? `${column} IS NOT NULL AND ` : "";
-    const sql =
-      `SELECT *, (${matches}) AS _m FROM ${TABLE} INDEXED BY "${sqlIndex}" WHERE ${keyed}${after}_hash >= ? AND _hash <= ? ` +
-      `ORDER BY ${column} ${request.direction === "asc" ? "ASC" : "DESC"} LIMIT ?`;
+    const order = request.direction === "asc" ? "ASC" : "DESC";
+    // A row's position: its index key, or its primary key. SQLite seeks to the cursor in that
+    // key's order and reads on: by an index, in its key table, looking up each row by its key.
+    const sql = ix
+      ? `SELECT t.*, (${matches}) AS _m, k._key AS _pos FROM "${ix.keys}" AS k CROSS JOIN ${TABLE} AS t ON t.${this.q(pk)} = k._pk ` +
+        `WHERE k._key ${request.after === null ? "> ''" : request.direction === "asc" ? "> ?" : "< ?"} AND k._hash >= ? AND k._hash <= ? ORDER BY k._key ${order} LIMIT ?`
+      : `SELECT *, (${matches}) AS _m, ${this.q(pk)} AS _pos FROM ${TABLE} INDEXED BY "${this.keyIndex}" ` +
+        `WHERE ${request.after === null ? "" : `${this.q(pk)} ${request.direction === "asc" ? ">" : "<"} ? AND `}_hash >= ? AND _hash <= ? ORDER BY ${this.q(pk)} ${order} LIMIT ?`;
     const rows: { key: string; row: RowShape; version: number; position: string }[] = [];
     let last: string | null = null;
     let scanned = 0;
     for (const found of this.db.exec<Record<string, SqlValue>>(sql, ...params, ...(request.after === null ? [] : [request.after]), lo, hi, request.budget)) {
       scanned++;
-      last = found[ix ? ix.keyColumn : pk] as string;
+      last = found._pos as string;
       if (found._m) {
         rows.push({ key: found[pk] as string, row: this.decode(found), version: found._version as number, position: last });
         if (rows.length === request.limit) return { rows, frontier: last };
@@ -450,7 +472,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     if (this.indexDefs?.schema !== schema) {
       const defs = Object.entries(schema.indexes ?? {}).map(([name, columns]) => {
         const id = `${name}_${shortDigest(columns.join(","))}`;
-        return { name, columns, keyColumn: `${KEY_COLUMN_PREFIX}${id}`, sqlIndex: `${INDEX_PREFIX}${id}` };
+        return { name, columns, keys: `${KEYS_PREFIX}${id}` };
       });
       this.indexDefs = { schema, defs };
     }
@@ -458,12 +480,21 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   }
   private indexDefs: { schema: unknown; defs: IndexDef[] } | null = null;
 
-  /** A row's key in an index, from its stored values. */
-  /** An index's SQL index: over the rows with a key (all of them, once built). */
-  private createIndex(ix: IndexDef): void {
-    this.db.exec(`CREATE INDEX IF NOT EXISTS "${ix.sqlIndex}" ON ${TABLE} ("${ix.keyColumn}") WHERE "${ix.keyColumn}" IS NOT NULL`);
+  /**
+   * An index's key table, empty, with its index on the row's key (for refreshes and cleanup). The
+   * index's name is unique to this table, so a dropped table renamed away keeps its own.
+   */
+  private createKeyTable(ix: IndexDef): void {
+    this.db.exec(`CREATE TABLE "${ix.keys}" (_key TEXT PRIMARY KEY NOT NULL, _pk TEXT NOT NULL, _hash TEXT NOT NULL) WITHOUT ROWID`);
+    this.db.exec(`CREATE INDEX "${ix.keys}_pk_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}" ON "${ix.keys}" (_pk)`);
   }
 
+  /** The key tables in storage: the schema's, and those a newer schema kept (a rollback's). */
+  private keyTables(): string[] {
+    return this.db.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, ?) = ?`, KEYS_PREFIX.length, KEYS_PREFIX).toArray().map((r) => r.name);
+  }
+
+  /** A row's key in an index, from its stored values. */
   private indexKey(ix: IndexDef, stored: Record<string, SqlValue>): string {
     return encodeIndexKey([...ix.columns.map((c) => stored[c] ?? null), stored[this.table.primaryKey]!]);
   }
@@ -519,7 +550,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       this.unknownLocal = ready.unknownLocal;
       this.building = new Set();
       this.counting = new Map();
-      this.countDrops = this.keyClears = this.dirtyRows = false;
+      this.countDrops = this.keyClears = this.keyDrops = this.dirtyRows = false;
       this.migrated = true;
       return;
     }
@@ -562,7 +593,8 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${COUNT_DROPS} (grp TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${BUILDS} (ix TEXT PRIMARY KEY NOT NULL, after TEXT) WITHOUT ROWID`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${DIRTY} (key TEXT PRIMARY KEY NOT NULL, hash TEXT NOT NULL) WITHOUT ROWID`);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS ${KEY_CLEARS} (col TEXT PRIMARY KEY NOT NULL, after TEXT) WITHOUT ROWID`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${KEY_CLEARS} (col TEXT PRIMARY KEY NOT NULL, after TEXT, done INTEGER NOT NULL) WITHOUT ROWID`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${KEY_DROPS} (name TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS ${TABLE}_hash ON ${TABLE} (_hash)`);
     const existing = this.db.exec<{ name: string; pk: number }>(`PRAGMA table_info(${TABLE})`).toArray();
     const key = existing.find((c) => c.pk === 1)?.name;
@@ -578,71 +610,81 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.rollback = mine < recorded;
     if (mine > recorded) this.db.exec(`INSERT INTO ${VERSIONS} (name, version) VALUES ('schema', ?) ON CONFLICT (name) DO UPDATE SET version = excluded.version`, mine);
     const wanted = this.indexes();
-    // Ours by exact prefix (LIKE would match any character for "_", and any case).
-    const sqlIndexes = this.db.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND substr(name, 1, ?) = ?`, TABLE, INDEX_PREFIX.length, INDEX_PREFIX).toArray().map((r) => r.name);
+    // The earlier layout's SQL indexes go (they are not kept from here on), and their columns are
+    // cleared a page at a time. Ours by exact prefix (LIKE would match any character for "_").
+    const legacy = this.db.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND substr(name, 1, ?) = ?`, TABLE, LEGACY_INDEX_PREFIX.length, LEGACY_INDEX_PREFIX).toArray().map((r) => r.name);
+    for (const name of legacy) this.db.exec(`DROP INDEX IF EXISTS "${name}"`);
+    for (const column of have) if (column.startsWith(LEGACY_COLUMN_PREFIX)) this.db.exec(`INSERT OR IGNORE INTO ${KEY_CLEARS} (col, after, done) VALUES (?, NULL, 0)`, column);
+    const tables = this.keyTables();
     let unknown = false;
-    for (const name of sqlIndexes) {
-      if (wanted.some((ix) => ix.sqlIndex === name)) continue;
+    for (const name of tables) {
+      if (wanted.some((ix) => ix.keys === name)) continue;
+      // A rollback's code keeps what it doesn't know, for the newer code.
       if (this.rollback) unknown = true;
-      // Its key column stays (dropping a column rewrites every row), and is cleared to null a
-      // page at a time: that frees its space, and an index declared again over it starts empty.
-      else
+      // Dropped: renamed out of the way (a rename is cheap), and emptied a batch at a time.
+      else {
+        const dropped = `${DROPPED_PREFIX}${name.slice(KEYS_PREFIX.length)}_${Date.now().toString(36)}`;
         this.ctx.storage.transactionSync(() => {
-          this.db.exec(`DROP INDEX IF EXISTS "${name}"`);
-          this.db.exec(`INSERT OR IGNORE INTO ${KEY_CLEARS} (col, after) VALUES (?, NULL)`, KEY_COLUMN_PREFIX + name.slice(INDEX_PREFIX.length));
+          this.db.exec(`ALTER TABLE "${name}" RENAME TO "${dropped}"`);
+          this.db.exec(`INSERT INTO ${KEY_DROPS} (name) VALUES (?)`, dropped);
         });
+      }
     }
     const builds = new Map(this.db.exec<{ ix: string; after: string | null }>(`SELECT ix, after FROM ${BUILDS}`).toArray().map((r) => [r.ix, r.after]));
     for (const [ix] of builds) {
-      if (wanted.some((w) => w.keyColumn === ix)) continue;
-      if (this.rollback) unknown = true;
+      if (wanted.some((w) => w.keys === ix)) continue;
+      if (this.rollback && ix.startsWith(KEYS_PREFIX)) unknown = true;
       else {
         this.db.exec(`DELETE FROM ${BUILDS} WHERE ix = ?`, ix);
         builds.delete(ix);
       }
     }
-    // No rows yet: what is new is built already, in the statement that makes it.
+    // No rows yet: a new index is built in the statement that makes it.
     const empty = this.db.exec(`SELECT 1 FROM ${TABLE} LIMIT 1`).toArray().length === 0;
     for (const ix of wanted) {
-      if (sqlIndexes.includes(ix.sqlIndex) || builds.has(ix.keyColumn)) continue;
-      if (empty) {
-        this.ctx.storage.transactionSync(() => {
-          if (!have.has(ix.keyColumn)) this.db.exec(`ALTER TABLE ${TABLE} ADD COLUMN "${ix.keyColumn}" TEXT`);
-          this.createIndex(ix);
-        });
-        continue;
-      }
-      // New, or declared again after it was dropped: built over the rows stored. The column, its
-      // SQL index and the build's record go in together, so a failure between them leaves none.
-      // The index is made while the column is empty (the index holds only keys that are set), so
-      // it reads each row once and sorts nothing; each build step then adds its page's keys to it.
-      // A column a dropped index left is cleared first, and the index made once it is.
+      if (tables.includes(ix.keys)) continue;
+      // New, or declared again: an empty key table, and on a table with rows the build's record,
+      // in one transaction, so a failure between them leaves neither.
       this.ctx.storage.transactionSync(() => {
-        if (!have.has(ix.keyColumn)) {
-          this.db.exec(`ALTER TABLE ${TABLE} ADD COLUMN "${ix.keyColumn}" TEXT`);
-          this.createIndex(ix);
-        } else this.db.exec(`INSERT OR IGNORE INTO ${KEY_CLEARS} (col, after) VALUES (?, NULL)`, ix.keyColumn);
-        this.db.exec(`INSERT OR REPLACE INTO ${BUILDS} (ix, after) VALUES (?, NULL)`, ix.keyColumn);
+        this.createKeyTable(ix);
+        if (!empty) this.db.exec(`INSERT OR REPLACE INTO ${BUILDS} (ix, after) VALUES (?, NULL)`, ix.keys);
       });
-      builds.set(ix.keyColumn, null);
+      if (!empty) builds.set(ix.keys, null);
     }
-    this.building = new Set([...builds.keys()].filter((ix) => wanted.some((w) => w.keyColumn === ix)));
-    this.keyClears = this.db.exec(`SELECT 1 FROM ${KEY_CLEARS} LIMIT 1`).toArray().length > 0;
+    this.building = new Set([...builds.keys()].filter((ix) => wanted.some((w) => w.keys === ix)));
+    this.keyClears = this.db.exec(`SELECT 1 FROM ${KEY_CLEARS} WHERE done = 0 LIMIT 1`).toArray().length > 0;
+    this.keyDrops = this.db.exec(`SELECT 1 FROM ${KEY_DROPS} LIMIT 1`).toArray().length > 0;
     this.migrateCountGroups(empty);
     this.unknownLocal = unknown;
     this.dirtyRows = !this.rollback && this.db.exec(`SELECT 1 FROM ${DIRTY} LIMIT 1`).toArray().length > 0;
     this.keyIndex = this.db.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name LIKE 'sqlite_autoindex_%'`, TABLE).one().name;
     this.migrated = true;
-    if (this.buildWorkLeft()) void this.scheduleAlarm(Date.now()).catch(() => {});
+    if (this.buildWorkLeft()) this.askBuildAlarm();
   }
+
+  /**
+   * Asks for the alarm to take build steps. If asking fails (a storage error), the next call asks
+   * again: without the alarm, a build goes on only a step a call, as slow as the calls are.
+   */
+  private askBuildAlarm(): void {
+    if (this.buildAlarm !== "none") return;
+    this.buildAlarm = "asking";
+    this.scheduleAlarm(Date.now()).then(
+      () => void (this.buildAlarm = "asked"),
+      () => void (this.buildAlarm = "none"),
+    );
+  }
+  private buildAlarm: "none" | "asking" | "asked" = "none";
   /** Local indexes (by key column) whose keys are being filled in. */
   private building = new Set<string>();
   /** Count groups being counted, and the last key counted (null: none yet). */
   private counting = new Map<string, string | null>();
   /** Count groups whose counts are being deleted. */
   private countDrops = false;
-  /** Key columns of dropped indexes are being cleared. */
+  /** Key columns of the earlier layout are being cleared. */
   private keyClears = false;
+  /** Key tables of dropped indexes are being emptied. */
+  private keyDrops = false;
   /** Rows marked by older code are left to refresh. */
   private dirtyRows = false;
   /** This code is older than the newest schema the shard ran. */
@@ -679,7 +721,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
 
   /** Whether any build step is left. */
   private buildWorkLeft(): boolean {
-    return this.building.size > 0 || this.counting.size > 0 || this.countDrops || this.keyClears || this.dirtyRows;
+    return this.building.size > 0 || this.counting.size > 0 || this.countDrops || this.keyClears || this.keyDrops || this.dirtyRows;
   }
 
   /** Build steps, from the alarm: a few, then the alarm again if more is left. */
@@ -687,9 +729,13 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     await super.layerAlarm();
     this.migrate();
     const until = Date.now() + ALARM_BUILD_MS;
+    this.buildAlarm = "none";
     let more = this.buildWorkLeft();
     while (more && Date.now() < until) more = this.buildStep();
-    if (more) await this.scheduleAlarm(Date.now());
+    if (more) {
+      await this.scheduleAlarm(Date.now());
+      this.buildAlarm = "asked";
+    }
   }
 
   /** The migration, and a build step if one is left: what every call does first. */
@@ -697,12 +743,14 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     // The call that migrates does no step too: either is about as much as a call should do.
     if (!this.migrated) return this.migrate();
     if (!this.buildWorkLeft()) return;
+    this.askBuildAlarm();
     // The call doesn't need the step (what it needs answers not ready until built): a step that
     // fails is rolled back, and taken again by the next call or the alarm.
     try {
       this.buildStep();
     } catch (error) {
       console.error(JSON.stringify({ event: "table-build-step-failed", node: this.nodeLabel(), error: String(error).slice(0, 200) }));
+      this.buildAlarm = "none";
       void this.scheduleAlarm(Date.now() + 1_000).catch(() => {});
     }
   }
@@ -740,16 +788,25 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     }
     if (this.keyClears) {
       this.ctx.storage.transactionSync(() => {
-        const clear = this.db.exec<{ col: string; after: string | null }>(`SELECT col, after FROM ${KEY_CLEARS} LIMIT 1`).toArray()[0];
+        const clear = this.db.exec<{ col: string; after: string | null }>(`SELECT col, after FROM ${KEY_CLEARS} WHERE done = 0 LIMIT 1`).toArray()[0];
         if (!clear) return void (this.keyClears = false);
         const page = pageAfter(pk, clear.after, budget).map((r) => r[this.table.primaryKey] as string);
         if (page.length > 0) this.db.exec(`UPDATE ${TABLE} SET "${clear.col}" = NULL WHERE ${pk} >= ? AND ${pk} <= ? AND "${clear.col}" IS NOT NULL`, page[0]!, page.at(-1)!);
-        if (page.length === budget) return void this.db.exec(`UPDATE ${KEY_CLEARS} SET after = ? WHERE col = ?`, page.at(-1)!, clear.col);
-        this.db.exec(`DELETE FROM ${KEY_CLEARS} WHERE col = ?`, clear.col);
-        // Declared again meanwhile: its SQL index is made now, over a column of nulls (and the
-        // keys writes set since), and its build fills it in.
-        const again = this.indexes().find((i) => i.keyColumn === clear.col);
-        if (again && this.building.has(again.keyColumn)) this.createIndex(again);
+        // Kept, done: the column stays (dropping it rewrites every row), and is not cleared again.
+        this.db.exec(`UPDATE ${KEY_CLEARS} SET after = ?, done = ? WHERE col = ?`, page.at(-1) ?? clear.after, page.length === budget ? 0 : 1, clear.col);
+      });
+      return this.buildWorkLeft();
+    }
+    if (this.keyDrops) {
+      this.ctx.storage.transactionSync(() => {
+        const name = this.db.exec<{ name: string }>(`SELECT name FROM ${KEY_DROPS} LIMIT 1`).toArray()[0]?.name;
+        if (name === undefined) return void (this.keyDrops = false);
+        // Each key deleted reads about four rows (the key, its _pk index entry, and the subquery's).
+        const deleted = this.db.exec(`DELETE FROM "${name}" WHERE _key IN (SELECT _key FROM "${name}" LIMIT ?)`, Math.max(1, Math.floor(budget / 4))).rowsWritten;
+        if (deleted > 0) return;
+        // Empty: dropping it costs nothing proportional to what it held.
+        this.db.exec(`DROP TABLE IF EXISTS "${name}"`);
+        this.db.exec(`DELETE FROM ${KEY_DROPS} WHERE name = ?`, name);
       });
       return this.buildWorkLeft();
     }
@@ -758,7 +815,12 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
         const keys = this.db.exec<{ key: string }>(`SELECT key FROM ${DIRTY} LIMIT ?`, budget).toArray().map((r) => r.key);
         for (const key of keys) {
           const stored = this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE ${pk} = ?`, key).toArray()[0];
-          if (stored) for (const ix of this.indexes()) if (!this.building.has(ix.keyColumn)) this.db.exec(`UPDATE ${TABLE} SET "${ix.keyColumn}" = ? WHERE ${pk} = ?`, this.indexKey(ix, stored), key);
+          // Its keys, as they are now: whatever older code left under the row goes first.
+          for (const ix of this.indexes()) {
+            if (this.building.has(ix.keys)) continue;
+            this.db.exec(`DELETE FROM "${ix.keys}" WHERE _pk = ?`, key);
+            if (stored) this.db.exec(`INSERT OR REPLACE INTO "${ix.keys}" (_key, _pk, _hash) VALUES (?, ?, ?)`, this.indexKey(ix, stored), key, stored._hash!);
+          }
           this.refreshRow(key, stored ? { row: this.decode(stored), version: stored._version as number } : null);
           this.db.exec(`DELETE FROM ${DIRTY} WHERE key = ?`, key);
         }
@@ -767,16 +829,17 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       this.afterBuildStep();
       return this.buildWorkLeft();
     }
-    const ix = this.indexes().find((i) => this.building.has(i.keyColumn));
+    const ix = this.indexes().find((i) => this.building.has(i.keys));
     if (ix) {
       this.ctx.storage.transactionSync(() => {
-        const after = this.db.exec<{ after: string | null }>(`SELECT after FROM ${BUILDS} WHERE ix = ?`, ix.keyColumn).toArray()[0]?.after ?? null;
-        const page = pageAfter("*", after, budget);
-        for (const stored of page) this.db.exec(`UPDATE ${TABLE} SET "${ix.keyColumn}" = ? WHERE ${pk} = ?`, this.indexKey(ix, stored), stored[this.table.primaryKey]!);
-        if (page.length === budget) return void this.db.exec(`UPDATE ${BUILDS} SET after = ? WHERE ix = ?`, page.at(-1)![this.table.primaryKey]!, ix.keyColumn);
-        // Every row has its key, and so the SQL index: the index serves.
-        this.db.exec(`DELETE FROM ${BUILDS} WHERE ix = ?`, ix.keyColumn);
-        this.building.delete(ix.keyColumn);
+        const after = this.db.exec<{ after: string | null }>(`SELECT after FROM ${BUILDS} WHERE ix = ?`, ix.keys).toArray()[0]?.after ?? null;
+        // Each key is two rows written (the key and its _pk index entry): half a step of rows.
+        const page = pageAfter("*", after, Math.max(1, Math.floor(budget / 2)));
+        for (const stored of page) this.db.exec(`INSERT OR REPLACE INTO "${ix.keys}" (_key, _pk, _hash) VALUES (?, ?, ?)`, this.indexKey(ix, stored), stored[this.table.primaryKey]!, stored._hash!);
+        if (page.length === Math.max(1, Math.floor(budget / 2))) return void this.db.exec(`UPDATE ${BUILDS} SET after = ? WHERE ix = ?`, page.at(-1)![this.table.primaryKey]!, ix.keys);
+        // Every row has its key: the index serves.
+        this.db.exec(`DELETE FROM ${BUILDS} WHERE ix = ?`, ix.keys);
+        this.building.delete(ix.keys);
       });
       return this.buildWorkLeft();
     }
@@ -871,10 +934,27 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     return [lo.slice(0, BUCKET_DIGITS), hi.slice(0, BUCKET_DIGITS)];
   }
 
-  /** The stored values of the count groups' columns of a row that exists. */
-  private storedGroupValues(key: string): Record<string, SqlValue> | null {
-    if (!this.table.counts || Object.keys(this.table.counts).length === 0) return null;
+  /** The stored values of a row that exists, if a count group or an index needs them (else null). */
+  private storedRow(key: string): Record<string, SqlValue> | null {
+    if (Object.keys(this.table.counts ?? {}).length === 0 && this.indexes().length === 0) return null;
     return this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).one();
+  }
+
+  /**
+   * Moves a row's keys in each index whose key changed: from `before` (null: new) to `after`
+   * (null: deleted). An index being built is kept too: its build writes the same keys again.
+   */
+  private updateKeys(key: string, before: Record<string, SqlValue> | null, after: Record<string, SqlValue> | null): void {
+    const indexes = this.indexes();
+    if (indexes.length === 0) return;
+    const hash = this.routeHash(key);
+    for (const ix of indexes) {
+      const from = before ? this.indexKey(ix, before) : null;
+      const to = after ? this.indexKey(ix, after) : null;
+      if (from === to) continue;
+      if (from !== null) this.db.exec(`DELETE FROM "${ix.keys}" WHERE _key = ?`, from);
+      if (to !== null) this.db.exec(`INSERT OR REPLACE INTO "${ix.keys}" (_key, _pk, _hash) VALUES (?, ?, ?)`, to, key, hash);
+    }
   }
 
   /** Moves a row between the values of each count group: from `before` (null: new) to `after` (null: deleted). */

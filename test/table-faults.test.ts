@@ -106,17 +106,22 @@ for (const scenario of SCENARIOS) {
 
     const failures: string[] = [];
     const seen = new Map<string, number>();
-    for (const statement of issued) {
+    const labelled = issued.map((statement) => {
       const short = statement.replace(/\s+/g, " ").slice(0, 60);
       const n = (seen.get(short) ?? 0) + 1;
       seen.set(short, n);
-      const label = `${scenario.name}/${short}#${n}`;
+      return { statement, label: `${scenario.name}/${short}#${n}` };
+    });
+    // Each fault on a table of its own, a few at a time.
+    const one = async ({ statement, label }: { statement: string; label: string }) => {
       const name = await fresh();
       const sure = await run(name, scenario.steps, statement);
       const got = await snapshot(name, scenario.groups);
       for (const p of got.problems) failures.push(`${label}: ${p}`);
       if (sure && JSON.stringify(got.rows) !== JSON.stringify(reference.rows)) failures.push(`${label}: rows differ from the clean run`);
-    }
+    };
+    for (let i = 0; i < labelled.length; i += 8) await Promise.all(labelled.slice(i, i + 8).map(one));
+    failures.sort();
     expect(failures).toEqual([]);
   }, 600_000);
 }
