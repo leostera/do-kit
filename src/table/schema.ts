@@ -35,8 +35,8 @@ export interface TableSchema<Row extends RowShape> {
    */
   readonly version?: number;
   /**
-   * The values a count group reports at most (default 1,000): past it `countBy` answers the ones
-   * with the most rows and `truncated`. Count groups are for columns of few values.
+   * The values a count group reports at most (default 1,000): past it `countBy` answers the first
+   * that many, in order of their JSON text, and `truncated`. Count groups are for columns of few values.
    */
   readonly maxCountValues?: number;
   /**
@@ -68,7 +68,7 @@ export interface GroupCount {
 /** Values a count group reports at most, by default: count groups are for columns of few values. */
 export const DEFAULT_MAX_COUNT_VALUES = 1_000;
 
-/** A count group with more values than `maxCountValues`: the values with the most rows, that many. */
+/** A count group with more values than `maxCountValues`: the first that many, in order of their JSON text. */
 export interface TruncatedCounts {
   readonly counts: readonly GroupCount[];
   readonly truncated: true;

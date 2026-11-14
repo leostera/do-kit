@@ -493,7 +493,9 @@ export class UserIndexes extends GlobalIndex<Env> {
     return this.log.report(filter, reset);
   }
   /** Runs this index shard's own alarm work now (its sweep of reservations and tombstones). */
+  /** The work of an alarm due now, as the alarm runs it: the layers', then the app's. */
   async alarmNow(): Promise<void> {
+    await this.layerAlarm();
     await this.onAlarm();
   }
 

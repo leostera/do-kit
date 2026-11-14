@@ -303,7 +303,8 @@ export abstract class GlobalIndex<Env> extends ShardedObject<Env, never> {
     const now = Date.now();
     const [lo, hi] = this.ownedHashRange();
     const stale = this.db
-      .exec<Entry>(`SELECT * FROM ${ENTRIES} WHERE pending IS NOT NULL AND at <= ? AND hash >= ? AND hash <= ? LIMIT ?`, now - this.reservationTimeoutMs, lo, hi, RESOLVE_BATCH)
+      // By the partial index of pending entries: the few there are, not every entry of the range.
+      .exec<Entry>(`SELECT * FROM ${ENTRIES} INDEXED BY ${ENTRIES}_pending WHERE pending IS NOT NULL AND at <= ? AND hash >= ? AND hash <= ? LIMIT ?`, now - this.reservationTimeoutMs, lo, hi, RESOLVE_BATCH)
       .toArray();
     const results = await Promise.allSettled(stale.map((e) => this.resolve(e.route, e.entry, e.owner, e.issued)));
     for (const r of results) if (r.status === "rejected") console.error(JSON.stringify({ event: "index-resolve-failed", node: this.nodeLabel(), error: String(r.reason) }));

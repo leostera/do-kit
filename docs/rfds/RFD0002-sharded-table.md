@@ -97,8 +97,9 @@ const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 81
 
 **Schema changes.** Each shard brings its storage up to the schema the first time it runs code
 of that version, with cheap statements only: it adds missing columns, records the indexes and
-count groups it must build, drops the SQL indexes no longer declared (their key columns stay:
-dropping a column rewrites every row), and records dropped count groups. Removing or retyping a
+count groups it must build, drops the SQL indexes no longer declared, and records dropped count
+groups. A dropped index's key column stays (dropping a column rewrites every row), and is cleared
+to null in steps, which frees its space. Removing or retyping a
 column is not supported: add a new one. A cursor is refused once its index is redefined.
 
 What is proportional to the rows is done in build steps, each one transaction of at most
@@ -109,8 +110,16 @@ step that fails is rolled back and taken again; it never fails the call. Meanwhi
 serves gets, writes and other listings: only a listing by an index being built, or a count of a
 group being counted, answers "not ready". A write during a count counts its change only for a
 row the count has passed: the count reaches the others with their value then. On a shard with
-no rows, what is new is built at once. The last step of a new index makes its SQL index over
-the whole table, in one statement.
+no rows, what is new is built at once.
+
+A new index's SQL index is made at migration, while its column is empty, and holds only the
+keys that are set: SQLite reads each row once to make it, but sorts and writes nothing, and each
+step adds its page's keys. It is the one statement of a schema change that reads every row, and
+SQLite has no cheaper way to make an index over a table with rows. An index declared again over
+a column a drop left is made once the column is cleared, so it too starts empty.
+
+A shard that has nothing left to build records the schema it migrated to. Woken with the same
+schema, it reads that record, one statement, instead of checking every table and index.
 
 **Versions and rollbacks.** `version` in the schema is a whole number, raised with every change.
 A shard records the highest it ran. Code with a lower one (a rollback, or a deploy halfway)
@@ -198,8 +207,8 @@ order on random tuples.
 - **Count groups.** `counts: { byStatus: "status" }` counts rows per value of a column the same
   way, in `sharded_table_group_counts`. `countBy(group)` sums a shard's range per value. Count
   groups are for columns of few values: past `maxCountValues` (1,000) values, `countBy` answers
-  `{ counts, truncated: true }` with the values with the most rows, each shard sending that many
-  and one more.
+  `{ counts, truncated: true }` with the first that many, in order of their JSON text: each shard
+  reads its first ones in its key's order, with nothing sorted, and sends one more.
 - **With a listing.** `withCount: true`, or a group's name, returns `total`, and the group's
   `counts`, from the shards' first-round pages: one call per shard for a page and its total.
 - **During a split.** The object's count is the sum over shards. It may count a row twice, or not

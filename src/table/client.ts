@@ -2,6 +2,7 @@
 import { sharded, type ShardedClient, type ShardedClientOptions } from "../sharded/client.js";
 import {
   assertRowFits,
+  compareText,
   DEFAULT_MAX_COUNT_VALUES,
   type TruncatedCounts,
   mergePages,
@@ -191,8 +192,9 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
     const summed = sumGroups((await this.client.scan("tableCountBy", group)) as GroupCount[][]);
     const max = this.schema.maxCountValues ?? DEFAULT_MAX_COUNT_VALUES;
     if (summed.length <= max) return summed;
-    // More values than a count group reports (each shard sent its top ones and one more).
-    return { counts: summed.sort((a, b) => b.count - a.count).slice(0, max), truncated: true };
+    // More values than a count group reports. Each shard sent its first ones in the order it stores
+    // them (their JSON text), and one more, so the first of them all are exact.
+    return { counts: summed.sort((a, b) => compareText(JSON.stringify(a.value), JSON.stringify(b.value))).slice(0, max), truncated: true };
   }
 
   /**

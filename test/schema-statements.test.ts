@@ -30,10 +30,15 @@ async function deploy(name: string, version: number): Promise<StatementCost[]> {
   return statements("evolving", name);
 }
 
-test("no statement of a new index's build touches more than a step of rows", async () => {
+test("no statement of a new index's build touches more than a step of rows, but the one that makes its SQL index, which reads each row once and writes nothing", async () => {
   const name = `build-statements-${unique()}`;
   await seed(name, 3_000);
-  const w = worst((await deploy(name, 2)).filter((s) => !s.query.includes("sharded_table_group_counts")));
+  const all = await deploy(name, 2);
+  // SQLite reads every row to make an index over a table with rows. Made while its column is
+  // empty, it holds nothing yet: no sort, no writes, and the build's pages fill it.
+  const creates = all.filter((s) => s.query.startsWith("CREATE INDEX") && s.query.includes("_ix_byStars"));
+  expect(creates.map((s) => ({ read: s.rowsRead <= 3_000 + 10, written: s.rowsWritten <= 1 }))).toEqual([{ read: true, written: true }]);
+  const w = worst(all.filter((s) => !creates.includes(s)));
   expect({ query: w.query.slice(0, 80), cost: cost(w) }).toEqual({ query: w.query.slice(0, 80), cost: Math.min(cost(w), STEP_BOUND) });
 }, 120_000);
 
@@ -63,7 +68,30 @@ test("a rollback runs no statement that rewrites every row", async () => {
   await deploy(name, 2);
   const all = await deploy(name, 1);
   expect(all.filter((s) => s.query.includes("DROP COLUMN")).map((s) => s.query)).toEqual([]);
-  expect(cost(worst(all))).toBeLessThanOrEqual(STEP_BOUND);
+  // The index the rollback declares again is made over its column once cleared: one read of each
+  // row, and nothing written (the stale keys the drop left would have to be sorted).
+  const remade = all.filter((s) => s.query.startsWith("CREATE INDEX") && s.rowsRead > STEP_BOUND);
+  expect(remade.map((s) => s.rowsWritten <= 1)).toEqual(remade.map(() => true));
+  expect(cost(worst(all.filter((s) => !remade.includes(s))))).toBeLessThanOrEqual(STEP_BOUND);
+}, 120_000);
+
+test("an index declared again before its old keys are cleared is made empty, and its keys cleared and filled in steps", async () => {
+  const name = `redeclare-${unique()}`;
+  // Steps by calls only, and none between the deploys: the dropped index's keys are all still there.
+  await object("evolving", name, "pauseAlarmBuilds", true);
+  await seed(name, 3_000);
+  await deploy(name, 2);
+  const all = await deploy(name, 1);
+  const remade = all.filter((s) => s.query.startsWith("CREATE INDEX") && s.query.includes("_ix_byEdit"));
+  expect(remade.map((s) => s.rowsWritten <= 1)).toEqual(remade.map(() => true));
+  // The build still ends, a step a call, and the index lists every row.
+  let steps = 0;
+  while (!(await object<boolean>("evolving", name, "migrateOnce")) && steps < 60) steps++;
+  const after = await statements("evolving", name);
+  expect(cost(worst(after.filter((s) => !s.query.startsWith("CREATE INDEX"))))).toBeLessThanOrEqual(STEP_BOUND);
+  expect(after.filter((s) => s.query.startsWith("CREATE INDEX") && s.rowsWritten > 1).map((s) => s.query)).toEqual([]);
+  const listed = await table<{ rows: unknown[] }>(name, "list", { index: "byEdit", limit: 1_000 });
+  expect(listed.rows.length).toBe(1_000);
 }, 120_000);
 
 test("a new index is built by the shard's alarm, with no calls after the first", async () => {
