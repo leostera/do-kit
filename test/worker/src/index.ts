@@ -441,6 +441,33 @@ export class OldAlarm extends ShardedObject<Env, number> {
 }
 
 class CounterBase extends ShardedObject<Env, number> {
+  /** Scratch: storage size after filling and deleting half by hash, rowid vs clustered by hash. */
+  async sizeProbe(_keys: readonly string[], payloads: readonly { op: string; n: number; size?: number }[]): Promise<unknown> {
+    const { op, n } = payloads[0]!;
+    const sql = this.ctx.storage.sql;
+    sql.exec("CREATE TABLE IF NOT EXISTS r (id INTEGER PRIMARY KEY, h TEXT NOT NULL, body TEXT NOT NULL)");
+    sql.exec("CREATE INDEX IF NOT EXISTS r_h ON r (h)");
+    sql.exec("CREATE TABLE IF NOT EXISTS c (h TEXT NOT NULL, k TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (h, k)) WITHOUT ROWID");
+    sql.exec("CREATE TABLE IF NOT EXISTS o (id INTEGER PRIMARY KEY, h TEXT NOT NULL, body TEXT NOT NULL)");
+    const t = op.endsWith("c") ? "c" : op.endsWith("o") ? "o" : "r";
+    const ordered = (h: string, i: number) => parseInt(h.slice(0, 24), 2) * 2 ** 28 + (i % 2 ** 28);
+    if (op.startsWith("fill")) for (let i = 0; i < n; i++) {
+      const h = Math.random().toString(2).slice(2, 34).padEnd(32, "0");
+      const body = "x".repeat(payloads[0]!.size ?? 1024);
+      if (t === "r") sql.exec("INSERT INTO r (h, body) VALUES (?, ?)", h, body);
+      else if (t === "o") sql.exec("INSERT INTO o (id, h, body) VALUES (?, ?, ?)", ordered(h, i), h, body);
+      else sql.exec("INSERT INTO c (h, k, body) VALUES (?, ?, ?)", h, String(i), body);
+    }
+    if (op.startsWith("half")) sql.exec(`DELETE FROM ${t} WHERE h < '1'`);
+    if (op.startsWith("refill")) for (let i = 0; i < n; i++) {
+      const h = "1" + Math.random().toString(2).slice(2, 33).padEnd(31, "0");
+      if (t === "r") sql.exec("INSERT INTO r (h, body) VALUES (?, ?)", h, "x".repeat(payloads[0]!.size ?? 1024));
+      else if (t === "o") sql.exec("INSERT INTO o (id, h, body) VALUES (?, ?, ?)", ordered(h, i + 20000), h, "x".repeat(payloads[0]!.size ?? 1024));
+      else sql.exec("INSERT INTO c (h, k, body) VALUES (?, ?, ?)", h, "n" + i + Math.random(), "x".repeat(payloads[0]!.size ?? 1024));
+    }
+    return [{ op, size: sql.databaseSize, rows: sql.exec(`SELECT count(*) AS n FROM ${t}`).one().n }];
+  }
+
   /** What this object holds (tables, keys, alarm): to check a wipe left nothing. */
   async storage(): Promise<StorageReport> {
     return storageReport(this.ctx.storage);
