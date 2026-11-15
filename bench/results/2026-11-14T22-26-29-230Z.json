@@ -1,0 +1,320 @@
+{
+  "schemaVersion": 3,
+  "suite": "bench-d44c429fe787",
+  "generatedAt": "2026-11-14T22:30:06.548Z",
+  "provenance": {
+    "commit": "7b0fea1cfc0977a4b6d817e4e164d5fa53c98826",
+    "dirty": false,
+    "doKitVersion": "0.4.0",
+    "workerVersion": "c7a1c134-27d3-4d83-bfcc-082f63190fab"
+  },
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 10000,
+    "concurrencyLevels": [
+      1,
+      16,
+      64,
+      256,
+      1024
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "presplit",
+      "operation": "multi-2",
+      "distribution": "uniform",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-d44c429fe787-presplit-multi-2-uniform",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 201,
+      "errors": 0,
+      "elapsedMs": 10019,
+      "operationsPerSecond": 20.06188242339555,
+      "mebibytesPerSecond": 0.03918336410819443,
+      "latencyMs": {
+        "p50": 51,
+        "p95": 71,
+        "p99": 123,
+        "max": 144
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 675,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-2",
+      "distribution": "uniform",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-d44c429fe787-presplit-multi-2-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 1760,
+      "errors": 0,
+      "elapsedMs": 10149,
+      "operationsPerSecond": 173.41610010838508,
+      "mebibytesPerSecond": 0.3387033205241896,
+      "latencyMs": {
+        "p50": 72,
+        "p95": 211,
+        "p99": 273,
+        "max": 598
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 5171,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-2",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-d44c429fe787-presplit-multi-2-uniform",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 9148,
+      "errors": 0,
+      "elapsedMs": 10308,
+      "operationsPerSecond": 887.4660457896779,
+      "mebibytesPerSecond": 1.7333321206829646,
+      "latencyMs": {
+        "p50": 36,
+        "p95": 271,
+        "p99": 395,
+        "max": 542
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 9814,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-2",
+      "distribution": "uniform",
+      "concurrency": 256,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-d44c429fe787-presplit-multi-2-uniform",
+      "driverCount": 32,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 22124,
+      "errors": 0,
+      "elapsedMs": 10579,
+      "operationsPerSecond": 2091.3129785423953,
+      "mebibytesPerSecond": 4.084595661215616,
+      "latencyMs": {
+        "p50": 38,
+        "p95": 469,
+        "p99": 599,
+        "max": 1570
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-2",
+      "distribution": "uniform",
+      "concurrency": 1024,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-d44c429fe787-presplit-multi-2-uniform",
+      "driverCount": 128,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 46619,
+      "errors": 0,
+      "elapsedMs": 10668,
+      "operationsPerSecond": 4369.985001874766,
+      "mebibytesPerSecond": 8.535126956786652,
+      "latencyMs": {
+        "p50": 155,
+        "p95": 591,
+        "p99": 774,
+        "max": 1418
+      },
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-2",
+      "distribution": "hot",
+      "concurrency": 1,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-d44c429fe787-presplit-multi-2-hot",
+      "driverCount": 1,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 654,
+      "errors": 0,
+      "elapsedMs": 10001,
+      "operationsPerSecond": 65.39346065393461,
+      "mebibytesPerSecond": 0.12772160283971604,
+      "latencyMs": {
+        "p50": 13,
+        "p95": 29,
+        "p99": 36,
+        "max": 92
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-2",
+      "distribution": "hot",
+      "concurrency": 16,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-d44c429fe787-presplit-multi-2-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 2432,
+      "errors": 0,
+      "elapsedMs": 10352,
+      "operationsPerSecond": 234.93044822256567,
+      "mebibytesPerSecond": 0.4588485316846986,
+      "latencyMs": {
+        "p50": 28,
+        "p95": 191,
+        "p99": 311,
+        "max": 419
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    },
+    {
+      "target": "presplit",
+      "operation": "multi-2",
+      "distribution": "hot",
+      "concurrency": 64,
+      "durationMs": 10000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-d44c429fe787-presplit-multi-2-hot",
+      "driverCount": 16,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 7490,
+      "errors": 0,
+      "elapsedMs": 10805,
+      "operationsPerSecond": 693.1975937066173,
+      "mebibytesPerSecond": 1.353901550208237,
+      "latencyMs": {
+        "p50": 53,
+        "p95": 352,
+        "p99": 443,
+        "max": 817
+      },
+      "topology": {
+        "leaves": 5,
+        "rows": 2,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    }
+  ],
+  "splits": []
+}

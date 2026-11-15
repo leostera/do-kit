@@ -1,0 +1,393 @@
+{
+  "schemaVersion": 3,
+  "suite": "bench-296ee59e86a1",
+  "generatedAt": "2026-11-14T22:33:46.101Z",
+  "provenance": {
+    "commit": "f2c828f36efcfc0abe9e4fd790f7fbf97b3bd953",
+    "dirty": false,
+    "doKitVersion": "0.4.0",
+    "workerVersion": "2d8a1906-f8f3-43f6-b344-128a24f4712b"
+  },
+  "runtime": {
+    "compatibilityDate": "2026-10-29",
+    "payloadBytes": 1024,
+    "keyCount": 10000,
+    "durationMs": 5000,
+    "concurrencyLevels": [
+      64
+    ],
+    "splitSizesMiB": [
+      1,
+      16,
+      128,
+      1024
+    ],
+    "splitRowBytes": 1024
+  },
+  "notes": [
+    "One request is one one-key read or write RPC. Keyspace is uniform or a single hot key.",
+    "Each target/workload uses a fresh object name; concurrency levels increase in sequence, and each level runs once unmeasured first (unless BENCH_WARMUP=0) so the splits its load causes settle before it is measured.",
+    "Latency p50/p95/p99 are histogram estimates with 1 ms buckets. Max is the largest observed client-to-object method duration.",
+    "Driver Durable Objects run in multiple hinted locations; locationHint is advisory, not a placement guarantee."
+  ],
+  "points": [
+    {
+      "target": "table-16",
+      "operation": "list",
+      "distribution": "uniform",
+      "concurrency": 64,
+      "durationMs": 5000,
+      "keyCount": 10000,
+      "payloadBytes": 1024,
+      "objectName": "bench-296ee59e86a1-table-16-list-uniform",
+      "driverCount": 64,
+      "failedDrivers": 0,
+      "errorSamples": [],
+      "successes": 1735,
+      "errors": 0,
+      "elapsedMs": 5169,
+      "operationsPerSecond": 335.6548655445928,
+      "mebibytesPerSecond": 16.38939773166957,
+      "latencyMs": {
+        "p50": 170,
+        "p95": 359,
+        "p99": 551,
+        "max": 900
+      },
+      "slowest": [
+        {
+          "operation": "list",
+          "ms": 900,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 900
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 892,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 892
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 729,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 729
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 663,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1100",
+            "ms": 663
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 660,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1100",
+            "ms": 660
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 646,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1100",
+            "ms": 646
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 643,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 643
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 634,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 634
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 618,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1100",
+            "ms": 618
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 613,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 613
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 612,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 612
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 611,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 611
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 611,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 611
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 605,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1110",
+            "ms": 605
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 596,
+          "rounds": 2,
+          "shardCalls": 32,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1010",
+            "ms": 320
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 552,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1100",
+            "ms": 552
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 551,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1100",
+            "ms": 551
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 550,
+          "rounds": 1,
+          "shardCalls": 16,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1100",
+            "ms": 550
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 549,
+          "rounds": 2,
+          "shardCalls": 32,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1010",
+            "ms": 275
+          },
+          "error": null
+        },
+        {
+          "operation": "list",
+          "ms": 544,
+          "rounds": 2,
+          "shardCalls": 32,
+          "retries": {
+            "moved": 0,
+            "stale": 0,
+            "notReady": 0
+          },
+          "slowestShard": {
+            "bits": "1010",
+            "ms": 321
+          },
+          "error": null
+        }
+      ],
+      "topology": {
+        "leaves": 16,
+        "rows": 10000,
+        "depth": 4
+      },
+      "leased": null,
+      "stalls": [],
+      "wrongAnswers": 0,
+      "wrongSamples": [],
+      "ok": true,
+      "errorSample": null
+    }
+  ],
+  "splits": []
+}
