@@ -1,7 +1,7 @@
 # RFD0013 - Overload refusal: fail fast, typed, at the caller
 
 - Feature Name: `overload-refusal`
-- Status: Draft
+- Status: Draft (the base class and the answer built)
 - Author: `leostera`
 - Start Date: `2026-11-15`
 - Updated: `2026-11-15`
@@ -248,8 +248,8 @@ both together, as every do-kit change.
 ### Rollout and validation
 
 1. **The spec** (done): `specs/overload-refusal.ts`, with one and two lost answers.
-2. **The base class and the answer**: `Overloaded`, the registry, `{ overloaded }` in every
-   routed answer, the runtime's errors mapped. Tests under `cf dev`: a method that throws an app's
+2. **The base class and the answer** (built): `Overloaded`, the registry, `{ overloaded }` in
+   every routed and scan answer, the runtime's errors mapped, the partial outcome's `refused`. Tests under `cf dev`: a method that throws an app's
    kind reaches the caller as that class, with its detail; an unknown kind is a plain `Overloaded`;
    a refused call is not sent again (counted shard calls).
 3. **Admission in the shard**: the wait and in-flight signal, the hot-key top-8, key and shard
@@ -257,8 +257,8 @@ both together, as every do-kit change.
    `maxWaitMs` refuses, writing nothing; a hot key is refused while a cold one on the same shard is
    served; the client refuses without sending until the retry-after, then sends. A mutant per
    rule of the spec.
-4. **The layers**: `IndexPartitionOverloaded`, `CoordinatorOverloaded`, the partial outcome's
-   `refused`, and splits that skip a hot key's load.
+4. **The layers**: `IndexPartitionOverloaded`, `CoordinatorOverloaded`, and splits that skip a
+   hot key's load.
 5. **Deployed**: the same ramps to 2,048 in flight on 1, 16 and 64 shards, and the hot-config
    benchmark. Success is fewer slow failures (refusals in milliseconds, not after the queue), a
    lower p99 for the calls served, the same or higher throughput, and no splits for one hot key.

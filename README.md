@@ -522,9 +522,28 @@ The default threshold is about half of what one object handles on the edge, whic
   - `counters`: since the object last started, the writes held by splits and the longest hold, and:
     - `calls`: routed calls and scans that reached a method. `ok` of them returned; the rest answered "moved" or "not ready" from inside the method (a held write released as "moved", or held past `holdWaitMs`) or threw.
     - `moved`, `notReady`, `stale`: every such answer, both from inside a method and on arrival. Arrival answers (the caller's map was out of date) are not in `calls`.
+    - `overloaded`: calls refused with an `Overloaded` (below).
     - Calls the runtime sheds as overloaded never reach the object, so they appear nowhere: compare what you sent with `calls` plus the arrival answers.
 
   Reach any shard with `env.NS.get(env.NS.idFromName(shardObjectName(name, bits))).shardedDescribe()`.
+
+### Overloaded: refusing a call the caller can act on
+
+A call refused because something is overloaded throws an `Overloaded`, and was not applied ([RFD0013](docs/rfds/RFD0013-overload-refusal.md)). Nothing in do-kit queues or retries it: the caller decides. The error says what is overloaded (its class and `kind`), when trying again may help (`retryAfterMs`), and who refused (`source`: an object, or the runtime, which shed the call before it ran).
+
+- do-kit's kinds: `ShardOverloaded` (a shard, over many keys; `bits`), `KeyOverloaded` (one key; `key`) and `RouteOverloaded` (one route; `route`). The runtime's own shedding is a `ShardOverloaded` with `source: "runtime"`.
+- **Your own kinds:** subclass `Overloaded` with a `static kind`, throw it from a method **before it writes** (or inside `update`/`transact`, which roll back), and register it on the client with `overloads: [YourKind]`. RPC does not keep error classes, so the shard answers the error as data and the client rebuilds it; a kind the client doesn't register is a plain `Overloaded` that keeps its `kind`. `detail` (plain values) crosses to the caller.
+- **Over several shards**, a refusal fails only that shard's part: the error lists its keys under `refused` (not applied), next to `settled` and `unknown`. A table write's `results` say `{ refused: true }` for those rows.
+
+```ts
+class TenantOverQuota extends Overloaded {
+  static override readonly kind = "tenantQuota";
+}
+// In a method, before any write:
+if (spent > quota) throw new TenantOverQuota(`tenant ${tenant} is over quota`, { retryAfterMs: 60_000, scope: { key }, detail: { tenant } });
+// In the Worker:
+const t = table(env.USERS, "users", users, { overloads: [TenantOverQuota] });
+```
 
 ## Upgrading
 

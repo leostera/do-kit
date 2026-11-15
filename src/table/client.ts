@@ -69,9 +69,10 @@ export interface WriteOptions {
 
 /**
  * What one row of a write over several shards did, on the error of a write that failed: its
- * WriteResult where its shard answered, `unknown` where its shard failed (it may have applied).
+ * WriteResult where its shard answered, `refused` where its shard refused it as overloaded (not
+ * applied, RFD0013), `unknown` where its shard failed otherwise (it may have applied).
  */
-export type RowOutcome = WriteResult | { readonly unknown: true };
+export type RowOutcome = WriteResult | { readonly refused: true } | { readonly unknown: true };
 
 export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
   protected readonly client: Untyped;
@@ -236,8 +237,9 @@ export class TableClient<Row extends RowShape, C extends Commands<Row> = {}> {
             group.positions.forEach((p, i) => (out[start + p] = results[start + p] = group.result[i] as R));
           }
         } catch (error) {
-          const e = error as { settled?: { positions: readonly number[]; result: readonly unknown[] }[] } | null;
+          const e = error as { settled?: { positions: readonly number[]; result: readonly unknown[] }[]; refused?: { positions: readonly number[] }[] } | null;
           if (e && typeof e === "object" && e.settled) for (const group of e.settled) group.positions.forEach((p, i) => (results[start + p] = group.result[i]));
+          if (e && typeof e === "object" && e.refused) for (const group of e.refused) for (const p of group.positions) results[start + p] = { refused: true };
           throw error;
         }
       }),

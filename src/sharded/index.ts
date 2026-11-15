@@ -23,10 +23,12 @@ import { sharded, type ShardedClient } from "./client.js";
 import { hashBit, keyHash } from "./hash.js";
 import { pendingAlarm } from "./alarms.js";
 import { compareText, storedJson } from "./values.js";
+import { Overloaded, type OverloadAnswer } from "./overload.js";
 
 export { ATOMIC_HOLD_MS, ATOMIC_OUTCOME_TTL_MS, type AtomicMethod, type AtomicOutcome, type AtomicShardResult, type Prepared } from "./atomic.js";
 export { hashBit, keyHash } from "./hash.js";
 export { pendingAlarm, STRANDED_ALARM_MS } from "./alarms.js";
+export { KeyOverloaded, Overloaded, RouteOverloaded, ShardOverloaded, type OverloadAnswer, type OverloadClass, type OverloadDetail, type OverloadOptions, type OverloadScope, type OverloadSource } from "./overload.js";
 export { RouteMismatch, ShardFull, SpansShards, ShardedClient, sharded, type CallStats, type ShardDescription, type ShardedClientOptions, type ShardResult } from "./client.js";
 
 declare global {
@@ -147,7 +149,9 @@ export type CallAnswer<R> =
   /** The client routed `key` by another `routeOf` than this object's: nothing was called. */
   | { readonly routeMismatch: { readonly key: string; readonly client: string; readonly object: string } }
   /** The write would grow the shard past `refuseAtBytes`: refused, nothing applied. */
-  | { readonly full: string; readonly bytes: number; readonly cap: number };
+  | { readonly full: string; readonly bytes: number; readonly cap: number }
+  /** Refused as overloaded (RFD0013), before the method ran or by the method before it wrote: nothing applied. */
+  | { readonly overloaded: OverloadAnswer };
 
 /** An object's state, for tests and operators. */
 export interface NodeDescription {
@@ -252,6 +256,8 @@ export interface CallCounters {
   readonly moved: number;
   readonly notReady: number;
   readonly stale: number;
+  /** Calls refused as overloaded (RFD0013). */
+  readonly overloaded: number;
   /** Writes that waited on a split, and the longest wait. */
   readonly held: number;
   readonly heldMsMax: number;
@@ -631,7 +637,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
   private hold: Hold | null = null;
   /** A split is starting its new object, before it holds anything. */
   private warming = false;
-  private counters = { since: Date.now(), calls: 0, ok: 0, moved: 0, notReady: 0, stale: 0, held: 0, heldMsMax: 0 };
+  private counters = { since: Date.now(), calls: 0, ok: 0, moved: 0, notReady: 0, stale: 0, overloaded: 0, held: 0, heldMsMax: 0 };
   /** The split attempt whose logical copy this object takes (in memory: a restart refuses the rest). */
   private receiving: number | null = null;
   /** The stub options of the last routed call (in memory only): see `stubOptions`. */
@@ -1447,6 +1453,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
     if ("moved" in answer) this.counters.moved++;
     else if ("notReady" in answer) this.counters.notReady++;
     else if ("stale" in answer) this.counters.stale++;
+    else if ("overloaded" in answer) this.counters.overloaded++;
     return answer;
   }
 
@@ -1494,6 +1501,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
       if (error instanceof Full) return { full: bits, bytes: error.bytes, cap: error.cap };
       if (error instanceof Expired) return { expired: bits };
+      if (error instanceof Overloaded) return this.answered({ overloaded: error.toAnswer() });
       throw error;
     }
   }
@@ -1544,6 +1552,7 @@ export abstract class ShardedObject<Env = unknown, V = unknown> extends DurableO
       // A scan method that writes waits on a split as a call does; the client backs off and visits again.
       if (error instanceof NotReady) return this.answered({ notReady: bits, until: error.until });
       if (error instanceof Full) return { full: bits, bytes: error.bytes, cap: error.cap };
+      if (error instanceof Overloaded) return this.answered({ overloaded: error.toAnswer() });
       throw error;
     }
   }

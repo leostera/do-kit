@@ -5,6 +5,7 @@ import { ATOMIC_HOLD_MS, atomicTxId, type AtomicAnswer, type AtomicOutcome, type
 import { assertKey } from "./values.js";
 import { hashBit, keyHash } from "./hash.js";
 import { hostBits, shardObjectName, nodeName, type CallAnswer, type NodeDescription, type ShardedObject, type StubOptions } from "./index.js";
+import { Overloaded, overloadRegistry, parseOverloadAnswer, runtimeOverload, type OverloadClass } from "./overload.js";
 
 /**
  * Object ids by name, per namespace binding: computing one from a name is not free, and a client
@@ -139,6 +140,7 @@ export class DeadlineExpired extends Error {
  */
 export type ShardErrorKind = "overloaded" | "unknown" | "app";
 export function classifyShardError(error: unknown): ShardErrorKind {
+  if (error instanceof Overloaded) return "overloaded";
   const e = error as { overloaded?: unknown; retryable?: unknown; message?: unknown } | null;
   if (e?.overloaded === true) return "overloaded";
   if (error instanceof OutcomeUnknown) return "unknown";
@@ -155,11 +157,13 @@ const OTHER_REQUEST = /^Cannot perform I\/O on behalf of a different request/;
 /**
  * The failure of a call over several shards: the error of the first shard that failed, with
  * what every shard did. `settled` holds the answers of the shards that returned (their share
- * applied); `unknown` the keys of those that failed, which may have applied as well. Attached to
+ * applied); `refused` the keys of those that refused as overloaded (RFD0013: not applied);
+ * `unknown` the keys of those that failed otherwise, which may have applied as well. Attached to
  * the error itself, so its type and message stay the shard's.
  */
 export interface CallOutcomes<R> {
   readonly settled: readonly ShardResult<R>[];
+  readonly refused: readonly { readonly keys: readonly string[]; readonly positions: readonly number[]; readonly error: string }[];
   readonly unknown: readonly { readonly keys: readonly string[]; readonly positions: readonly number[]; readonly error: string }[];
 }
 
@@ -247,6 +251,12 @@ export interface ShardedClientOptions {
    * throws, is unaffected: errors of `onCall` are ignored.
    */
   readonly onCall?: (stats: CallStats) => void;
+  /**
+   * The app's own kinds of Overloaded (RFD0013): subclasses its objects throw, each with a static
+   * `kind` of its own. A shard's overload answer becomes the class of its kind, do-kit's or one of
+   * these; one of a kind the client does not know is a plain Overloaded with that kind.
+   */
+  readonly overloads?: readonly OverloadClass[];
 }
 
 /** What one call of the client took: its shard calls, the answers that sent it again, and its slowest shard. */
@@ -354,6 +364,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
   private readonly presplitHint: number;
   private readonly routeOf: ((key: string) => string) | null;
   private readonly callTimeoutMs: number | null;
+  private readonly overloads: ReadonlyMap<string, OverloadClass>;
   constructor(namespace: DurableObjectNamespace<T>, name: string, options: ShardedClientOptions = {}) {
     this.namespace = namespace;
     this.name = name;
@@ -366,6 +377,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     this.routeOf = options.routeOf ?? null;
     if (options.callTimeoutMs !== undefined && !(options.callTimeoutMs > 0 && options.callTimeoutMs <= 2 ** 31 - 1)) throw new Error(`sharded ${name}: callTimeoutMs must be a positive number of ms`);
     this.callTimeoutMs = options.callTimeoutMs ?? null;
+    this.overloads = overloadRegistry(name, options.overloads);
     this.identity = objectId(namespace, nodeName(name, "")).text;
   }
 
@@ -443,7 +455,8 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       const refused = kept && (error as { remote?: unknown })?.remote !== true && OTHER_REQUEST.test(String((error as Error)?.message ?? ""));
       if (refused) return this.timed(bits, keys, call(this.keep(bits)), giveUpAt);
       if (this.logShardErrors) console.error(JSON.stringify({ event: "sharded-shard-error", object: this.name, bits, kind: classifyShardError(error), error: String(error).slice(0, 200) }));
-      throw error;
+      // Shed by the runtime before it ran: a definite "not applied", as the shard's own refusal.
+      throw runtimeOverload(bits, error) ?? error;
     } finally {
       tally?.shard(bits, Date.now() - started);
     }
@@ -521,6 +534,13 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
     if (keys.length === 0) throw new Error(`sharded ${this.name}: callOneShard needs at least one key to pick its shard`);
     const [only] = await this.route<Result<T[M]>>(true, keys, method, payloads, this.method(method, args));
     return only!.result;
+  }
+
+  /** A shard's overload answer as the class of its kind; one that is not an overload answer is an UnknownAnswer. */
+  private overloaded(bits: string, answer: unknown): Error {
+    const parsed = parseOverloadAnswer(answer);
+    if (!parsed) return new UnknownAnswer(bits, { overloaded: answer });
+    return (this.overloads.get(parsed.kind) ?? Overloaded).fromAnswer(parsed, "object");
   }
 
   /** How `route` calls a shard for a method of the subclass. */
@@ -781,6 +801,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
           if ("ok" in answer) out.push({ keys: groupKeys, positions, result: answer.ok });
           else if ("routeMismatch" in answer) throw new RouteMismatch(answer.routeMismatch.key, answer.routeMismatch.client, answer.routeMismatch.object);
           else if ("expired" in answer) throw new DeadlineExpired(bits, groupKeys);
+          else if ("overloaded" in answer) throw this.overloaded(bits, answer.overloaded);
           else if ("moved" in answer) {
             if (tally) tally.retries.moved++;
             this.learn(answer.moved, answer.presplit);
@@ -807,8 +828,9 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       if (mismatch) throw mismatch.error;
       if (failed.length > 0) {
         const error = failed[0]!.error;
-        // Keys in neither list were not applied: answered moved, stale or not ready, not sent again.
-        const outcomes: CallOutcomes<R> = { settled: out, unknown: failed.map((f) => ({ keys: f.keys, positions: f.positions, error: String(f.error).slice(0, 200) })) };
+        // Keys in no list were not applied: answered moved, stale or not ready, not sent again.
+        const listed = (f: (typeof failed)[number]) => ({ keys: f.keys, positions: f.positions, error: String(f.error).slice(0, 200) });
+        const outcomes: CallOutcomes<R> = { settled: out, refused: failed.filter((f) => f.error instanceof Overloaded).map(listed), unknown: failed.filter((f) => !(f.error instanceof Overloaded)).map(listed) };
         if (typeof error === "object" && error !== null) Object.assign(error, outcomes);
         throw error;
       }
@@ -856,6 +878,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
         const answer = (await slots.run(() => this.onShard(bits, [], (stub) => stub.shardedScan(this.name, bits, method, args, this.stubOptions, this.presplitTo, Date.now()) as Promise<unknown>, this.giveUpAt(), tally))) as CallAnswer<Result<T[M]>>;
         if ("ok" in answer) out.push(answer.ok);
         else if ("absent" in answer) return;
+        else if ("overloaded" in answer) throw this.overloaded(bits, answer.overloaded);
         else if ("moved" in answer) {
           if (tally) tally.retries.moved++;
           this.learn(answer.moved, answer.presplit);
@@ -897,6 +920,7 @@ export class ShardedClient<T extends Rpc.DurableObjectBranded> {
       if ("ok" in answer) return { ok: answer.ok };
       // A presplit shard never called: it holds nothing, and is not made to say so.
       if ("absent" in answer) return { absent: true };
+      if ("overloaded" in answer) throw this.overloaded(bits, answer.overloaded);
       if ("moved" in answer) {
         if (tally) tally.retries.moved++;
         this.learn(answer.moved, answer.presplit);

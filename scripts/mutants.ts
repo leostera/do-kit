@@ -414,6 +414,48 @@ const MUTANTS: Mutant[] = [
     test: "test/colocation.test.ts",
     pattern: "a routed table lists and counts",
   },
+  {
+    name: "overload-not-answered",
+    breaks: "an Overloaded a method throws is answered as data, so the caller gets its class",
+    edits: [{ file: "src/sharded/index.ts", find: "      if (error instanceof Expired) return { expired: bits };\n      if (error instanceof Overloaded) return this.answered({ overloaded: error.toAnswer() });\n", replace: "      if (error instanceof Expired) return { expired: bits };\n" }],
+    test: "test/overload.test.ts",
+    pattern: "an app's kind thrown in a shard",
+  },
+  {
+    name: "overload-registry-ignored",
+    breaks: "an overload answer becomes the class of its kind",
+    edits: [{ file: "src/sharded/client.ts", find: "return (this.overloads.get(parsed.kind) ?? Overloaded).fromAnswer(parsed, \"object\");", replace: "return Overloaded.fromAnswer(parsed, \"object\");" }],
+    test: "test/overload-client.test.ts",
+    pattern: "class of its kind",
+  },
+  {
+    name: "runtime-overload-unmapped",
+    breaks: "the runtime's shedding is a ShardOverloaded",
+    edits: [{ file: "src/sharded/client.ts", find: "      throw runtimeOverload(bits, error) ?? error;", replace: "      throw error;" }],
+    test: "test/overload-client.test.ts",
+    pattern: "the runtime's shedding",
+  },
+  {
+    name: "runtime-overload-trusts-methods",
+    breaks: "a method's error that reads like the runtime's overload is not a refusal",
+    edits: [{ file: "src/sharded/overload.ts", find: "  if (e?.remote === true) return null;\n", replace: "" }],
+    test: "test/overload-client.test.ts",
+    pattern: "the runtime's shedding",
+  },
+  {
+    name: "refused-listed-unknown",
+    breaks: "a refused shard's keys are listed as refused, not unknown",
+    edits: [{ file: "src/sharded/client.ts", find: "refused: failed.filter((f) => f.error instanceof Overloaded).map(listed), unknown: failed.filter((f) => !(f.error instanceof Overloaded)).map(listed)", replace: "refused: [], unknown: failed.map(listed)" }],
+    test: "test/overload-client.test.ts",
+    pattern: "lists that shard's keys as refused",
+  },
+  {
+    name: "scan-overload-not-answered",
+    breaks: "an Overloaded a scan method throws is answered as data too",
+    edits: [{ file: "src/sharded/index.ts", find: "      if (error instanceof Full) return { full: bits, bytes: error.bytes, cap: error.cap };\n      if (error instanceof Overloaded) return this.answered({ overloaded: error.toAnswer() });\n      throw error;\n    }\n  }\n\n  /** Runs a routed method", replace: "      if (error instanceof Full) return { full: bits, bytes: error.bytes, cap: error.cap };\n      throw error;\n    }\n  }\n\n  /** Runs a routed method" }],
+    test: "test/overload.test.ts",
+    pattern: "a scan method's overload",
+  },
 ];
 
 /** A mutant whose text to change is gone from the source. */

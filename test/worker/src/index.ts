@@ -4,7 +4,7 @@
 //   POST /splits {cls, name}  (the splits this isolate's client knows)
 //   POST /tree {cls, name, presplitHint?}  (every shard, as its objects describe themselves)
 import { MAX_KNOWN_OBJECTS, RouteMismatch } from "../../../src/sharded/client.ts";
-import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, shardObjectName, sharded, ShardedObject, type AtomicMethod, type CallStats, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
+import { checkSplitPolicy, DEFAULT_SPLIT_POLICY, keyHash, Overloaded, shardObjectName, sharded, ShardedObject, ShardOverloaded, type AtomicMethod, type CallStats, type SplitPolicy, type StubOptions, type UpdateResult } from "../../../src/sharded/index.ts";
 import type { AtomicStep } from "../../../src/sharded/atomic.ts";
 import { defineCommands, defineTable, ShardedTable, table, TableClient, type Command, type Decision, type ListQuery, type TableSchema } from "../../../src/table/index.ts";
 import type { ShardPage, ShardPageRequest } from "../../../src/table/schema.ts";
@@ -886,6 +886,18 @@ export class OldAlarm extends ShardedObject<Env, number> {
   }
 }
 
+/** An app's own kind of overload (RFD0013), registered on the clients that call addUnlessOverQuota. */
+class TenantOverQuota extends Overloaded {
+  static override readonly kind: string = "tenantQuota";
+  get tenant(): string {
+    return String(this.detail.tenant);
+  }
+}
+/** A kind no client registers: it reaches the caller as a plain Overloaded. */
+class MysteryOverload extends Overloaded {
+  static override readonly kind: string = "mystery";
+}
+
 class CounterBase extends ShardedObject<Env, number> {
   /** The next statement containing `text`, with a bound value containing `binding`, throws once. */
   async failStatementWithOnce(text: string, binding: string): Promise<void> {
@@ -1210,6 +1222,34 @@ class CounterBase extends ShardedObject<Env, number> {
     });
   }
 
+  /**
+   * As add, unless a key says to refuse (RFD0013): "over-" throws an app's kind before writing,
+   * "mystery-" a kind no client registers, "late-" an app's kind inside the update after writing
+   * (rolled back), and "says-" an Error whose message is the runtime's overload, from the method.
+   */
+  /** A scan method that refuses as an app's kind. */
+  async quotaScan(): Promise<number> {
+    throw new TenantOverQuota("every tenant is over quota", { retryAfterMs: 7, detail: { tenant: "all" } });
+  }
+
+  async addUnlessOverQuota(keys: readonly string[], payloads: readonly number[]): Promise<number[]> {
+    const over = keys.find((k) => k.startsWith("over-"));
+    if (over) throw new TenantOverQuota(`tenant ${over} is over its quota`, { retryAfterMs: 60_000, scope: { key: over }, detail: { tenant: over, spent: 12 } });
+    if (keys.some((k) => k.startsWith("mystery-"))) throw new MysteryOverload("something is busy", { retryAfterMs: 5 });
+    if (keys.some((k) => k.startsWith("says-"))) throw new Error("Durable Object is overloaded. Too many requests queued.");
+    return this.update(keys, (current): UpdateResult<number, number[]> => {
+      const writes = new Map(keys.map((k, i) => [k, (current.get(k) ?? 0) + payloads[i]!]));
+      const late = keys.find((k) => k.startsWith("late-"));
+      if (late) {
+        // Written, then refused: the transaction rolls back, so the refusal still means "not applied".
+        this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY)");
+        this.ctx.storage.sql.exec("INSERT OR IGNORE INTO history (key) VALUES (?)", late);
+        throw new TenantOverQuota(`tenant ${late} went over its quota`, { retryAfterMs: 1_000, detail: { tenant: late } });
+      }
+      return { writes, result: keys.map((k) => writes.get(k)!) };
+    });
+  }
+
   /** Per key: sets `new` if the value is `old` (null: absent); true if it did. */
   async cas(keys: readonly string[], payloads: readonly { old: number | null; new: number | null }[]): Promise<boolean[]> {
     return this.update(keys, (current) => {
@@ -1405,8 +1445,8 @@ function namespace(env: Env, cls: string): DurableObjectNamespace<CounterBase> {
 /** POST /indexed {name, op, args}: one call of the indexed table client, or a test hook. */
 /** What a failed call tells its caller: its message, and any outcomes it carries. */
 function outcomeOf(error: unknown): unknown {
-  const e = error as { name?: string; settled?: unknown; unknown?: unknown; results?: unknown } | null;
-  return { threw: String(error), name: e?.name ?? null, settled: e?.settled ?? null, unknown: e?.unknown ?? null, results: e?.results ?? null };
+  const e = error as { name?: string; settled?: unknown; refused?: unknown; unknown?: unknown; results?: unknown } | null;
+  return { threw: String(error), name: e?.name ?? null, settled: e?.settled ?? null, refused: e?.refused ?? null, unknown: e?.unknown ?? null, results: e?.results ?? null };
 }
 
 async function indexedOp(env: Env, body: { name: string; op: string; args: unknown[]; cls?: "evolving"; version?: number }): Promise<unknown> {
@@ -1593,6 +1633,37 @@ export default {
           if (!client) keptClients.set(body.name, (client = sharded(ns, body.name)));
           const results = await client.call(body.keys, body.method as "get", (body.payloads ?? null) as null);
           return Response.json(results.flatMap((r) => r.result as unknown[]));
+        }
+        case "/overloadScan": {
+          try {
+            return Response.json({ ok: await sharded(ns, body.name, { overloads: [TenantOverQuota] }).scan("quotaScan" as never) });
+          } catch (error) {
+            return Response.json({ name: (error as Error)?.name ?? null, tenant: error instanceof TenantOverQuota ? error.tenant : null, retryAfterMs: (error as Overloaded)?.retryAfterMs ?? null });
+          }
+        }
+        case "/overload": {
+          // addUnlessOverQuota, and what the caller got if it threw: the error's class and fields.
+          const register = (body as { register?: boolean }).register !== false;
+          try {
+            return Response.json({ ok: (await sharded(ns, body.name, register ? { overloads: [TenantOverQuota] } : {}).call(body.keys, "addUnlessOverQuota" as "get", (body.payloads ?? null) as null)).flatMap((r) => r.result as unknown[]) });
+          } catch (error) {
+            const e = error as Overloaded & { refused?: unknown; settled?: unknown; unknown?: unknown };
+            return Response.json({
+              name: e?.name ?? null,
+              message: String(e?.message ?? error),
+              overloaded: error instanceof Overloaded,
+              shard: error instanceof ShardOverloaded,
+              tenant: error instanceof TenantOverQuota ? error.tenant : null,
+              kind: e?.kind ?? null,
+              source: e?.source ?? null,
+              retryAfterMs: e?.retryAfterMs ?? null,
+              scope: e?.scope ?? null,
+              detail: e?.detail ?? null,
+              refused: e?.refused ?? null,
+              settled: e?.settled ?? null,
+              unknown: e?.unknown ?? null,
+            });
+          }
         }
         case "/callOne": {
           const routed = (body as { routeOf?: "refs" }).routeOf === "refs";
