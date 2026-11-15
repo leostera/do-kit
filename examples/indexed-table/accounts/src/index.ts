@@ -36,6 +36,10 @@ const accounts = defineTable<Account>({
 /** The rows, sharded by id. */
 export class Accounts extends IndexedTable<Env, Account> {
   protected table = accounts;
+  /** This shard's rows, for the shard panel: an RPC to one shard, from its kept counts. */
+  rowCount(): number {
+    return this.ownedRowCount();
+  }
   protected nodes() {
     return this.env.ACCOUNTS;
   }

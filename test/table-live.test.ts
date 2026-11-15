@@ -1,7 +1,7 @@
 // Listings while the table changes under them. A walk that runs while writers insert and delete
-// and the table splits, with cleanup running, returns every row that existed throughout, once,
-// in order; rows written or deleted during it may or may not show. And a shard-order walk goes on
-// past pages over empty shards.
+// and the table splits, with cleanup running, returns every row that existed throughout, once;
+// rows written or deleted during it may or may not show. A walk goes on past pages over empty
+// shards, and through a shard that splits under it.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { encodeShardCursor } from "../src/table/schema.ts";
@@ -16,7 +16,7 @@ const table = <T = unknown>(name: string, op: string, ...args: unknown[]) => pos
 const doc = (name: string, i: number): Doc => ({ name, id: name, createdAt: i % 13, lastEditAt: null, deleted: false, meta: null });
 const firstHex = (key: string) => Number.parseInt(createHash("sha256").update(key).digest("hex")[0]!, 16);
 
-for (const query of [{ label: "by key", q: {} }, { label: "by an index, descending", q: { index: "byCreated", direction: "desc" } }, { label: "in shard order", q: { order: "shard" } }] as const) {
+for (const query of [{ label: "by key", q: {} }, { label: "by an index, descending", q: { index: "byCreated", direction: "desc" } }] as const) {
   test(`a listing ${query.label} during writes and splits returns every row that existed throughout, once`, async () => {
     const name = `live-${unique()}`;
     const stable = Array.from({ length: 120 }, (_, i) => doc(`s-${String(i).padStart(3, "0")}`, i));
@@ -57,20 +57,10 @@ for (const query of [{ label: "by key", q: {} }, { label: "by an index, descendi
     expect(names.filter((n, i) => names.indexOf(n) !== i)).toEqual([]);
     // Every row that existed throughout.
     expect(stable.map((d) => d.name).filter((n) => !names.includes(n))).toEqual([]);
-    // In order (a shard-order walk is ordered within each shard only).
-    if (!("order" in query.q)) {
-      const key = (d: Doc) => ("index" in query.q ? [d.createdAt, d.name] : [0, d.name]) as [number, string];
-      const sorted = [...listed].sort((a, b) => {
-        const [x, y] = [key(a), key(b)];
-        const d = x[0] - y[0] || (x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0);
-        return "direction" in query.q ? -d : d;
-      });
-      expect(names).toEqual(sorted.map((d) => d.name));
-    }
   }, 180_000);
 }
 
-test("a shard-order walk goes on past pages over only empty shards, and finds the rows after them", async () => {
+test("a walk goes on past pages over only empty shards, and finds the rows after them", async () => {
   const name = `empty-shards-${unique()}`;
   await table(name, "put", doc("warm", 0));
   await table(name, "delete", "warm");
@@ -80,7 +70,7 @@ test("a shard-order walk goes on past pages over only empty shards, and finds th
   // before the rows are empty, as many as a page asks, so its first page has no rows.
   const keys = Array.from({ length: 400 }, (_, i) => `k${i}`).filter((k) => firstHex(k) >> 1 === 4).slice(0, 8);
   await table(name, "putMany", keys.map((k, i) => ({ row: doc(k, i) })));
-  const query = { order: "shard", limit: 5, budget: 5 };
+  const query = { limit: 5, budget: 5 };
   const any = await table<Page>(name, "list", query);
   const { f } = JSON.parse(Buffer.from(any.cursor!, "base64url").toString()) as { f: string };
   let cursor: string | null = encodeShardCursor(f, { leaf: "001", after: null, floors: [], start: "001", wrapped: false });
@@ -96,7 +86,7 @@ test("a shard-order walk goes on past pages over only empty shards, and finds th
   expect(names.sort()).toEqual([...keys].sort());
 }, 120_000);
 
-test("a shard-order walk through a shard that splits twice under it lists each row once", async () => {
+test("a walk through a shard that splits twice under it lists each row once", async () => {
   const name = `walk-twice-${unique()}`;
   const rows = Array.from({ length: 90 }, (_, i) => doc(`r-${String(i).padStart(3, "0")}`, i));
   await table(name, "putMany", rows.map((row) => ({ row })));
@@ -104,7 +94,7 @@ test("a shard-order walk through a shard that splits twice under it lists each r
   const leaves: string[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < 100; page++) {
-    const result: Page = await table<Page>(name, "list", { order: "shard", limit: 5, cursor });
+    const result: Page = await table<Page>(name, "list", { limit: 5, cursor });
     names.push(...result.rows.map((r) => r.row.name));
     cursor = result.cursor;
     if (cursor === null) break;

@@ -1,7 +1,8 @@
 // ShardedTable: typed rows on a sharded object, with indexes kept by each shard for its own rows,
-// conditional writes, listings merged across shards, and counts. See docs/rfds/RFD0002-sharded-table.md.
+// conditional writes, and listings that walk the shards. See docs/rfds/RFD0002-sharded-table.md and
+// RFD0012 (every call reaches the shards its keys are on, or one a page).
 import { ShardedObject } from "../sharded/index.js";
-import { compareText, DEFAULT_MAX_COUNT_VALUES, readToEnd, DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type GroupCount, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
+import { compareText, readToEnd, DEFAULT_MAX_ROW_BYTES, encodeIndexKey, encodeValue, RowTooLarge, pageRequest, shortDigest, type ColumnType, type Condition, type RowShape, type ShardPage, type ShardPageRequest, type SqlValue, type TableSchema, type Versioned, type WriteResult, type ApplyOutcome, type ApplyRequest, type Commands, type Decision } from "./schema.js";
 
 export * from "./schema.js";
 export { table, TableClient, type TableClientOptions } from "./client.js";
@@ -9,9 +10,6 @@ export { table, TableClient, type TableClientOptions } from "./client.js";
 const UTF8 = new TextEncoder();
 const TABLE = "sharded_table";
 const COUNTS = "sharded_table_counts";
-/** Rows per value of a count group's column, per hash prefix like COUNTS; and which groups are kept. */
-const GROUP_COUNTS = "sharded_table_group_counts";
-const COUNT_GROUPS = "sharded_table_count_groups";
 /**
  * One row, "deleted": the highest version a deleted row of this shard had. A row written where
  * none is starts above it, so a version is never reused for a key, and a write conditional on a
@@ -20,10 +18,6 @@ const COUNT_GROUPS = "sharded_table_count_groups";
 const VERSIONS = "sharded_table_versions";
 /** Indexes being built over rows that were there before them: how far each has got. */
 const BUILDS = "sharded_table_builds";
-/** Count groups being counted over the rows stored, and how far (the last key counted). */
-const COUNT_BUILDS = "sharded_table_count_builds";
-/** Count groups dropped, whose counts are deleted a batch at a time. */
-const COUNT_DROPS = "sharded_table_count_drops";
 /** Rows written by code older than the schema the shard recorded: their index keys may be stale. */
 const DIRTY = "sharded_table_dirty";
 /**
@@ -92,8 +86,6 @@ const MAX_TABLE_DEPTH = BUCKET_DIGITS * 4;
 const CLEANUP_BATCH = 250;
 /** A shard's page stops once its rows hold this much text (UTF-16 units, about bytes): RPC answers stay small. */
 const PAGE_BYTES = 4 * 1024 * 1024;
-/** Counts of a dropped group deleted a step: each reads about four rows (the table and its key). */
-const COUNT_DROP_BATCH = 120;
 /** How long one alarm takes build steps for, at most, before it asks for the next. */
 const ALARM_BUILD_MS = 200;
 
@@ -254,17 +246,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.ready();
     this.assertOwns([]);
     const checked = pageRequest({ ...(request.index == null ? {} : { index: request.index }), direction: request.direction, where: request.where, limit: request.limit, budget: request.budget }, request.after);
-    const counts = typeof request.withCount === "string" ? this.countBy(request.withCount) : undefined;
-    const page = this.page(checked);
-    if (!request.withCount) return page;
-    return { ...page, total: this.count(), ...(counts ? { counts } : {}) };
-  }
-
-  /** Rows this shard owns. */
-  async tableCount(): Promise<number> {
-    this.ready();
-    this.assertOwns([]);
-    return this.count();
+    return this.page(checked);
   }
 
   /**
@@ -272,7 +254,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
    * prefixes) after `after`, reading at most `budget` rows by the hash's index (a bucket that holds
    * more, as a route's can, is counted whole). A bucket whose count drifted (a subclass wrote the
    * table directly, a bad migration) is set to what its rows say. `next`: the last bucket counted,
-   * to pass back; null when the shard is done. Group counts are not recounted.
+   * to pass back; null when the shard is done.
    */
   async tableVerifyCounts(after: string | null, budget = 10_000): Promise<{ buckets: number; repaired: number; next: string | null }> {
     this.ready();
@@ -305,19 +287,22 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
         if (n === 0) this.db.exec(`DELETE FROM ${COUNTS} WHERE bucket = ?`, bucket);
         else this.db.exec(`INSERT INTO ${COUNTS} (bucket, n) VALUES (?, ?) ON CONFLICT (bucket) DO UPDATE SET n = excluded.n`, bucket, n);
       }
-      if (repaired > 0) this.counted = null;
       return { buckets: tally.size, repaired, next: cut && last < bhi ? last : null };
     });
   }
 
-  /** Rows this shard owns, per value of a count group's column (values with no rows left out). */
-  async tableCountBy(group: string): Promise<GroupCount[]> {
-    this.ready();
-    this.assertOwns([]);
-    return this.countBy(group);
-  }
-
   // ---- Row helpers for subclasses (writes inside `transact`) ----
+
+  /**
+   * Rows this shard owns, from the counts kept per hash prefix: no row is read. For a subclass's
+   * own reports (a shard's size, a test's check); the client counts nothing across shards (RFD0012).
+   */
+  protected ownedRowCount(): number {
+    this.migrate();
+    const [lo, hi] = this.ownedBuckets();
+    // A range of the buckets' key: the shard's own, not every bucket it stores until cleanup.
+    return this.db.exec<{ n: number | null }>(`SELECT SUM(n) AS n FROM ${COUNTS} WHERE bucket >= ? AND bucket <= ?`, lo, hi).one().n ?? 0;
+  }
 
   /** The row of `key`, or null. */
   protected getRow(key: string): Versioned<Row> | null {
@@ -330,7 +315,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   protected putRow(row: Row, options: PutOptions = {}): WriteResult {
     this.migrate();
     const key = row[this.table.primaryKey] as string;
-    // One read of the row: its version, and what its indexes and counts had. Only those columns
+    // One read of the row: its version, and what its indexes had. Only those columns
     // (all of them for a class that watches rows): a large value is not copied out to be replaced.
     const existing = this.db.exec<Record<string, SqlValue>>(`SELECT ${this.putReads()} FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).toArray()[0] ?? null;
     const current = (existing?._version as number | undefined) ?? 0;
@@ -360,19 +345,18 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       this.insertClustered(TABLE, [...names.map((n) => this.q(n)), "_hash", "_version"], [...names.map((n) => stored[n]!), this.routeHash(key), version], key);
     }
     if (current === 0) this.countRow(key, 1);
-    this.countGroups(key, before, stored);
     this.updateKeys(key, before, stored);
     this.markDirty(key);
     if (watched) this.rowWritten(key, watched.before, watched.after, version);
     return { ok: true, version };
   }
 
-  /** What a put reads of the row it replaces: its version, and the columns its indexes and counts use. */
+  /** What a put reads of the row it replaces: its version, and the columns its indexes use. */
   private putReads(): string {
     const schema = this.table;
     if (this.watchesRows()) return "*";
     if (this.putReadsOf?.schema !== schema) {
-      const columns = new Set<string>([schema.primaryKey, ...Object.values(schema.indexes ?? {}).flat(), ...Object.values(schema.counts ?? {})]);
+      const columns = new Set<string>([schema.primaryKey, ...Object.values(schema.indexes ?? {}).flat()]);
       this.putReadsOf = { schema, columns: [...[...columns].map((c) => this.q(c)), "_version"].join(", ") };
     }
     return this.putReadsOf.columns;
@@ -422,7 +406,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       version,
       key,
     );
-    this.countGroups(key, before, stored);
     this.updateKeys(key, before, stored);
     this.markDirty(key);
     if (watched) this.rowWritten(key, watched.before, watched.after, version);
@@ -443,7 +426,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     const before = this.storedRow(key);
     this.db.exec(`DELETE FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key);
     this.countRow(key, -1);
-    this.countGroups(key, before, null);
     this.updateKeys(key, before, null);
     this.markDirty(key);
     // Watched, the delete is a write of its own, at one past the row's last version: a row written
@@ -482,7 +464,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.migrated = false;
     this.keyIndex = "";
     this.buildAlarm = "none";
-    this.counted = null;
     this.deletedAt = null;
     this.indexDefs = null;
     this.compacting = new Map();
@@ -516,8 +497,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       const batch = Math.min(limit, CLEANUP_BATCH);
       deleted = this.db.exec(`DELETE FROM ${COUNTS} WHERE bucket IN (SELECT bucket FROM ${COUNTS} WHERE bucket < ? OR bucket > ? LIMIT ?)`, blo, bhi, batch).rowsWritten;
       if (this.db.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", OPS).one().n > 0) deleted += this.db.exec(`DELETE FROM ${OPS} WHERE _hash < ? OR _hash > ?`, lo, hi).rowsWritten;
-      // A batch at a time: a group of many values has a row per value and bucket.
-      if (deleted === 0) deleted = this.db.exec(`DELETE FROM ${GROUP_COUNTS} WHERE (grp, value, bucket) IN (SELECT grp, value, bucket FROM ${GROUP_COUNTS} WHERE bucket < ? OR bucket > ? LIMIT ?)`, blo, bhi, batch).rowsWritten;
       if (deleted === 0 && this.db.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", DIRTY).one().n > 0) deleted = this.db.exec(`DELETE FROM ${DIRTY} WHERE key IN (SELECT key FROM ${DIRTY} WHERE hash < ? OR hash > ? LIMIT ?)`, lo, hi, batch).rowsWritten;
     }
     return deleted + super.cleanupForeign(owns, limit);
@@ -727,7 +706,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   /**
    * Brings this shard's storage up to the schema, once per instance, on its first use: cheap
    * statements only (tables, columns, and what is left to build). What is proportional to the
-   * rows (filling a new index's keys, counting a new group, refreshing rows a rollback wrote) is
+   * rows (filling a new index's keys, deleting retired counts, refreshing rows a rollback wrote) is
    * done by `buildStep`, a bounded step at a time, by calls and by the alarm.
    */
   protected migrate(): void {
@@ -743,8 +722,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       this.rollback = ready.rollback;
       this.unknownLocal = ready.unknownLocal;
       this.building = new Set();
-      this.counting = new Map();
-      this.countDrops = this.keyClears = this.keyDrops = this.dirtyRows = false;
+      this.keyClears = this.keyDrops = this.dirtyRows = false;
       this.compacting = new Map();
       this.migrated = true;
       return;
@@ -782,10 +760,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${TABLE} (${pk} TEXT PRIMARY KEY NOT NULL, _hash TEXT NOT NULL, _version INTEGER NOT NULL)`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${COUNTS} (bucket TEXT PRIMARY KEY NOT NULL, n INTEGER NOT NULL) WITHOUT ROWID`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${VERSIONS} (name TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL) WITHOUT ROWID`);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS ${GROUP_COUNTS} (grp TEXT NOT NULL, value TEXT NOT NULL, bucket TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (grp, value, bucket)) WITHOUT ROWID`);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS ${COUNT_GROUPS} (grp TEXT PRIMARY KEY NOT NULL, col TEXT NOT NULL) WITHOUT ROWID`);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS ${COUNT_BUILDS} (grp TEXT PRIMARY KEY NOT NULL, col TEXT NOT NULL, after TEXT) WITHOUT ROWID`);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS ${COUNT_DROPS} (grp TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${BUILDS} (ix TEXT PRIMARY KEY NOT NULL, after TEXT) WITHOUT ROWID`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${DIRTY} (key TEXT PRIMARY KEY NOT NULL, hash TEXT NOT NULL) WITHOUT ROWID`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${KEY_CLEARS} (col TEXT PRIMARY KEY NOT NULL, after TEXT, done INTEGER NOT NULL) WITHOUT ROWID`);
@@ -859,7 +833,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     }
     this.keyClears = this.db.exec(`SELECT 1 FROM ${KEY_CLEARS} WHERE done = 0 LIMIT 1`).toArray().length > 0;
     this.keyDrops = this.db.exec(`SELECT 1 FROM ${KEY_DROPS} LIMIT 1`).toArray().length > 0;
-    this.migrateCountGroups(empty);
     this.unknownLocal = unknown;
     this.dirtyRows = !this.rollback && this.db.exec(`SELECT 1 FROM ${DIRTY} LIMIT 1`).toArray().length > 0;
     this.keyIndex = this.db.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name LIKE 'sqlite_autoindex_%'`, TABLE).one().name;
@@ -882,10 +855,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   private buildAlarm: "none" | "asking" | "asked" = "none";
   /** Local indexes (by key column) whose keys are being filled in. */
   private building = new Set<string>();
-  /** Count groups being counted, and the last key counted (null: none yet). */
-  private counting = new Map<string, string | null>();
-  /** Count groups whose counts are being deleted. */
-  private countDrops = false;
   /** Key columns of the earlier layout are being cleared. */
   private keyClears = false;
   /** Key tables of dropped indexes are being emptied. */
@@ -930,7 +899,7 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
 
   /** Whether any build step is left. */
   private buildWorkLeft(): boolean {
-    return this.building.size > 0 || this.counting.size > 0 || this.countDrops || this.keyClears || this.keyDrops || this.dirtyRows || this.compacting.size > 0;
+    return this.building.size > 0 || this.keyClears || this.keyDrops || this.dirtyRows || this.compacting.size > 0;
   }
 
   /** Build steps, from the alarm: a few, then the alarm again if more is left. */
@@ -966,8 +935,8 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
 
   /**
    * One step of what the migration left to do, in one transaction, at most `indexBuildRows` rows:
-   * deleting the counts of a dropped group, refreshing rows older code wrote, filling in a new
-   * index's keys, or counting a new group. True if more is left. Calls and the alarm take them.
+   * deleting retired group counts, refreshing rows older code wrote, or filling in a new index's
+   * keys. True if more is left. Calls and the alarm take them.
    */
   protected buildStep(): boolean {
     this.migrate();
@@ -986,15 +955,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       after === null
         ? this.db.exec<Record<string, SqlValue>>(`SELECT ${columns} FROM ${TABLE} ORDER BY ${pk} LIMIT ?`, limit).toArray()
         : this.db.exec<Record<string, SqlValue>>(`SELECT ${columns} FROM ${TABLE} WHERE ${pk} > ? ORDER BY ${pk} LIMIT ?`, after, limit).toArray();
-    if (this.countDrops) {
-      this.ctx.storage.transactionSync(() => {
-        const grp = this.db.exec<{ grp: string }>(`SELECT grp FROM ${COUNT_DROPS} LIMIT 1`).toArray()[0]?.grp;
-        if (grp === undefined) return void (this.countDrops = false);
-        const deleted = this.db.exec(`DELETE FROM ${GROUP_COUNTS} WHERE (grp, value, bucket) IN (SELECT grp, value, bucket FROM ${GROUP_COUNTS} WHERE grp = ? LIMIT ?)`, grp, COUNT_DROP_BATCH).rowsWritten;
-        if (deleted === 0) this.db.exec(`DELETE FROM ${COUNT_DROPS} WHERE grp = ?`, grp);
-      });
-      return this.buildWorkLeft();
-    }
     if (this.keyClears) {
       this.ctx.storage.transactionSync(() => {
         const clear = this.db.exec<{ col: string; after: string | null }>(`SELECT col, after FROM ${KEY_CLEARS} WHERE done = 0 LIMIT 1`).toArray()[0];
@@ -1079,24 +1039,6 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
       });
       return this.buildWorkLeft();
     }
-    const [grp, after] = [...this.counting][0] ?? [];
-    if (grp !== undefined) {
-      const col = this.table.counts![grp]!;
-      this.ctx.storage.transactionSync(() => {
-        const page = pageAfter(`${pk} AS _key, _hash, ${this.q(col)} AS _value`, after ?? null, budget);
-        for (const r of page) this.countGroup(grp, r._value ?? null, r._hash as string, 1);
-        if (page.length === budget) {
-          const last = page.at(-1)!._key as string;
-          this.db.exec(`UPDATE ${COUNT_BUILDS} SET after = ? WHERE grp = ?`, last, grp);
-          this.counting.set(grp, last);
-          return;
-        }
-        this.db.exec(`INSERT OR REPLACE INTO ${COUNT_GROUPS} (grp, col) VALUES (?, ?)`, grp, col);
-        this.db.exec(`DELETE FROM ${COUNT_BUILDS} WHERE grp = ?`, grp);
-        this.counting.delete(grp);
-      });
-      return this.buildWorkLeft();
-    }
     return false;
   }
 
@@ -1109,82 +1051,14 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
   /** A layer above: after a step that refreshed rows, outside its transaction (IndexedTable delivers). */
   protected afterBuildStep(): void {}
 
-  /**
-   * Keeps the count groups of the schema. A group removed or moved to another column has its
-   * counts deleted, a batch a step (a rollback's code drops those it doesn't know too: its writes
-   * would not keep them). A new one is counted over the rows stored, a page a step, while writes
-   * count their change only for rows the count has passed.
-   */
-  private migrateCountGroups(empty: boolean): void {
-    const wanted = this.table.counts ?? {};
-    const kept = this.db.exec<{ grp: string; col: string }>(`SELECT grp, col FROM ${COUNT_GROUPS}`).toArray();
-    const counting = this.db.exec<{ grp: string; col: string; after: string | null }>(`SELECT grp, col, after FROM ${COUNT_BUILDS}`).toArray();
-    for (const { grp, col } of [...kept, ...counting]) {
-      if (wanted[grp] === col) continue;
-      this.ctx.storage.transactionSync(() => {
-        this.db.exec(`DELETE FROM ${COUNT_GROUPS} WHERE grp = ?`, grp);
-        this.db.exec(`DELETE FROM ${COUNT_BUILDS} WHERE grp = ?`, grp);
-        this.db.exec(`INSERT OR IGNORE INTO ${COUNT_DROPS} (grp) VALUES (?)`, grp);
-      });
-    }
-    this.counting = new Map();
-    this.countDrops = this.db.exec(`SELECT 1 FROM ${COUNT_DROPS} LIMIT 1`).toArray().length > 0;
-    for (const [grp, col] of Object.entries(wanted) as [string, string][]) {
-      if (kept.some((k) => k.grp === grp && k.col === col)) continue;
-      const going = counting.find((c) => c.grp === grp && c.col === col);
-      if (!going && empty && !this.countDrops) {
-        this.db.exec(`INSERT OR REPLACE INTO ${COUNT_GROUPS} (grp, col) VALUES (?, ?)`, grp, col);
-        continue;
-      }
-      if (!going) this.db.exec(`INSERT OR REPLACE INTO ${COUNT_BUILDS} (grp, col, after) VALUES (?, ?, NULL)`, grp, col);
-      this.counting.set(grp, going?.after ?? null);
-    }
-    this.countDrops = this.db.exec(`SELECT 1 FROM ${COUNT_DROPS} LIMIT 1`).toArray().length > 0;
-  }
-
-  /**
-   * Rows this shard owns (its migrated storage): summed from the counts once an instance and
-   * owned range, then kept in step by the writes. A write transaction that rolls back drops it
-   * (afterRollback), and the next count sums again.
-   */
-  private count(): number {
-    const [lo, hi] = this.ownedBuckets();
-    const range = `${lo}-${hi}`;
-    if (this.counted?.range !== range) this.counted = { range, n: this.db.exec<{ n: number | null }>(`SELECT SUM(n) AS n FROM ${COUNTS} WHERE bucket >= ? AND bucket <= ?`, lo, hi).one().n ?? 0 };
-    return this.counted.n;
-  }
-  private counted: { range: string; n: number } | null = null;
-
-  protected override afterRollback(): void {
-    this.counted = null;
-    super.afterRollback();
-  }
-
-  private countBy(group: string): GroupCount[] {
-    const col = this.table.counts?.[group];
-    if (col === undefined) throw new Error(`no count group ${group}`);
-    if (this.counting.has(group) || this.countDrops) this.notReady();
-    const [lo, hi] = this.ownedBuckets();
-    // The first values, one more than reported, so the client can tell it is cut.
-    const max = (this.table.maxCountValues ?? DEFAULT_MAX_COUNT_VALUES) + 1;
-    // In the key's order (grp, value, bucket): grouped as read, nothing sorted, and it stops after
-    // the first values. `+bucket` keeps SQLite on the key (a WITHOUT ROWID table's own order).
-    const rows = this.db.exec<{ value: string; n: number }>(`SELECT value, SUM(n) AS n FROM ${GROUP_COUNTS} WHERE grp = ? AND +bucket >= ? AND +bucket <= ? GROUP BY value HAVING SUM(n) <> 0 ORDER BY value LIMIT ?`, group, lo, hi, max).toArray();
-    const type = this.table.columns[col as keyof Row & string];
-    return rows.map(({ value, n }) => {
-      const v = JSON.parse(value) as SqlValue;
-      return { value: v === null ? null : type === "boolean" ? v === 1 : v, count: n };
-    });
-  }
-
   private ownedBuckets(): [string, string] {
     const [lo, hi] = this.ownedHashRange();
     return [lo.slice(0, BUCKET_DIGITS), hi.slice(0, BUCKET_DIGITS)];
   }
 
-  /** The stored values of a row that exists, if a count group or an index needs them (else null). */
+  /** The stored values of a row that exists, if an index needs them (else null). */
   private storedRow(key: string): Record<string, SqlValue> | null {
-    if (Object.keys(this.table.counts ?? {}).length === 0 && this.indexes().length === 0) return null;
+    if (this.indexes().length === 0) return null;
     return this.db.exec<Record<string, SqlValue>>(`SELECT * FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).one();
   }
 
@@ -1205,40 +1079,11 @@ export abstract class ShardedTable<Env, Row extends RowShape> extends ShardedObj
     }
   }
 
-  /** Moves a row between the values of each count group: from `before` (null: new) to `after` (null: deleted). */
-  private countGroups(key: string, before: Record<string, SqlValue> | null, after: Record<string, SqlValue> | null): void {
-    const groups = Object.entries(this.table.counts ?? {}) as [string, string][];
-    if (groups.length === 0) return;
-    const hash = this.routeHash(key);
-    for (const [grp, col] of groups) {
-      // Being counted: a row past the build's cursor is counted when the build gets there.
-      if (this.counting.has(grp)) {
-        const after = this.counting.get(grp)!;
-        if (after === null || key > after) continue;
-      }
-      const from = before ? (before[col] ?? null) : undefined;
-      const to = after ? (after[col] ?? null) : undefined;
-      if (from === to) continue;
-      if (from !== undefined) this.countGroup(grp, from, hash, -1);
-      if (to !== undefined) this.countGroup(grp, to, hash, 1);
-    }
-  }
-
-  private countGroup(grp: string, value: SqlValue, hash: string, delta: number): void {
-    this.db.exec(`INSERT INTO ${GROUP_COUNTS} (grp, value, bucket, n) VALUES (?, ?, ?, ?) ON CONFLICT (grp, value, bucket) DO UPDATE SET n = n + excluded.n`, grp, JSON.stringify(value), hash.slice(0, BUCKET_DIGITS), delta);
-  }
-
   private version(key: string): number {
     return this.db.exec<{ v: number }>(`SELECT _version AS v FROM ${TABLE} WHERE ${this.q(this.table.primaryKey)} = ?`, key).toArray()[0]?.v ?? 0;
   }
 
   private countRow(key: string, delta: number): void {
-    // Kept in step only for a key this shard owns (the count is of the owned range).
-    if (this.counted) {
-      const [lo, hi] = this.ownedBuckets();
-      const bucket = this.routeHash(key).slice(0, BUCKET_DIGITS);
-      if (bucket >= lo && bucket <= hi) this.counted = { ...this.counted, n: this.counted.n + delta };
-    }
     this.db.exec(`INSERT INTO ${COUNTS} (bucket, n) VALUES (?, ?) ON CONFLICT (bucket) DO UPDATE SET n = n + excluded.n`, this.routeHash(key).slice(0, BUCKET_DIGITS), delta);
   }
 

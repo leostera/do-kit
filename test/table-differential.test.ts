@@ -3,7 +3,8 @@
 // 1. Index keys: random tuples ordered by encodeIndexKey must come out as a workerd SQLite table
 //    orders them (`ORDER BY c1, c2, c3`), NUL and U+FFFF included.
 // 2. A seeded differential test: the same operations on a sharded table (splitting as it goes)
-//    and on a plain SQLite table, on adversarial keys; every read, listing and count agrees.
+//    and on a plain SQLite table, on adversarial keys; every read and count agrees, and every
+//    listing has the same rows, each shard's in SQLite's order.
 //    FC_SEED picks the run; a failure prints the seed and the operations.
 import { expect, test } from "bun:test";
 import fc from "fast-check";
@@ -103,7 +104,12 @@ test("seeded operations on a sharded table and a plain SQLite table agree on eve
       log.push(`list ${listing.index ?? "primary"}`);
       const ours = (await table<{ row: Doc }[]>(name, "all", { index: listing.index, direction: listing.direction, where: listing.where, limit: 3 })).map((r) => r.row.name);
       const [theirs] = (await sql(name, [{ query: `SELECT name FROM ref ${listing.filter ? `WHERE ${listing.filter}` : ""} ORDER BY ${listing.order}` }])) as { name: string }[][];
-      if (JSON.stringify(ours) !== JSON.stringify(theirs!.map((t) => t.name))) differences.push(`step ${step}, list ${listing.index ?? "primary"}: table ${JSON.stringify(ours)}, sqlite ${JSON.stringify(theirs!.map((t) => t.name))}`);
+      // Shard by shard: the same rows, each shard's in SQLite's order, so at most once back in it a shard.
+      const want = theirs!.map((t) => t.name);
+      const rank = new Map(want.map((n, i) => [n, i]));
+      const back = ours.filter((n, i) => i > 0 && rank.get(n)! < rank.get(ours[i - 1]!)!).length;
+      const shardCount = 5 - splits.length;
+      if (JSON.stringify([...ours].sort()) !== JSON.stringify([...want].sort()) || back > shardCount) differences.push(`step ${step}, list ${listing.index ?? "primary"}: table ${JSON.stringify(ours)}, sqlite ${JSON.stringify(theirs!.map((t) => t.name))}`);
       const count = await table<number>(name, "count");
       const [n] = (await sql(name, [{ query: "SELECT COUNT(*) AS n FROM ref" }])) as { n: number }[][];
       if (count !== n![0]!.n) differences.push(`step ${step}, count: table ${count}, sqlite ${n![0]!.n}`);

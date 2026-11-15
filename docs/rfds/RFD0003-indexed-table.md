@@ -45,7 +45,7 @@ to ask every shard:
   second table the caller maintains by hand.
 - **Uniqueness on another column.** Two sign-ups with the same email land on different shards, and
   nothing stops both.
-- **Listings.** A page asks every shard for its share. In our benchmarks, listing throughput stays
+- **Listings.** A page asks every shard for its share (removed since, by [RFD0012](RFD0012-shard-local-tables.md), for this reason). In our benchmarks, listing throughput stays
   near one object's (about 370–400 pages/s at 1, 4 and 16 shards) while writes grow with shards
   (1,011 writes/s on one shard, 4,391 on 64), and a page gets slower as shards are added: at 64 in
   flight, its median is 805 ms on 64 shards against 231 ms on one.
@@ -84,7 +84,6 @@ const users = defineTable<User>({
   primaryKey: "id", // rows still live on the shard of their ID
   columns: { id: "text", email: "text", name: "text", team: "text", status: "text", createdAt: "integer" },
   indexes: { byStatus: ["status"] }, // per-shard, as in ShardedTable
-  counts: { byStatus: "status" },
   globalIndexes: {
     byEmail: { columns: ["email"], unique: true }, // partitioned by email (phase 1)
     byTeam: { columns: ["team", "createdAt"], partition: 1 }, // by team, sorted by createdAt (phase 1)

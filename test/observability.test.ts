@@ -174,24 +174,19 @@ test("redact takes row keys out of error text and bounds its length", async () =
 type Stats = { kind: string; method: string; ms: number; shardCalls: number; retries: { moved: number; stale: number; notReady: number }; slowest: { bits: string; ms: number } | null; error: string | null };
 const withStats = (cls: string, name: string, op: string, args: unknown[]) => post<{ ok?: unknown; threw?: string; stats: Stats[] }>("/table", { cls, name, op, args, stats: true });
 
-test("onCall says which shard a listing waited on, in query order and in shard order", async () => {
+test("onCall says which shard a listing waited on", async () => {
   const name = `stats-slow-${unique()}`;
   await post("/table", { cls: "presplitTable", name, op: "putMany", args: [Array.from({ length: 40 }, (_, i) => ({ row: doc(`d${i}`, i) }))] });
   await post("/object", { cls: "presplitTable", name, bits: "10", method: "slowPages", args: [150] });
-  const page = await withStats("presplitTable", name, "list", [{ limit: 50 }]);
-  expect(page.threw).toBeUndefined();
-  const [query] = page.stats;
-  // Four shards, one call each, none sent again, and the slow one named.
-  expect(query).toMatchObject({ kind: "scan", shardCalls: 4, retries: { moved: 0, stale: 0, notReady: 0 }, error: null });
-  expect(query!.slowest!.bits).toBe("10");
-  expect(query!.slowest!.ms).toBeGreaterThanOrEqual(150);
-  expect(query!.ms).toBeGreaterThanOrEqual(query!.slowest!.ms);
-  // In shard order: a call per shard, and the slow shard's is the slow one.
-  const walk = await withStats("presplitTable", name, "all", [{ order: "shard", limit: 10 }]);
+  // A call per shard, none sent again, and the slow shard's is the slow one.
+  const walk = await withStats("presplitTable", name, "all", [{ limit: 10 }]);
   const shards = walk.stats.filter((s) => s.kind === "shard");
   expect(shards.length).toBeGreaterThanOrEqual(4);
+  for (const s of shards) expect(s).toMatchObject({ retries: { moved: 0, stale: 0, notReady: 0 }, error: null });
   const slowest = shards.reduce((a, b) => (b.ms > a.ms ? b : a));
   expect(slowest.slowest!.bits).toBe("10");
+  expect(slowest.slowest!.ms).toBeGreaterThanOrEqual(150);
+  expect(slowest.ms).toBeGreaterThanOrEqual(slowest.slowest!.ms);
 }, 30_000);
 
 test("onCall counts the answers that sent a call again, and says why a call threw", async () => {

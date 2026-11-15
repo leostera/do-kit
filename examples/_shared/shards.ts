@@ -13,12 +13,13 @@ export interface ShardInfo {
 }
 
 /**
- * Rows a shard holds in tables of its own, which `shardedDescribe` does not count: a ShardedTable
- * passes `tableRows`, other subclasses a method of their own.
+ * Rows a shard holds in tables of its own, which `shardedDescribe` does not count: a table whose
+ * class has a `rowCount()` returning `ownedRowCount()` passes `tableRows`, other subclasses a
+ * method of their own.
  */
 export type CountRows = (shard: any) => Promise<number>;
 
-export const tableRows: CountRows = (shard) => shard.tableCount();
+export const tableRows: CountRows = (shard) => shard.rowCount();
 
 export async function describeShards<T extends ShardedObject<any, any>>(ns: DurableObjectNamespace<T>, name: string, countRows?: CountRows, bits = ""): Promise<ShardInfo[]> {
   const node = ns.get(ns.idFromName(shardObjectName(name, bits))) as unknown as { shardedDescribe(): Promise<NodeDescription> };

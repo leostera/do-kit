@@ -86,13 +86,24 @@ test("kv: ETags make writes conditional, and listings page by prefix", async () 
   expect(read.headers.get("etag")).toBe(v2);
   await put(`${run}-user:bob`, { plan: "free" }, {});
   await put(`${run}-team:core`, { size: 3 }, {});
-  expect(await (await fetch(`${base}/api/kv?prefix=${run}-user:`)).json()).toEqual({ keys: [`${run}-user:alice`, `${run}-user:bob`], cursor: null });
+  // Shard by shard, a few a page: every key once, following the cursor.
+  const keys: string[] = [];
+  for (let cursor: string | null = null, i = 0; i === 0 || (cursor !== null && i < 40); i++) {
+    const page = (await (await fetch(`${base}/api/kv?prefix=${run}-user:${cursor ? `&cursor=${cursor}` : ""}`)).json()) as { keys: string[]; cursor: string | null };
+    keys.push(...page.keys);
+    cursor = page.cursor;
+  }
+  expect(keys.sort()).toEqual([`${run}-user:alice`, `${run}-user:bob`]);
+  // The shard panel counts each shard's rows: 16 shards, the three keys among them and others'.
+  const panel = (await (await fetch(`${base}/api/shards`)).json()) as { rows: number }[];
+  expect(panel.length).toBe(16);
+  expect(panel.reduce((n, s) => n + s.rows, 0)).toBeGreaterThanOrEqual(3);
   expect((await fetch(`${base}/api/kv/${run}-user:alice`, { method: "DELETE", headers: { "if-match": v1 } })).status).toBe(412);
   expect((await fetch(`${base}/api/kv/${run}-user:alice`, { method: "DELETE", headers: { "if-match": v2 } })).status).toBe(204);
   expect((await fetch(`${base}/api/kv/${run}-user:alice`)).status).toBe(404);
 }, 60_000);
 
-test("members: unique handles, a lifecycle, and listings with counts", async () => {
+test("members: unique handles, a lifecycle, and listings", async () => {
   const base = await start("sharded-table/members");
   const workspace = { "x-workspace": run };
   const invite = (handle: string) => fetch(`${base}/api/members`, { method: "POST", ...json({ handle }, workspace) });
@@ -105,14 +116,12 @@ test("members: unique handles, a lifecycle, and listings with counts", async () 
   const active = await fetch(`${base}/api/members/ada/activate`, { method: "POST", ...json({ id: member.id }, workspace) });
   expect(((await active.json()) as { status: string }).status).toBe("active");
   expect((await fetch(`${base}/api/members/ada/activate`, { method: "POST", ...json({ id: "someone-else" }, workspace) })).status).toBe(409);
-  type Listing = { members: { handle: string }[]; total: number; byStatus: Record<string, number> };
+  type Listing = { members: { handle: string }[]; cursor: string | null };
   const before = (await (await fetch(`${base}/api/members`, { headers: workspace })).json()) as Listing;
-  expect(before.members.map((m) => m.handle)).toEqual(["grace", "ada"]); // newest first
-  expect(before).toMatchObject({ total: 2, byStatus: { active: 1, invited: 1 } });
+  expect(before.members.map((m) => m.handle)).toEqual(["grace", "ada"]); // newest first, on one shard
   expect((await fetch(`${base}/api/members/ada`, { method: "DELETE", ...json({ id: member.id }, workspace) })).status).toBe(204);
   const after = (await (await fetch(`${base}/api/members`, { headers: workspace })).json()) as Listing;
   expect(after.members.map((m) => m.handle)).toEqual(["grace"]);
-  expect(after.byStatus).toEqual({ removed: 1, invited: 1 });
 }, 60_000);
 
 test("accounts: a unique email across shards, a lookup by it, and a listing per team", async () => {

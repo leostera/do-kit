@@ -69,11 +69,10 @@ const MUTANTS: Mutant[] = [
   },
   {
     name: "owned-once",
-    breaks: "a listing returns a row a split gave away once (the page's owner check and the merge's dedup: each covers the other)",
+    breaks: "a listing returns a row a split gave away once: a shard pages only the rows it owns",
     edits: [
       { file: "src/table/index.ts", find: "AND k._hash >= ? AND k._hash <= ? ORDER BY k._key", replace: "AND (k._hash >= ? OR 1) AND (k._hash <= ? OR 1) ORDER BY k._key" },
       { file: "src/table/index.ts", find: "? AND `}_hash >= ? AND _hash <= ? ORDER BY ${this.q(pk)}", replace: "? AND `}(_hash >= ? OR 1) AND (_hash <= ? OR 1) ORDER BY ${this.q(pk)}" },
-      { file: "src/table/schema.ts", find: "      if (seen.has(r.key)) return false;\n", replace: "" },
     ],
     test: "test/table.test.ts",
     pattern: "listings match a reference sort",
@@ -150,13 +149,6 @@ const MUTANTS: Mutant[] = [
     edits: [{ file: "src/table/client.ts", find: "    return { rows: rows.map(({ row, version }) => ({ row: row as Row, version })), cursor: at === null ? null : encodeShardCursor(fingerprint, at) };", replace: "    return { rows: rows.slice(0, at === null ? rows.length : -1).map(({ row, version }) => ({ row: row as Row, version })), cursor: at === null ? null : encodeShardCursor(fingerprint, at) };" }],
     test: "test/bench-worker.test.ts",
     pattern: "table points",
-  },
-  {
-    name: "plain-merge-unordered",
-    breaks: "the hand-sharded baseline merges its pages in order",
-    edits: [{ file: "bench/worker/src/plain.ts", find: "const rows = pages.flat().sort(newer).slice(0, limit);", replace: "const rows = pages.flat().slice(0, limit);" }],
-    test: "test/bench-worker.test.ts",
-    pattern: "plain baselines",
   },
   {
     name: "open-loop-waits",
@@ -414,6 +406,13 @@ const MUTANTS: Mutant[] = [
     edits: [{ file: "src/table/schema.ts", find: "  if (rowBytesAtMost(schema, row) <= max) return;\n", replace: "" }],
     test: "test/cost.test.ts",
     pattern: "copies no text",
+  },
+  {
+    name: "owned-row-count-all-buckets",
+    breaks: "a shard's row count is of the rows it owns, not every bucket it stores until cleanup",
+    edits: [{ file: "src/table/index.ts", find: "SELECT SUM(n) AS n FROM ${COUNTS} WHERE bucket >= ? AND bucket <= ?`, lo, hi).one().n ?? 0;\n  }", replace: "SELECT SUM(n) AS n FROM ${COUNTS} WHERE bucket >= ? OR bucket <= ?`, lo, hi).one().n ?? 0;\n  }" }],
+    test: "test/colocation.test.ts",
+    pattern: "a routed table lists and counts",
   },
 ];
 

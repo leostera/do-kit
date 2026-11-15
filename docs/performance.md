@@ -226,7 +226,7 @@ The 64-shard reads are from a later run than the rest ([raw data](../bench/resul
 
 ![Table listing p99](bench/table-list-p99.svg)
 
-Listings were measured again on 2026-11-13, in query order and in shard order from one deploy ([raw data](../bench/results/v050-table-list.json)):
+Listings were measured again on 2026-11-13, in query order and in shard order from one deploy ([raw data](../bench/results/v050-table-list.json)). These numbers are why listings in query order, and counts across shards, were removed ([RFD0012](rfds/RFD0012-shard-local-tables.md)): a listing now walks the shards, as "shard order" below did.
 
 ![Table walks in shard order](bench/table-walk-throughput.svg)
 
@@ -252,10 +252,10 @@ Listings were measured again on 2026-11-13, in query order and in shard order fr
 
 - **Writes and reads scale with shards** once one object is the bottleneck, from about 256 in flight. Below that, one object is as fast or faster: a sharded call is a routed call.
 - **Listings in query order do not.** A page asks every shard for its share (twice limit / shards, plus two), so each shard serves every page: throughput stays at or below one object's (400–580 pages/s in this run), and a page waits for its slowest shard. From 1,024 in flight, the shards of a 16- or 64-shard table refuse most pages ("overloaded"); the error log names every shard, not one hot one. A page also costs up to 3 × shards subrequests in the caller's invocation, and a Worker invocation may make only so many.
-- **Walks in shard order do.** `list({ order: "shard" })` lists rows in the query's order within each shard, shard after shard, and asks one shard a page. Each walk starts at a random shard and wraps around, so walks begun together spread over the shards. 16 shards served 10,979 pages/s at 2,048 in flight with p50 158 ms and no failures, against 77/s and 182,098 refusals in query order. A walk costs about a shard's share of the calls, so it is the way to read a whole table: exports, backfills, scans.
+- **Walks in shard order do.** `list({ order: "shard" })` (today's `list()`) lists rows in the query's order within each shard, shard after shard, and asks one shard a page. Each walk starts at a random shard and wraps around, so walks begun together spread over the shards. 16 shards served 10,979 pages/s at 2,048 in flight with p50 158 ms and no failures, against 77/s and 182,098 refusals in query order. A walk costs about a shard's share of the calls, so it is the way to read a whole table: exports, backfills, scans.
 - **At one in flight**, latency is mostly where the caller and each shard are: a shard in another colo adds tens of milliseconds, whichever order.
 - Two fixes went in while measuring: pages first scanned rows instead of seeking (10,000 rows listed at a third of the speed of 2,000), and every shard returned a full page (16 shards moved 800 rows to list 50).
-- An index stored by sort order (range-partitioned) would let a page touch one or two index shards. That is the next layer.
+- An index stored by sort order (range-partitioned) would let a page touch one or two index shards. That is the next layer ([RFD0012](rfds/RFD0012-shard-local-tables.md)).
 
 ## Table commands
 

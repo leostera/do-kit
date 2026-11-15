@@ -77,12 +77,14 @@ test("a put copies no text to UTF-8 to check a row's size, in the client or the 
   expect(await post<number>("/encodes", { name })).toBe(0);
 }, 30_000);
 
-test("a count reads at most a row after the first, and stays exact through writes and a command that throws", async () => {
+test("a shard's row count reads no row of the table, and stays exact through writes and a command that throws", async () => {
   const name = `cost-count-${unique()}`;
   await seed(name, 5_000);
   expect(await table<number>("evolving", name, "count")).toBe(5_000);
+  // From the counts kept per hash prefix: no statement reads the rows' table.
   const second = await costOf("evolving", name, () => table("evolving", name, "count"));
-  expect(second.read).toBeLessThanOrEqual(1);
+  expect(second.statements.map((st) => st.query).filter((q) => /\bsharded_table\b(?!_)/.test(q))).toEqual([]);
+  expect(second.statements.length).toBeGreaterThan(0);
   await table("evolving", name, "put", doc("new", 9_999));
   await table("evolving", name, "try:apply", "d1", "boom", null);
   expect(await table<number>("evolving", name, "count")).toBe(5_001);

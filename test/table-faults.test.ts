@@ -1,7 +1,7 @@
 // A statement-level fault sweep. For each table operation, record every SQL statement a clean run
 // issues; then, on a fresh table each time, fail each one of them once (as a storage error would),
 // retry a call that threw once (as a caller would), and check that the table still agrees with
-// itself and with the clean run: its count, its count groups, every index's walk and every row's
+// itself and with the clean run: its count, every index's walk and every row's
 // version. A case is named `<scenario>/<statement>#n`: the name is the reproduction.
 import { expect, test } from "bun:test";
 import { post, useWorker } from "./harness.ts";
@@ -21,19 +21,17 @@ const doc = (i: number): Doc => ({ name: `d${String(i).padStart(2, "0")}`, id: `
 
 interface Scenario {
   readonly name: string;
-  /** The schema the table ends on: its count groups. */
-  readonly groups: readonly string[];
   readonly steps: readonly Step[];
 }
 const SCENARIOS: Scenario[] = [
-  { name: "put new", groups: ["byDeleted"], steps: [["put", doc(99)]] },
-  { name: "put existing", groups: ["byDeleted"], steps: [["put", { ...doc(1), createdAt: 7, deleted: true }]] },
-  { name: "patch an indexed column", groups: ["byDeleted"], steps: [["patch", "d02", { createdAt: 9 }]] },
-  { name: "patch a counted column", groups: ["byDeleted"], steps: [["patch", "d02", { deleted: true }]] },
-  { name: "delete", groups: ["byDeleted"], steps: [["delete", "d03"]] },
-  { name: "apply", groups: ["byDeleted"], steps: [["apply", "d04", "bump", { by: 2 }]] },
+  { name: "put new", steps: [["put", doc(99)]] },
+  { name: "put existing", steps: [["put", { ...doc(1), createdAt: 7, deleted: true }]] },
+  { name: "patch an indexed column", steps: [["patch", "d02", { createdAt: 9 }]] },
+  { name: "patch a column of a two-column index", steps: [["patch", "d02", { deleted: true }]] },
+  { name: "delete", steps: [["delete", "d03"]] },
+  { name: "apply", steps: [["apply", "d04", "bump", { by: 2 }]] },
   // The fault is armed once the deploy restarted the object (a fault lives in an instance): in the migration.
-  { name: "upgrade", groups: ["deletedAgain", "byStars"], steps: [["upgrade", 2, ""], ["arm"], ["get", "d01"], ["count"]] },
+  { name: "upgrade", steps: [["upgrade", 2, ""], ["arm"], ["get", "d01"], ["count"]] },
 ];
 const SEED = 24;
 
@@ -63,10 +61,10 @@ async function run(name: string, steps: readonly Step[], fault?: string): Promis
   return sure;
 }
 
-type Snapshot = { rows: Record<string, Doc>; count: number; groups: Record<string, Record<string, number>>; problems: string[] };
+type Snapshot = { rows: Record<string, Doc>; count: number; problems: string[] };
 
 /** What the table says, every way: and where it disagrees with itself. */
-async function snapshot(name: string, groups: readonly string[]): Promise<Snapshot> {
+async function snapshot(name: string): Promise<Snapshot> {
   const problems: string[] = [];
   const primary = await table<Versioned[]>(name, "all", { limit: 50 });
   const rows = Object.fromEntries(primary.map((r) => [r.row.name, r.row]));
@@ -77,20 +75,11 @@ async function snapshot(name: string, groups: readonly string[]): Promise<Snapsh
   }
   const count = await table<number>(name, "count");
   if (count !== names.length) problems.push(`count ${count}, rows ${names.length}`);
-  const counted: Record<string, Record<string, number>> = {};
-  for (const group of groups) {
-    const column = group === "byStars" ? "stars" : "deleted";
-    const got = Object.fromEntries((await table<{ value: unknown; count: number }[]>(name, "countBy", group)).map((g) => [String(g.value), g.count]));
-    const want: Record<string, number> = {};
-    for (const r of primary) want[String(r.row[column as keyof Doc] ?? null)] = (want[String(r.row[column as keyof Doc] ?? null)] ?? 0) + 1;
-    if (JSON.stringify(Object.entries(got).sort()) !== JSON.stringify(Object.entries(want).sort())) problems.push(`${group} counts ${JSON.stringify(got)}, rows ${JSON.stringify(want)}`);
-    counted[group] = got;
-  }
   for (const r of primary) {
     const got = await table<Versioned | null>(name, "get", r.row.name);
     if (got?.version !== r.version) problems.push(`${r.row.name}: get version ${got?.version}, listed ${r.version}`);
   }
-  return { rows, count, groups: counted, problems };
+  return { rows, count, problems };
 }
 
 for (const scenario of SCENARIOS) {
@@ -100,7 +89,7 @@ for (const scenario of SCENARIOS) {
     await statements(clean);
     expect(await run(clean, scenario.steps)).toBe(true);
     const issued = [...new Set((await statements(clean)).map((s) => s.query).filter((q) => !q.includes("test_")))];
-    const reference = await snapshot(clean, scenario.groups);
+    const reference = await snapshot(clean);
     expect(reference.problems).toEqual([]);
     expect(issued.length).toBeGreaterThan(0);
 
@@ -116,7 +105,7 @@ for (const scenario of SCENARIOS) {
     const one = async ({ statement, label }: { statement: string; label: string }) => {
       const name = await fresh();
       const sure = await run(name, scenario.steps, statement);
-      const got = await snapshot(name, scenario.groups);
+      const got = await snapshot(name);
       for (const p of got.problems) failures.push(`${label}: ${p}`);
       if (sure && JSON.stringify(got.rows) !== JSON.stringify(reference.rows)) failures.push(`${label}: rows differ from the clean run`);
     };

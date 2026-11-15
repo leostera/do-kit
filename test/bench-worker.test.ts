@@ -41,15 +41,17 @@ test("drivers scale with the calls an operation makes, not the operations", () =
   expect(callsPerOperation("rmw", "table-16")).toBe(2);
   expect(callsPerOperation("atomic-4", "split")).toBe(5);
   expect(callsPerOperation("multi-4", "split")).toBe(4);
-  expect(callsPerOperation("list", "table-16")).toBe(48);
+  expect(callsPerOperation("walk", "table-16")).toBe(1);
+  expect(callsPerOperation("list", "indexed-16")).toBe(1);
   expect(callsPerOperation("create", "indexed-16")).toBe(2);
   expect(driversFor(512, callsPerOperation("rmw", "table-16"), 8192)).toBe(2 * driversFor(512, callsPerOperation("write", "table-16"), 8192));
   expect(driversFor(64, 48, 8192)).toBe(64);
+  expect(driversFor(64, 1, 8192)).toBe(16);
 });
 
 test("a point runs at the load it was asked for, its calls shared out among its drivers", () => {
   for (const [concurrency, target] of [[256, "table-1"], [1024, "table-4"], [2048, "table-64"], [16, "table-16"], [1, "table-64"]] as const) {
-    const drivers = driversFor(concurrency, callsPerOperation("list", target), 128);
+    const drivers = driversFor(concurrency, 3 * Number(target.slice("table-".length)), 128);
     const lanes = lanesFor(concurrency, drivers);
     expect(lanes.length).toBe(drivers);
     expect(lanes.reduce((n, l) => n + l, 0)).toBe(concurrency);
@@ -111,7 +113,7 @@ test("a table series is published only with a plain baseline at each of its load
   const at = (target: string, concurrency: number, operation = "write") => ({ target, operation, distribution: "uniform", concurrency });
   expect(missingBaselines([at("table-16", 64), at("plain-16", 64), at("table-1", 64), at("table-16", 1), at("plain-1", 1)])).toEqual([]);
   expect(missingBaselines([at("table-16", 64), at("plain-16", 16)])).toEqual(["table-16 write uniform 64"]);
-  expect(missingBaselines([at("table-16", 64, "list"), at("plain-16", 64, "write")])).toEqual(["table-16 list uniform 64"]);
+  expect(missingBaselines([at("table-16", 64, "walk"), at("plain-16", 64, "write")])).toEqual(["table-16 walk uniform 64"]);
   expect(missingBaselines([{ ...at("table-16", 64), arrivalRate: 500 }, { ...at("plain-16", 64), arrivalRate: 1000 }])).toEqual(["table-16 write uniform 500/s"]);
 });
 
@@ -169,21 +171,26 @@ test("a split point reads every written key back and counts the rows the shards 
   expect({ lostWrites: result.lostWrites, rowDelta: result.rowDelta, ok: result.ok }).toEqual({ lostWrites: 0, rowDelta: 0, ok: true });
 }, 120_000);
 
-test("table points check what they read: walks and listings complete, writes read back, creates counted", async () => {
+test("table points check what they read: walks complete, writes read back, creates counted", async () => {
   const point = async (operation: string) => {
     const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-4", operation, distribution: "uniform", concurrency: 4, objectName: `answers-${operation}-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
     return (await response.json()) as { successes: number; wrongAnswers: number; wrongSamples: string[]; ok: boolean };
   };
-  for (const operation of ["walk", "list", "write", "create"]) {
+  for (const operation of ["walk", "write", "create"]) {
     const result = await point(operation);
     expect(result.successes).toBeGreaterThan(0);
     expect({ operation, wrongAnswers: result.wrongAnswers, wrongSamples: result.wrongSamples, ok: result.ok }).toEqual({ operation, wrongAnswers: 0, wrongSamples: [], ok: true });
+  }
+  // A sharded table has no listing in the table's order to measure (RFD0012): it walks.
+  for (const target of ["table-4", "plain-16"]) {
+    const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target, operation: "list", distribution: "uniform", concurrency: 4, objectName: `answers-list-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
+    expect(await response.text()).toContain("list is for indexed targets");
   }
 }, 180_000);
 
 test("the plain baselines, one object and sixteen sharded by hand, answer the table points right", async () => {
   for (const target of ["plain-1", "plain-16"])
-    for (const operation of ["write", "read", "rmw", "list", "walk", "create"]) {
+    for (const operation of ["write", "read", "rmw", "walk", "create"]) {
       const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target, operation, distribution: "uniform", concurrency: 4, objectName: `plain-${operation}-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
       const result = (await response.json()) as { successes: number; errors: number; wrongAnswers: number; wrongSamples: string[]; topology: { leaves: number; rows: number }; errorSample: string | null };
       expect({ target, operation, errors: result.errors, errorSample: result.errorSample, wrongAnswers: result.wrongAnswers, wrongSamples: result.wrongSamples }).toEqual({ target, operation, errors: 0, errorSample: null, wrongAnswers: 0, wrongSamples: [] });
@@ -214,24 +221,24 @@ test("an open-loop point sends at its arrival rate, and says when its drivers co
 }, 180_000);
 
 test("a point with more drivers than an even share of its calls reports, and runs at, the load asked for", async () => {
-  // A 4-shard listing makes up to 12 calls: 40 in flight take 30 drivers, 10 of them with 2 lanes.
-  const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-4", operation: "list", distribution: "uniform", concurrency: 40, objectName: `lanes-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
+  // A walk's page is a call: 40 in flight take 16 drivers, 8 of them with 3 lanes and 8 with 2.
+  const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-4", operation: "walk", distribution: "uniform", concurrency: 40, objectName: `lanes-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
   const point = (await response.json()) as { concurrency: number; driverCount: number };
-  expect(point.driverCount).toBe(30);
+  expect(point.driverCount).toBe(16);
   expect(point.concurrency).toBe(40);
 }, 120_000);
 
 test("a table point keeps its slowest operations, with their rounds, retries and slowest shard", async () => {
-  const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-16", operation: "list", distribution: "uniform", concurrency: 8, objectName: `slowest-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
+  const response = await fetch(`${base}/measure`, { method: "POST", body: JSON.stringify({ target: "table-16", operation: "walk", distribution: "uniform", concurrency: 8, objectName: `slowest-${Date.now()}`, durationMs: 5_000, keyCount: 300, payloadBytes: 64 }) });
   const point = (await response.json()) as { latencyMs: { max: number }; slowest: { operation: string; ms: number; rounds: number; shardCalls: number; retries: Record<string, number>; slowestShard: { bits: string; ms: number } | null }[] };
   expect(point.slowest.length).toBe(20);
   expect(point.slowest.map((s) => s.ms)).toEqual([...point.slowest.map((s) => s.ms)].sort((a, b) => b - a));
   const [first] = point.slowest;
   expect(first!.ms).toBeCloseTo(point.latencyMs.max, 0);
-  // A query-order page of 16 shards: at least a round of 16 shard calls, the slowest named.
-  expect(first!.operation).toBe("list");
+  // A walk's page: a shard call or a few, the slowest named.
+  expect(first!.operation).toBe("walk");
   expect(first!.rounds).toBeGreaterThanOrEqual(1);
-  expect(first!.shardCalls).toBeGreaterThanOrEqual(16);
+  expect(first!.shardCalls).toBeGreaterThanOrEqual(1);
   expect(Object.keys(first!.retries).sort()).toEqual(["moved", "notReady", "stale"]);
   expect(first!.slowestShard!.bits).toMatch(/^[01]{4}$/);
   expect(first!.slowestShard!.ms).toBeLessThanOrEqual(first!.ms);

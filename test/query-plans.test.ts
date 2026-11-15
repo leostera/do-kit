@@ -27,8 +27,7 @@ const OPERATIONS: [string, (name: string) => Promise<unknown>][] = [
   ["list by key", (n) => table(n, "list", { limit: 10 })],
   ["list by an index, descending", (n) => table(n, "list", { index: "byCreated", direction: "desc", limit: 10 })],
   ["list with a condition", (n) => table(n, "list", { index: "byDeletedCreated", where: [{ column: "deleted", op: "=", value: false }], limit: 10 })],
-  ["count", (n) => table(n, "count")],
-  ["countBy", (n) => table(n, "countBy", "byDeleted")],
+  ["count of a shard", (n) => table(n, "count")],
 ];
 
 /** The statements an operation ran, but the fixtures' and the schema checks'. */

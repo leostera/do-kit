@@ -12,7 +12,7 @@ Start from what is going wrong:
 One Durable Object can't keep up. With what?
 │
 ├─ Calls to many keys (accounts, documents, rows)      → ShardedObject: splits itself by key as it gets busy
-│   ├─ the state is rows you get, list and count       → ShardedTable
+│   ├─ the state is rows you get, write and walk       → ShardedTable
 │   │   └─ looked up by another column, unique across
 │   │      the table, or listed by partition           → IndexedTable
 │   └─ some keys must change together
@@ -59,7 +59,7 @@ Everything is exported from `@leostera/do-kit`. Each layer also has its own path
 | Layer | Also at | What it gives you |
 |---|---|---|
 | **Sharded object** (`ShardedObject`) | `@leostera/do-kit/sharded` | One object that splits itself into shards as it gets busy. Transactions within a shard, `atomically` across shards, and routing that follows splits. |
-| **Sharded table** (`ShardedTable`) | `@leostera/do-kit/table` | Typed rows on a sharded object: indexes in every shard, conditional writes on a version per row, counts, and sorted listings across shards with a cursor that survives splits. With no indexes, a key-value store. |
+| **Sharded table** (`ShardedTable`) | `@leostera/do-kit/table` | Typed rows on a sharded object: indexes in every shard, conditional writes on a version per row, and listings that walk the shards with a cursor that survives splits. Every call reaches the shards its keys are on, or one a page. With no indexes, a key-value store. |
 | **Indexed table** (`IndexedTable`) | `@leostera/do-kit/indexed` ([RFD0003](docs/rfds/RFD0003-indexed-table.md)) | Global indexes on shards of their own: lookups by another column, unique constraints, and listings within a partition that read one index shard per page. A write returns once its index entries are written. |
 | **Work graphs** (`WorkGraphRunner`) | `@leostera/do-kit/workgraph` ([RFD0005](docs/rfds/RFD0005-work-graphs.md)) | Incremental, parallel execution of a graph of pure units that your app defines, too big for one invocation's CPU. Typed edges, chunks sized to the CPU budget, N runners pulling leases, results keyed by a hash of their inputs and reused by later runs. |
 | **Leased reads** (`ReadLeases`, `RelayReads`, `RelayPlan`) | `@leostera/do-kit/leased` | Reads of one object's hot keys spread over relays and isolates, never stale. The object leases a key to relays, which answer from the lease and give isolates sub-leases inside it. A write commits at once, and is acknowledged once the leases on its key are over or given back. |
@@ -198,7 +198,6 @@ const orders = defineTable<Order>({
   primaryKey: "id", // also what routes a row to its shard
   columns: { id: "text", customer: "text", total: "integer", createdAt: "integer", shippedAt: "integer", cancelled: "boolean" },
   indexes: { byCreated: ["createdAt"], byShipped: ["shippedAt"] },
-  counts: { byCancelled: "cancelled" }, // rows per value of a column, kept with every write
 });
 
 export class Orders extends ShardedTable<Env, Order> {
@@ -217,18 +216,17 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 - **Commands** run a conditional update inside the row's shard, in one call: register pure, synchronous `(row, args) => { result, write? }` functions with `defineCommands`, and `apply(key, "ensure", args)` reads the row, decides, writes and answers in one transaction, with no version retries however many callers update the row at once. The client infers each command's argument and result types. Pass the time in `args`: a command reads nothing but its row and arguments ([RFD0010](docs/rfds/RFD0010-table-commands.md)). On one hot row at 128 in flight, `apply` commits 698 updates/s with p99 447 ms, where a `get` and a `put(ifVersion)` retried up to 8 times commit 10/s and run out of attempts on 611 calls.
 
   ![Updates of one hot row](docs/bench/apply-hot-throughput.svg)
-- **Listings** merge one page from every shard. The cursor holds only a sort position, so it survives splits. No row is skipped or returned twice across pages while shards split and clean up; that is model-checked in [`specs/table-listing.ts`](specs/table-listing.ts) and tested against a reference sort. `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring ASCII case). `order: "shard"` walks the table shard by shard instead, one shard a page, listing every row that existed when the walk began once, through splits ([RFD0009](docs/rfds/RFD0009-walks-in-shard-order.md)).
-- **Counts** are kept per hash prefix with every write, so `count()` is cheap and exact at any depth up to 16. Declare `counts` groups to also count rows per value of a column: `countBy("byCancelled")` returns `[{ value: false, count: 812 }, { value: true, count: 40 }]`, just as cheaply. A listing takes `withCount: true` (or a group's name) and returns `total` (and `counts`) from the same calls to the shards, so a page with its total costs one fan-out, not two. Counts don't take `where`: counting arbitrary conditions would read every row of every shard. A count group is for a column of few values: past `maxCountValues` (default 1,000), `countBy` returns `{ counts, truncated: true }`, the first values in order.
+- **Listings** walk the table shard by shard: rows in the query's order within each shard, one shard a page, each walk from a random shard. A page is one call however many shards there are, and every row that existed when the walk began is listed once, through splits; that is model-checked in [`specs/shard-walk.ts`](specs/shard-walk.ts) and tested against a reference sort ([RFD0009](docs/rfds/RFD0009-walks-in-shard-order.md)). `where` takes `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix` and `contains` (ignoring ASCII case).
+- **No call asks every shard** but `verifyCounts()`, for operators. A listing in the table's order across shards, `count()` and `countBy()` did, and were removed: each shard served every page or count, so they got slower as the table grew ([RFD0012](docs/rfds/RFD0012-shard-local-tables.md)). An order across shards comes from an `IndexedTable`'s global index, within a partition today; RFD0012 designs global indexes ordered and counted across the whole table. Each shard still keeps its row count per hash prefix with every write, for its splits, and a subclass reads it with `ownedRowCount()`.
 - **Schema changes:** add columns and indexes in the schema; each shard applies them the first time it runs the new code.
 - Custom transactional methods use `getRow`, `putRow`, `patchRow` and `deleteRow` inside `transact`.
 
 ### What is atomic
 
-- **One row**: every write is one transaction with its index entries and counts, and its versions are linearizable: a read that starts after a write is acknowledged sees it or something later.
+- **One row**: every write is one transaction with its index entries and row counts, and its versions are linearizable: a read that starts after a write is acknowledged sees it or something later.
 - **One shard's part of a batch**: `putMany`, `patch` and `delete` batches are one transaction per shard, for batches of up to 1,000 rows. A larger batch is sent 1,000 rows a call, so its part on one shard can be several transactions.
 - **A batch across shards** is not, and can be partially applied: if one shard fails, the others' parts stay written, and the error says which rows are unknown. Use `atomically` ([RFD0008](docs/rfds/RFD0008-atomic-calls-across-shards.md)) when rows in several shards must change together.
 - **Reads across shards** (`getMany`, a page) are not a snapshot: one shard's answer can include a write that another's, asked a moment earlier, does not.
-- **`count()`** may count a row twice, or miss it, at the moment a split commits; it is exact otherwise.
 
 ### What a table buys you, measured
 
@@ -240,16 +238,13 @@ const next = await t.list({ index: "byCreated", direction: "desc", where: [{ col
 |---|---|---|---|---|
 | **Writes** | 1,604/s, median 515 ms, 9,089 failed | 1,633/s | 6,230/s | **8,117/s, median 61 ms** |
 | **Reads by key** | 2,136/s, median 446 ms, 1,327 failed | 3,330/s | 8,846/s | **10,241/s, median 39 ms*** |
-| **List pages** (50 rows), query order, 256 in flight | 484/s, median 496 ms | 450/s | 400/s | 262/s, median 844 ms |
-| **Walk pages** (50 rows), shard order, 2,048 in flight | 450/s, 4,778 failed | 3,452/s | **10,979/s, median 158 ms** | 8,804/s |
+| **List pages** (50 rows, walking the shards), 2,048 in flight | 450/s, 4,778 failed | 3,452/s | **10,979/s, median 158 ms** | 8,804/s |
 
 \* Measured in a later run than the others in its row.
 
-**Listings in query order do not scale with shards; walks in shard order do.** A page in the query's order asks every shard for its share, so each shard serves every page: throughput stays below what one object serves, and from 1,024 in flight 16 and 64 shards refuse most pages ("overloaded"). Keep tables listed that way to a few shards, or list by partition through an `IndexedTable`, which reads one index shard per page. To read a whole table, walk it with `order: "shard"`: rows come in the query's order within each shard, shard after shard, one shard a page, each walk from a random shard. That scales with shards: 10,979 pages/s on 16 shards at 2,048 in flight, with no failures.
+**Listings scale with shards.** A page is one shard's: 10,979 pages/s on 16 shards at 2,048 in flight, with no failures. The listing these tables had before, in the table's order across shards, asked every shard for every page and stayed below one object's throughput (484 pages/s on 1 shard, 262/s on 64, at 256 in flight); it was removed ([RFD0012](docs/rfds/RFD0012-shard-local-tables.md)).
 
-![Table walks in shard order vs concurrency](docs/bench/table-walk-throughput.svg)
-
-![Table listings vs concurrency](docs/bench/table-list-throughput.svg)
+![Table listings vs concurrency](docs/bench/table-walk-throughput.svg)
 
 More in [docs/performance.md](docs/performance.md#sharded-tables) and the design in [RFD0002](docs/rfds/RFD0002-sharded-table.md).
 

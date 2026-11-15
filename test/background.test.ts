@@ -216,29 +216,7 @@ test("a prepared hold has its alarm though its object is evicted right after sto
   expect({ holds, alarm: holds > 0 ? report.alarm !== null : true }).toEqual({ holds, alarm: true });
 }, 30_000);
 
-// ---- Count groups ----
-
-test("a count group past maxValues is reported truncated, not returned whole", async () => {
-  const name = `count-values-${unique()}`;
-  await table("evolving", name, "upgrade", 2, "");
-  for (let i = 0; i < 1_500; i += 150) await table("evolving", name, "putMany", Array.from({ length: 150 }, (_, j) => ({ row: { ...doc(`d${i + j}`, i + j), stars: i + j } })));
-  const counts = await table<{ counts?: unknown[]; truncated?: boolean } | unknown[]>("evolving", name, "countBy", "byStars");
-  expect(Array.isArray(counts) ? { truncated: false, n: counts.length } : { truncated: counts.truncated, n: counts.counts?.length }).toEqual({ truncated: true, n: 1_000 });
-}, 120_000);
-
-test("cleanup of a count group with many values deletes a bounded batch at a time", async () => {
-  const name = `count-cleanup-${unique()}`;
-  await table("evolving", name, "upgrade", 2, "");
-  for (let i = 0; i < 2_000; i += 200) await table("evolving", name, "putMany", Array.from({ length: 200 }, (_, j) => ({ row: { ...doc(`d${i + j}`, i + j), stars: i + j } })));
-  await object("evolving", name, "", "statements", "", true);
-  expect(await post<boolean>("/split", { cls: "evolving", name, bits: "" })).toBe(true);
-  await Bun.sleep(3_000);
-  const deletes = await object<StatementCost[]>("evolving", name, "", "statements", "DELETE FROM sharded_table_group_counts", true);
-  expect(deletes.length).toBeGreaterThan(0);
-  expect(Math.max(...deletes.map((s) => s.rowsWritten))).toBeLessThanOrEqual(260);
-}, 120_000);
-
-// ---- Work graphs ----
+// ---- Count groups, removed (RFD0012) ----
 
 test("a work graph run refuses a lease shorter than three chunks' planned time", async () => {
   const run = `short-lease-${unique()}`;

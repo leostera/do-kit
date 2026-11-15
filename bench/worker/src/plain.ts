@@ -73,7 +73,6 @@ function shardOf(key: string, shards: number): number {
   return (h >>> 0) % shards;
 }
 
-const newer = (a: Stored, b: Stored) => b.createdAt - a.createdAt || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0);
 const versioned = (row: Stored) => {
   const { version, ...rest } = row;
   return { row: rest as PlainRow, version };
@@ -81,8 +80,7 @@ const versioned = (row: Stored) => {
 
 /**
  * A client of `shards` plain objects, with the calls the bench makes of a table: get, put, a page
- * newest first (query order: every object asked, the pages merged; shard order: one object after
- * another), and count.
+ * newest first in each object, one object after another, and count.
  */
 export function plainTable(ns: DurableObjectNamespace<PlainRows>, name: string, shards: number) {
   const stub = (i: number) => ns.get(ns.idFromName(`${name}/${shards}/${i}`));
@@ -121,28 +119,20 @@ export function plainTable(ns: DurableObjectNamespace<PlainRows>, name: string, 
     async put(row: PlainRow, options: { ifVersion?: number } = {}) {
       return (await client.putMany([{ row, ...options }]))[0]!;
     },
-    async list(query: { limit?: number; cursor?: string | null; order?: "query" | "shard" } = {}) {
+    async list(query: { limit?: number; cursor?: string | null } = {}) {
       const limit = query.limit ?? 50;
-      if (query.order === "shard") {
-        // A cursor of (object, after): the rest of one object, then the next.
-        let [at, after] = query.cursor ? (JSON.parse(query.cursor) as [number, After | null]) : [0, null];
-        const rows: Stored[] = [];
-        while (at < shards && rows.length < limit) {
-          const want = limit - rows.length;
-          const page = await stub(at).page(want, after);
-          rows.push(...page);
-          // A short page: this object is done.
-          if (page.length < want) [at, after] = [at + 1, null];
-          else after = [page.at(-1)!.createdAt, page.at(-1)!.name];
-        }
-        return { rows: rows.map(versioned), cursor: at < shards ? JSON.stringify([at, after]) : null };
+      // A cursor of (object, after): the rest of one object, then the next.
+      let [at, after] = query.cursor ? (JSON.parse(query.cursor) as [number, After | null]) : [0, null];
+      const rows: Stored[] = [];
+      while (at < shards && rows.length < limit) {
+        const want = limit - rows.length;
+        const page = await stub(at).page(want, after);
+        rows.push(...page);
+        // A short page: this object is done.
+        if (page.length < want) [at, after] = [at + 1, null];
+        else after = [page.at(-1)!.createdAt, page.at(-1)!.name];
       }
-      // Every object's newest rows before the cursor, merged: the newest `limit` of them.
-      const after = query.cursor ? (JSON.parse(query.cursor) as After) : null;
-      const pages = await Promise.all(Array.from({ length: shards }, (_, s) => stub(s).page(limit, after)));
-      const rows = pages.flat().sort(newer).slice(0, limit);
-      // Fewer than `limit` in all: none is left.
-      return { rows: rows.map(versioned), cursor: rows.length === limit ? JSON.stringify([rows.at(-1)!.createdAt, rows.at(-1)!.name]) : null };
+      return { rows: rows.map(versioned), cursor: at < shards ? JSON.stringify([at, after]) : null };
     },
     async count() {
       return (await Promise.all(Array.from({ length: shards }, (_, s) => stub(s).count()))).reduce((a, b) => a + b, 0);

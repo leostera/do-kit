@@ -52,8 +52,8 @@ test("writes while a split's key tables are compacted reach the compacted tables
     const all = [...(await tables(name, "0")), ...(await tables(name, "1"))];
     return !all.some((t) => t.startsWith("sharded_table_compact_") || t.startsWith("sharded_table_dropped_"));
   };
-  // The paused alarms were not asked again: calls to every shard (a count) take the steps left.
-  for (let i = 0; i < 200 && !(await settled()); i++) await table(name, "count");
+  // The paused alarms were not asked again: calls to every shard (a walk's pages) take the steps left.
+  for (let i = 0; i < 200 && !(await settled()); i++) await table(name, "all", {});
   expect(await settled()).toBe(true);
   const expected = [...model.values()];
   const byIndex: Record<string, (d: Doc) => unknown[]> = {

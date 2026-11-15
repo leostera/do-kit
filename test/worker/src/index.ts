@@ -42,7 +42,6 @@ export const docs = defineTable<Doc>({
   primaryKey: "name",
   columns: { name: "text", id: "text", createdAt: "integer", lastEditAt: "integer", deleted: "boolean", meta: "json" },
   indexes: { byCreated: ["createdAt"], byEdit: ["lastEditAt"], byDeletedCreated: ["deleted", "createdAt"] },
-  counts: { byDeleted: "deleted" },
 });
 
 /** Commands of the docs table, for `apply`: each typed by its own arguments and result. */
@@ -83,6 +82,10 @@ export async function applyTypes(t: TableClient<Doc, typeof docCommands>): Promi
 }
 
 export class Docs extends ShardedTable<Env, Doc> {
+  /** This shard's rows, from its counts: the tests' `count` op sums them over the shards. */
+  async testCount(): Promise<number> {
+    return this.ownedRowCount();
+  }
   protected table = docs;
   /** The logical-copy batches this instance took: their table, rows, and bytes on the heap (2 a UTF-16 unit). */
   private batches: { table: string; rows: number; heapBytes: number }[] = [];
@@ -421,6 +424,10 @@ function assertApplyAllowed(storage: DurableObjectStorage): void {
 }
 
 export class Users extends IndexedTable<Env, User> {
+  /** This shard's rows, from its counts: the tests' `count` op sums them over the shards. */
+  async testCount(): Promise<number> {
+    return this.ownedRowCount();
+  }
   protected table = users;
   private readonly log = new StatementLog(this.ctx.storage);
   private readonly alarms = countSetAlarm(this.ctx.storage);
@@ -566,6 +573,10 @@ const usersV1 = defineTable<User>({ version: 1, primaryKey: "id", columns: users
 export const usersV3 = defineTable<User>({ version: 3, primaryKey: "id", columns: users.columns, globalIndexes: { byTeam: { columns: ["team", "name"], partition: 1 } } });
 
 export class EvolvingUsers extends IndexedTable<Env, User> {
+  /** This shard's rows, from its counts: the tests' `count` op sums them over the shards. */
+  async testCount(): Promise<number> {
+    return this.ownedRowCount();
+  }
   private readonly log = new StatementLog(this.ctx.storage);
   /** The statements this instance ran whose text contains `filter`, since the last reset. */
   async statements(filter: string, reset: boolean): Promise<StatementCost[]> {
@@ -620,8 +631,6 @@ const docsV2 = defineTable<DocV2>({
   primaryKey: "name",
   columns: { ...docs.columns, stars: "integer" },
   indexes: { byCreated: ["createdAt"], byStars: ["stars"], byDeletedCreated: ["deleted", "createdAt"] },
-  // byDeleted dropped, and the same column counted again under a new name: counted from the rows stored.
-  counts: { deletedAgain: "deleted", byStars: "stars" },
 });
 
 /**
@@ -637,6 +646,10 @@ TextEncoder.prototype.encode = function (this: TextEncoder, input?: string) {
 };
 
 export class EvolvingDocs extends ShardedTable<Env, DocV2> {
+  /** This shard's rows, from its counts: the tests' `count` op sums them over the shards. */
+  async testCount(): Promise<number> {
+    return this.ownedRowCount();
+  }
   /** encodes in this object's isolate: reset with `reset`. */
   async encodes(reset: boolean): Promise<number> {
     const n = encodes;
@@ -1447,6 +1460,8 @@ async function indexedOp(env: Env, body: { name: string; op: string; args: unkno
       return flat(untyped(rows).call(body.args[1] as string[], body.args[0] as string, body.args[2] as unknown[]));
     case "indexStats":
       return untyped(indexes).scan("indexStats");
+    case "count": // rows in the table: each row shard's own count, summed
+      return { ok: ((await untyped(rows).scan("testCount")) as number[]).reduce((a, b) => a + b, 0) };
     case "lateOldPut": { // [row]: a put of byEmail (the v2 schema's), as a row shard of an earlier deploy would send it
       const ix = globalIndexes(users).find((g) => g.name === "byEmail")!;
       const row = body.args[0] as User;
@@ -1532,6 +1547,8 @@ async function tableOp(env: Env, body: { cls: string; name: string; op: string; 
     return ns.get(ns.idFromName(shardObjectName(body.name, (body.args[0] as string) ?? ""))).rowsRead();
   }
   if (body.op === "scan") return (sharded(namespace(env, body.cls) as never, body.name, body.cls === "routedTable" ? { routeOf: refRoute } : {}).scan as (m: string, ...a: unknown[]) => Promise<unknown>)(...(body.args as [string, ...unknown[]]));
+  // Rows in the table: each shard's own count, summed (the client has none, RFD0012).
+  if (body.op === "count") return ((await (sharded(namespace(env, body.cls) as never, body.name, body.cls === "routedTable" ? { routeOf: route } : {}).scan as (m: string) => Promise<number[]>)("testCount")) as number[]).reduce((a, b) => a + b, 0);
   if ((body as { stats?: boolean }).stats) {
     const result = await Promise.resolve(t[body.op]!.call(t, ...body.args)).then((ok) => ({ ok }), (error: unknown) => ({ threw: String(error) }));
     return { ...result, stats };

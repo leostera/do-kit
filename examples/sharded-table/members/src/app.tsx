@@ -14,8 +14,6 @@ interface Member {
 interface Listing {
   members: Member[];
   cursor: string | null;
-  total: number;
-  byStatus: Record<string, number>;
 }
 
 const WORKSPACES = ["acme", "globex", "initech"];
@@ -52,7 +50,7 @@ export function App() {
     <Page
       title="Members"
       layer="ShardedTable"
-      description="One sharded table per workspace. Handles are unique ignoring case, because the lowercased handle is the primary key and its shard decides; the listing is newest first, with counts per status from the same calls."
+      description="One sharded table per workspace. Handles are unique ignoring case, because the lowercased handle is the primary key and its shard decides; the listing walks the shards one at a time, newest first within each."
     >
       <ErrorBanner error={error} />
       <Section
@@ -76,18 +74,6 @@ export function App() {
       </Section>
       <Section
         title="Members"
-        aside={
-          listing && (
-            <div className="flex gap-2">
-              <Badge variant="outline">{listing.total} total</Badge>
-              {Object.entries(listing.byStatus).map(([status, count]) => (
-                <Badge key={status} variant={STATUS_BADGE[status as Status] ?? "neutral"} appearance="dot">
-                  {count} {status}
-                </Badge>
-              ))}
-            </div>
-          )
-        }
       >
         {!listing || listing.members.length === 0 ? (
           <Empty icon={<UsersIcon size={40} />} title="No members" description={`Invite the first one to ${workspace}.`} size="sm" />

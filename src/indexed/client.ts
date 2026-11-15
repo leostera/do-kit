@@ -159,7 +159,8 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
 
   /**
    * One page of a listing. Through a global index, of one partition (`partition`: the values of its
-   * leading columns), from one index shard; otherwise as a sharded table lists.
+   * leading columns), from one index shard, in the index's order; otherwise as a sharded table lists,
+   * walking the row shards.
    */
   override async list(query: IndexedListQuery = {}): Promise<ListPage<Row>> {
     const ix = query.index === undefined ? undefined : this.globals.find((g) => g.name === query.index);
@@ -167,7 +168,6 @@ export class IndexedTableClient<Row extends RowShape> extends TableClient<Row> {
       if (query.partition !== undefined) throw new Error("partition is for global indexes");
       return super.list(query);
     }
-    if (query.withCount) throw new Error("withCount is not supported through a global index");
     const partition = query.partition ?? [];
     if (partition.length !== ix.partition) throw new Error(`global index ${ix.name} is partitioned by ${ix.partition} column(s): pass partition with their values`);
     const values = ix.columns.slice(0, ix.partition).map((c, i) => encodeValue(this.schema, c, partition[i]));

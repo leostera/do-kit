@@ -36,15 +36,6 @@ test("a write held by a split for longer than a second never reaches the root", 
   expect(await reached("counters", name, "")).toBe(before);
 }, 60_000);
 
-test("a listing in query order refuses a tree with more shards than it may ask per page", async () => {
-  const name = `too-many-shards-${unique()}`;
-  for (let i = 0; i < 40; i++) await post("/table", { cls: "table", name, op: "put", args: [{ name: `d${i}`, id: `${i}`, createdAt: i, lastEditAt: null, deleted: false, meta: null }] });
-  for (const bits of ["", "0", "1"]) expect(await post<boolean>("/split", { cls: "table", name, bits })).toBe(true);
-  const list = (query: object) => post<{ ok?: { rows: unknown[] }; name?: string | null }>("/table", { cls: "table", name, op: "try:list", args: [{ index: "byCreated", limit: 10, ...query }], options: { maxShardsPerPage: 2 } });
-  expect((await list({})).name).toBe("TooManyShards");
-  expect((await list({ order: "shard" })).ok?.rows.length).toBeGreaterThan(0);
-}, 60_000);
-
 test("a scan of a presplit tree makes none of the shards never used", async () => {
   const name = `scan-presplit-${unique()}`;
   await post("/scan", { cls: "presplit", name, method: "entries" });

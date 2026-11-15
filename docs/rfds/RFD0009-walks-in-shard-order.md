@@ -4,7 +4,7 @@
 - Status: Implemented
 - Author: `leostera`
 - Start Date: `2026-11-13`
-- Updated: `2026-11-13`
+- Updated: `2026-11-15`
 - Discussion PR: none
 - Tracking Issue: none
 
@@ -15,6 +15,10 @@ each shard, one shard a page. A walk starts at a random shard and wraps around, 
 row that existed when it began exactly once, through splits. Walking a table of N shards costs
 about 1/N of the calls of a listing in query order, and its throughput grows with shards where
 query order's cannot.
+
+Since [RFD0012](RFD0012-shard-local-tables.md), a walk is the only listing a sharded table has:
+`list()` walks, and `order` is refused, as is `withCount`. The examples below say `order: "shard"`
+as it was written then; today it is left out.
 
 ## Motivation
 
@@ -38,7 +42,7 @@ that aggregate. They pay for an order they throw away.
 ## Non-goals
 
 - A global order. Rows are in the query's order within a shard, not across shards.
-- Counts with the walk (`withCount`): they need every shard. Use `count()`.
+- Counts with the walk (`withCount`): they need every shard. RFD0012 gives counts to `IndexedTable`.
 
 ## Guide-level explanation
 
@@ -138,7 +142,8 @@ otherwise end the walk early.
 - **Fan-out from a shard**: the caller asks one shard, which asks the rest. It moves the
   subrequests out of the caller's invocation, but every shard still serves every page.
 - **Range-partitioned index shards**, so a page in query order reads one or two shards: the right
-  answer for hot listings in order, and a layer of its own. Partitioned global indexes
+  answer for hot listings in order, and a layer of its own, designed in
+  [RFD0012](RFD0012-shard-local-tables.md). Partitioned global indexes
   ([RFD0003](RFD0003-indexed-table.md)) already give one index shard per page within a partition.
 
 ### Do nothing

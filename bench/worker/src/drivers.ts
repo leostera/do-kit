@@ -15,8 +15,6 @@ export const DRIVER_LIMITED_SHARE = 0.01;
 export function callsPerOperation(operation: string, target: string): number {
   const shards = Number(/-(\d+)$/.exec(target)?.[1] ?? 1);
   const indexed = target.startsWith("indexed-");
-  if (operation === "list" && target.startsWith("table-")) return 3 * shards; // a query-order page: rounds over every shard
-  if (operation === "list" && target.startsWith("plain-")) return shards; // one round over every object
   if (operation === "create" && indexed) return 2; // reserve, then write
   if (operation === "rmw") return 2; // get, then a conditional put (more on conflict)
   const atomic = /^atomic-(\d+)$/.exec(operation);

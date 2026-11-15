@@ -39,8 +39,8 @@ const TEAMS = 64;
 const DRIVERS_PER_FLEET = 256;
 /** The most drivers one measurement starts (32 fleets). */
 const MAX_DRIVERS = 8192;
-/** "list": one page of 50 rows, newest first, each worker walking its own cursor (tables only). */
-/** "walk": the same, in shard order (`order: "shard"`): one shard a page. */
+/** "list": one page of 50 rows of one team, newest first, through a global index (indexed targets). */
+/** "walk": one page of 50 rows, shard after shard, newest first in each, each worker walking its own cursor. */
 /**
  * "apply": one conditional update of a row in its shard (`apply`, RFD0010): the row's size goes up
  * by one, or it is created. "rmw": the same decision made by the caller, as a read and a put
@@ -152,6 +152,10 @@ abstract class TableBench extends ShardedTable<Env, BenchRow> {
   async benchWhere(burnIterations: number): Promise<Where> {
     return where(burnIterations);
   }
+  /** This shard's rows, for countRows. */
+  async benchCount(): Promise<number> {
+    return this.ownedRowCount();
+  }
 }
 const tablePolicy = (depth: number): SplitPolicy => ({ callsPerSecond: 1e12, windowSeconds: 5, maxDepth: 12, initialDepth: depth, copy: "native" });
 export class Table1 extends TableBench {
@@ -182,6 +186,10 @@ abstract class IndexedBench extends IndexedTable<Env, BenchRow> {
   protected table = indexedRows;
   async benchWhere(burnIterations: number): Promise<Where> {
     return where(burnIterations);
+  }
+  /** This shard's rows, for countRows. */
+  async benchCount(): Promise<number> {
+    return this.ownedRowCount();
   }
 }
 abstract class IndexBench extends GlobalIndex<Env> {
@@ -252,6 +260,17 @@ function rowsClient(env: Env, target: TableTarget | IndexedTarget | PlainTarget,
   // A plain target serves the calls the driver makes of a table (not apply, or indexed lookups).
   if (isPlain(target)) return plainTable(env.PLAIN, name, Number(target.slice("plain-".length))) as unknown as TableClient<BenchRow>;
   return isIndexed(target) ? indexedClient(env, target, name, onCall) : tableClient(env, target, name, onCall);
+}
+
+/**
+ * Rows of a table target: each shard's own count, summed. Every shard is asked, which is why the
+ * table's client has no count (RFD0012); the bench needs one only before and after a point.
+ */
+async function countRows(env: Env, target: TableTarget | IndexedTarget | PlainTarget, name: string): Promise<number> {
+  if (isPlain(target)) return plainTable(env.PLAIN, name, Number(target.slice("plain-".length))).count();
+  const ns = isIndexed(target) ? { "indexed-1": env.INDEXED_1, "indexed-4": env.INDEXED_4, "indexed-16": env.INDEXED_16 }[target] : { "table-1": env.TABLE_1, "table-4": env.TABLE_4, "table-16": env.TABLE_16, "table-64": env.TABLE_64 }[target];
+  const counts = (await (sharded(ns as never, name) as unknown as { scan(method: string): Promise<unknown[]> }).scan("benchCount")) as number[];
+  return counts.reduce((a, b) => a + b, 0);
 }
 
 function tableClient(env: Env, target: TableTarget, name: string, onCall?: (call: ClientCall) => void): TableClient<BenchRow> {
@@ -576,7 +595,7 @@ export class BenchFleet extends DurableObject<Env> {
 interface ProbeTable {
   readonly target: TableTarget;
   readonly objectName: string;
-  readonly op: "list" | "count" | "read" | "walk";
+  readonly op: "count" | "read" | "walk";
   readonly times?: number;
   readonly fromObject?: boolean;
 }
@@ -601,7 +620,7 @@ async function probeTable(env: Env, body: ProbeTable): Promise<{ runs: { ms: num
   for (let i = 0; body.op !== "walk" && i < Math.min(body.times ?? 3, 10); i++) {
     const started = Date.now();
     try {
-      const rows = await bounded(async () => (body.op === "count" ? await t.count() : body.op === "read" ? (await t.getMany([`key-${i}`])).length : (await t.list({ index: "byCreated", direction: "desc", limit: 50 })).rows.length), 60_000, body.op);
+      const rows = await bounded(async () => (body.op === "count" ? await countRows(env, body.target, body.objectName) : (await t.getMany([`key-${i}`])).length), 60_000, body.op);
       runs.push({ ms: Date.now() - started, rows });
     } catch (error) {
       runs.push({ ms: Date.now() - started, error: String(error).slice(0, 300) });
@@ -639,7 +658,7 @@ export class BenchDriver extends DurableObject<Env> {
         return;
       }
       // Seeded once per object: every level of a run measures the same rows.
-      if ((await t.count().catch(() => 0)) >= config.keyCount) return;
+      if ((await countRows(this.env, config.target as TableTarget | IndexedTarget | PlainTarget, config.objectName).catch(() => 0)) >= config.keyCount) return;
       for (let i = 0; i < config.keyCount; i += 100) {
         const rows = Array.from({ length: Math.min(100, config.keyCount - i) }, (_, j) => ({ row: benchRow(`key-${i + j}`, config.payloadBytes) }));
         for (let attempt = 0; ; attempt++) {
@@ -793,7 +812,7 @@ export class BenchDriver extends DurableObject<Env> {
             } else {
               const page: Awaited<ReturnType<typeof t.list>> = indexed
                 ? await indexed.list({ index: "byTeam", partition: [team], direction: "desc", limit: 50, cursor })
-                : await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor, ...(config.operation === "walk" ? { order: "shard" as const } : {}) });
+                : await t.list({ index: "byCreated", direction: "desc", limit: 50, cursor });
               cursor = page.cursor;
               bytes += page.rows.length * config.payloadBytes;
               for (const row of page.rows) seen.push(row.row.name);
@@ -909,7 +928,7 @@ function validate(input: unknown): Omit<MeasureConfig, "driverIndex" | "driverCo
   if (operation === "create" && !isRows(target as Target)) throw new Error("create is for table targets");
   if (operation === "apply" && !isTable(target as Target)) throw new Error("apply is for sharded table targets");
   if (operation === "rmw" && !isTable(target as Target) && !isPlain(target as Target)) throw new Error("rmw is for sharded and plain table targets");
-  if (operation === "list" && !isRows(target as Target)) throw new Error("list is for table targets");
+  if (operation === "list" && !isIndexed(target as Target)) throw new Error("list is for indexed targets: a sharded table walks (RFD0012)");
   if (operation === "walk" && !isTable(target as Target) && !isPlain(target as Target)) throw new Error("walk is for sharded and plain table targets");
   if (!DISTRIBUTIONS.includes(distribution as Distribution)) throw new Error(`distribution must be one of ${DISTRIBUTIONS.join(", ")}`);
   if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > MAX_DRIVERS * CALLS_PER_DRIVER) throw new Error(`concurrency must be an integer from 1 to ${MAX_DRIVERS * CALLS_PER_DRIVER}`);
@@ -1333,7 +1352,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const source = input.target === "reader-leased" ? env.LEASED_SOURCE.get(env.LEASED_SOURCE.idFromName(input.objectName)) : null;
     const sourceBefore = source ? await source.stats() : null;
     // A create point must grow the count by what it created: counted before and after.
-    const counted = () => bounded(() => rowsClient(env, input.target as TableTarget | IndexedTarget, input.objectName).count(), 20_000, "counting the rows").catch((error: unknown) => (stalls.push(String(error)), null));
+    const counted = () => bounded(() => countRows(env, input.target as TableTarget | IndexedTarget, input.objectName), 20_000, "counting the rows").catch((error: unknown) => (stalls.push(String(error)), null));
     const countBefore = input.operation === "create" && isRows(input.target) ? await counted() : null;
     // Later with more fleets: every driver must have its start time before it comes.
     const startAt = Date.now() + 750 + 250 * fleets.length;
@@ -1356,7 +1375,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (isRows(input.target)) {
       const leaves = Number(input.target.slice(input.target.indexOf("-") + 1));
       // Counting asks every shard: one still overloaded from the run answers nothing.
-      const rows = await bounded(() => rowsClient(env, input.target as TableTarget | IndexedTarget, input.objectName).count(), 20_000, "counting the rows").catch((error: unknown) => (stalls.push(String(error)), -1));
+      const rows = await bounded(() => countRows(env, input.target as TableTarget | IndexedTarget, input.objectName), 20_000, "counting the rows").catch((error: unknown) => (stalls.push(String(error)), -1));
       topology = { leaves, rows, depth: Math.log2(leaves) };
     }
     const wrong = [...wrongSamples];

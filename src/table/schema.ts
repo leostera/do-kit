@@ -1,5 +1,5 @@
-// The schema of a sharded table, the queries a listing takes, and the sort order shared by the
-// shards (SQLite) and the client that merges their pages (here): they must agree exactly.
+// The schema of a sharded table, the queries a listing takes, and the order-preserving encoding of
+// index keys that the shards sort by.
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { compareText, isWellFormed, storedJson } from "../sharded/values.js";
@@ -17,11 +17,6 @@ export interface TableSchema<Row extends RowShape> {
   /** Index name to the columns it sorts by. The primary key is appended to every index. */
   readonly indexes?: Readonly<Record<string, readonly (keyof Row & string)[]>>;
   /**
-   * Count group name to a column: rows are counted per value of that column, kept with every
-   * write, so `countBy` (and a listing's `withCount`) is exact without reading rows.
-   */
-  readonly counts?: Readonly<Record<string, keyof Row & string>>;
-  /**
    * The largest row a write may store, as do-kit counts it (text as UTF-8, numbers as 8 bytes),
    * up to SQLite's 2 MB, the default: a larger one throws `RowTooLarge` and writes nothing.
    */
@@ -34,11 +29,6 @@ export interface TableSchema<Row extends RowShape> {
    * and a deploy drops what its schema no longer declares.
    */
   readonly version?: number;
-  /**
-   * The values a count group reports at most (default 1,000): past it `countBy` answers the first
-   * that many, in order of their JSON text, and `truncated`. Count groups are for columns of few values.
-   */
-  readonly maxCountValues?: number;
   /**
    * IndexedTable only: index name to a global index, kept apart from the rows on its own shards
    * (see RFD0003). A write returns once its entries are written.
@@ -57,21 +47,6 @@ export interface GlobalIndexDef<Row extends RowShape> {
    * one shard, sorted by the rest. A unique index is partitioned by all its columns (the default).
    */
   readonly partition?: number;
-}
-
-/** Rows with one value of a count group's column. */
-export interface GroupCount {
-  readonly value: unknown;
-  readonly count: number;
-}
-
-/** Values a count group reports at most, by default: count groups are for columns of few values. */
-export const DEFAULT_MAX_COUNT_VALUES = 1_000;
-
-/** A count group with more values than `maxCountValues`: the first that many, in order of their JSON text. */
-export interface TruncatedCounts {
-  readonly counts: readonly GroupCount[];
-  readonly truncated: true;
 }
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
@@ -168,12 +143,6 @@ export function defineTable<Row extends RowShape>(schema: TableSchema<Row>): Tab
   const width = columns.length + 2;
   if (width > MAX_TABLE_COLUMNS) throw new Error(`a table of ${columns.length} columns has ${width} with its hidden ones (_hash, _version); SQLite in a Durable Object takes ${MAX_TABLE_COLUMNS}`);
   if (schema.maxRowBytes !== undefined && (!Number.isInteger(schema.maxRowBytes) || schema.maxRowBytes < 1 || schema.maxRowBytes > DEFAULT_MAX_ROW_BYTES)) throw new Error(`maxRowBytes must be an integer from 1 to ${DEFAULT_MAX_ROW_BYTES}`);
-  for (const [name, col] of Object.entries(schema.counts ?? {})) {
-    if (!IDENTIFIER.test(name)) throw new Error(`count group ${JSON.stringify(name)}: a plain identifier`);
-    const type = schema.columns[col];
-    if (!type) throw new Error(`count group ${name}: no column ${col}`);
-    if (type === "json") throw new Error(`count group ${name}: json column ${col} cannot be counted by value`);
-  }
   return schema;
 }
 
@@ -283,6 +252,12 @@ export interface Condition {
   readonly value?: unknown;
 }
 
+/**
+ * A listing: rows in the query's order within each shard, shard after shard. A page asks one shard
+ * (up to three, if one runs out partway), so walking a table of N shards costs one call a page
+ * however large N is. Every row that existed when the walk began, and was not deleted, is listed
+ * once, through splits. An order across the whole table comes from an IndexedTable's global index.
+ */
 export interface ListQuery {
   /** A declared index, or none for primary-key order. */
   readonly index?: string;
@@ -294,30 +269,12 @@ export interface ListQuery {
   readonly cursor?: string | null;
   /** Rows each shard may scan for one page: 1,000 or 10 × limit by default, at most 10,000. */
   readonly budget?: number;
-  /**
-   * Also count, in the same calls to the shards: `true` for every row (`total`), or a count
-   * group's name for its counts per value too (`counts`). Counts ignore `where`.
-   */
-  readonly withCount?: boolean | string;
-  /**
-   * `"query"` (the default): rows in the query's order across the whole table; each page asks
-   * every shard. `"shard"`: rows in the query's order within each shard, shard after shard; each
-   * page asks one shard (up to three, if one runs out partway), so walking a table of N shards
-   * costs about 1/N of the calls. For walks that need every row and not their order: exports,
-   * backfills, scans. Every row that existed when the walk began is listed once, through splits;
-   * `withCount` is not supported.
-   */
-  readonly order?: "query" | "shard";
 }
 
 export interface ListPage<Row> {
   readonly rows: readonly Versioned<Row>[];
   /** For the next page; null when the listing is done. */
   readonly cursor: string | null;
-  /** With `withCount`: rows in the table, as `count()` says. */
-  readonly total?: number;
-  /** With `withCount` naming a count group: its counts, as `countBy` says. */
-  readonly counts?: readonly GroupCount[];
 }
 
 /**
@@ -334,9 +291,6 @@ export interface ShardPage {
   readonly frontier: Position | null;
   /** The page holds as many bytes as a page takes: the client ends its page here too. */
   readonly full?: true;
-  /** Asked for: this shard's rows, and its counts of a group. */
-  readonly total?: number;
-  readonly counts?: readonly GroupCount[];
 }
 
 /** What the client asks each shard for one page. */
@@ -347,8 +301,6 @@ export interface ShardPageRequest {
   readonly limit: number;
   readonly budget: number;
   readonly after: Position | null;
-  /** Count this shard's rows too, and (a group's name) its counts per value. */
-  readonly withCount?: boolean | string;
 }
 
 export const MAX_LIMIT = 1_000;
@@ -364,12 +316,6 @@ export function pageRequest(query: ListQuery, after: Position | null): ShardPage
   const direction = query.direction ?? "asc";
   if (direction !== "asc" && direction !== "desc") throw new Error("direction must be asc or desc");
   return { index: query.index ?? null, direction, where: query.where ?? [], limit, budget, after };
-}
-
-/** Compares two positions in listing order: code point order, reversed for `desc`. */
-export function comparePositions(a: Position, b: Position, direction: "asc" | "desc"): number {
-  const d = compareText(a, b);
-  return direction === "asc" ? d : -d;
 }
 
 export { compareText };
@@ -504,32 +450,6 @@ export function decodeCursor(cursor: string, fingerprint: string): Position {
   if (f !== fingerprint) throw new Error("the cursor belongs to another query (index, direction or conditions)");
   if (typeof p !== "string") throw new Error("not a cursor of this table");
   return p;
-}
-
-/**
- * Merges one page from every shard: every shard reported every match up to the smallest frontier,
- * so rows up to it are complete. Returns them in order, up to `limit`, and where the next page
- * starts (null: done).
- */
-export function mergePages(pages: readonly ShardPage[], request: Pick<ShardPageRequest, "limit" | "direction">): { rows: ShardPage["rows"][number][]; next: Position | null } {
-  const cmp = (a: Position, b: Position) => comparePositions(a, b, request.direction);
-  let frontier: Position | null = null;
-  // (null, not falsy: the empty string is a position, that of a row whose key is "".)
-  for (const page of pages) if (page.frontier !== null && (frontier === null || cmp(page.frontier, frontier) < 0)) frontier = page.frontier;
-  const seen = new Set<string>();
-  const complete = pages
-    .flatMap((p) => p.rows)
-    .filter((r) => frontier === null || cmp(r.position, frontier) <= 0)
-    .filter((r) => {
-      // A key reported by two shards in one page (one before a split committed, one after).
-      if (seen.has(r.key)) return false;
-      seen.add(r.key);
-      return true;
-    })
-    .sort((a, b) => cmp(a.position, b.position));
-  const rows = complete.slice(0, request.limit);
-  if (rows.length === request.limit && (complete.length > request.limit || frontier !== null)) return { rows, next: rows.at(-1)!.position };
-  return { rows, next: frontier };
 }
 
 /** Longest error text `redact` returns. */

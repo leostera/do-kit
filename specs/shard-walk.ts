@@ -8,12 +8,16 @@
 //     splits again starts its second half from the old floor, below what the walk listed in that
 //     shard: those rows are listed twice. (Keeping only the newest floor instead skips rows in the
 //     first split's other half.)
+//   - listOwnedOnly: a shard lists only the keys under its bits. A split copies the whole of its
+//     parent's storage to both halves, and each keeps its sibling's keys until cleanup deletes
+//     them; listing those, a half lists rows its sibling lists again.
 //
 // Five keys over a root that splits, and its left half that splits again, both perhaps mid-walk.
-// Every key exists throughout. Before cleanup, a shard holds the keys under its bits.
+// Every key exists throughout. Before cleanup, a shard stores the keys of its parent.
 import { atMost, defineActor, defineProperty, defineRule, defineScenario, defineSpec, defineZone } from "@leostera/feynman";
 
 const floorPerSubtree = defineRule("floorPerSubtree", { description: "A cursor keeps a floor per shard that split under it; a shard starts from its nearest one." });
+const listOwnedOnly = defineRule("listOwnedOnly", { description: "A shard lists only the keys under its bits, not those of its sibling that a split copied to it and cleanup has not deleted." });
 
 /** Each key's hash bits: a and c under "00", b and e under "01", d under "1". */
 const HASH: Record<string, string> = { a: "00", b: "01", c: "00", d: "10", e: "01" };
@@ -40,13 +44,13 @@ export const Walker = defineActor({
   description: "A walk in shard order, a row a page, and the tree it walks, which may split under it.",
   zone,
   singleton: true,
-  initialState: () => ({ leaves: [""], walk: { leaf: "", after: null, floors: [] } as Walk, listed: [] as string[] }),
+  initialState: () => ({ leaves: [""], walk: { leaf: "", after: null, floors: [] } as Walk, listed: [] as string[], uncleaned: new Set<string>() }),
   display: { icon: "code", status: (s) => (s.walk === null ? `done: ${s.listed.join(",")}` : `at ${s.walk.leaf || "root"} after ${s.walk.after ?? "start"}; listed ${s.listed.join(",")}`) },
   actions: {
     page: {
       label: "list a page",
       description: "Lists the next row of the cursor's shard, or follows its split, or moves on to the next shard.",
-      sources: ["src/table/client.ts#TableClient.listByShard", "src/table/schema.ts#nextShard"],
+      sources: ["src/table/client.ts#TableClient.list", "src/table/index.ts#ShardedTable.page", "src/table/schema.ts#nextShard"],
       when: (s) => s.walk !== null,
       run(s) {
         const walk = s.walk!;
@@ -57,7 +61,10 @@ export const Walker = defineActor({
           s.walk = { leaf: `${walk.leaf}0`, after: walk.after, floors };
           return;
         }
-        const row = KEYS.find((k) => HASH[k]!.startsWith(walk.leaf) && (walk.after === null || k > walk.after));
+        // What the shard stores: its parent's keys until cleanup (a split copies the whole storage).
+        const stored = s.uncleaned.has(walk.leaf) ? walk.leaf.slice(0, -1) : walk.leaf;
+        const listed = listOwnedOnly.on ? walk.leaf : stored;
+        const row = KEYS.find((k) => HASH[k]!.startsWith(listed) && (walk.after === null || k > walk.after));
         if (row === undefined) return void (s.walk = next(walk));
         s.listed.push(row);
         s.walk = { ...walk, after: row };
@@ -69,7 +76,18 @@ export const Walker = defineActor({
       description: "The root splits into 0 and 1.",
       sources: ["src/sharded/index.ts#ShardedObject.split"],
       when: (s) => s.leaves.includes(""),
-      run: (s) => void (s.leaves = ["0", "1"]),
+      run(s) {
+        s.leaves = ["0", "1"];
+        s.uncleaned = new Set(["0", "1"]);
+      },
+    },
+    cleanup: {
+      with: [atMost(2)],
+      label: "cleanup runs",
+      description: "Every shard deletes the keys it gave away.",
+      sources: ["src/table/index.ts#ShardedTable.cleanupForeign"],
+      when: (s) => s.uncleaned.size > 0,
+      run: (s) => void s.uncleaned.clear(),
     },
     splitLeft: {
       with: [atMost(1)],
@@ -77,7 +95,13 @@ export const Walker = defineActor({
       description: "Shard 0 splits into 00 and 01.",
       sources: ["src/sharded/index.ts#ShardedObject.split"],
       when: (s) => s.leaves.includes("0"),
-      run: (s) => void (s.leaves = ["00", "01", "1"]),
+      run(s) {
+        s.leaves = ["00", "01", "1"];
+        // The new halves store all of shard 0's keys until cleanup runs again.
+        s.uncleaned.delete("0");
+        s.uncleaned.add("00");
+        s.uncleaned.add("01");
+      },
     },
   },
 });
@@ -85,7 +109,7 @@ export const Walker = defineActor({
 const once = defineProperty("once", {
   description: "No row is listed twice.",
   always: (w) => new Set(w.the(Walker).state.listed).size === w.the(Walker).state.listed.length,
-  needs: [floorPerSubtree],
+  needs: [floorPerSubtree, listOwnedOnly],
 });
 const complete = defineProperty("complete", {
   description: "A walk that ended listed every row (every row exists throughout).",

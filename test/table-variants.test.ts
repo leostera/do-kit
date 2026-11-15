@@ -85,7 +85,11 @@ describe.each(["table", "tableDefaultHold", "presplitTable", "routedTable"])("%s
         if (cursor === null) break;
         if (page === 1 && q < 2) await splitFirst(name);
       }
-      expect(names).toEqual(expected(rows, query));
+      // Shard by shard: every row once, each shard's in the reference order.
+      const want = expected(rows, query);
+      const rank = new Map(want.map((n, i) => [n, i]));
+      expect([...names].sort()).toEqual([...want].sort());
+      expect(names.filter((n, i) => i > 0 && rank.get(n)! < rank.get(names[i - 1]!)!).length).toBeLessThanOrEqual((await shards(cls, name)).length);
     }
     expect(await op(name, "count")).toBe(rows.length);
   }, 120_000);

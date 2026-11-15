@@ -1,13 +1,13 @@
 // The members of a workspace: handles are unique per workspace (ignoring case), members go through a
-// lifecycle (invited, active, removed), and the workspace lists them newest first with how many there
-// are in each state.
+// lifecycle (invited, active, removed), and the workspace lists them a shard at a time, newest first
+// within each.
 //
 // Every route takes the workspace in an `x-workspace` header, or `?workspace=` ("demo" when neither).
 //
 //   POST   /api/members {"handle": "Ada"}                 -> 201 {"handle": "ada", "id": "...", "status": "invited"}; 409 if taken
 //   POST   /api/members/:handle/activate {"id": "..."}    -> the member, now "active"
 //   DELETE /api/members/:handle {"id": "..."}             -> 204 (marked "removed")
-//   GET    /api/members?cursor=...                        -> {"members": [...], "cursor": ..., "total": 3, "byStatus": {...}}
+//   GET    /api/members?cursor=...                        -> {"members": [...], "cursor": ...}
 //   GET    /api/shards                                    -> the workspace's shards, for the page
 import { defineTable, sharded, ShardedTable, table, type WriteResult } from "@leostera/do-kit";
 import { Hono } from "hono";
@@ -25,7 +25,6 @@ const members = defineTable<Member>({
   primaryKey: "handle",
   columns: { handle: "text", displayName: "text", id: "text", status: "text", createdAt: "integer", updatedAt: "integer" },
   indexes: { byCreated: ["createdAt"] },
-  counts: { byStatus: "status" },
 });
 
 /** Which status changes the lifecycle allows. */
@@ -33,6 +32,10 @@ const NEXT: Record<Status, readonly Status[]> = { invited: ["active", "removed"]
 
 export class Members extends ShardedTable<Env, Member> {
   protected table = members;
+  /** This shard's rows, for the shard panel: an RPC to one shard, from its kept counts. */
+  rowCount(): number {
+    return this.ownedRowCount();
+  }
 
   protected nodes() {
     return this.env.MEMBERS;
@@ -89,10 +92,10 @@ app.delete("/api/members/:handle", async (c) => {
 });
 
 app.get("/api/members", async (c) => {
-  // Newest first, hiding removed ones, with the counts per status from the same calls.
-  const page = await table(c.env.MEMBERS, tableName(c.get("workspace")), members).list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "removed" }], limit: 20, cursor: c.req.query("cursor") ?? null, withCount: "byStatus" });
-  const byStatus = Object.fromEntries((page.counts ?? []).map((n) => [String(n.value), n.count]));
-  return c.json({ members: page.rows.map((r) => r.row), cursor: page.cursor, total: page.total, byStatus });
+  // A shard at a time, newest first within each, hiding removed ones: one call a page however
+  // many shards the workspace has.
+  const page = await table(c.env.MEMBERS, tableName(c.get("workspace")), members).list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "removed" }], limit: 20, cursor: c.req.query("cursor") ?? null });
+  return c.json({ members: page.rows.map((r) => r.row), cursor: page.cursor });
 });
 
 app.get("/api/shards", async (c) => c.json(await describeShards(c.env.MEMBERS, tableName(c.get("workspace")), tableRows)));

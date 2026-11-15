@@ -1,7 +1,7 @@
 # RFD0012 - Shard-local tables: ShardedTable answers from one shard, IndexedTable across them
 
 - Feature Name: `shard-local-tables`
-- Status: Draft
+- Status: Draft (the ShardedTable removals built)
 - Author: `leostera`
 - Start Date: `2026-11-15`
 - Updated: `2026-11-15`
@@ -19,8 +19,8 @@ that ask every shard (a listing in query order, `withCount`, `count()` and `coun
 - a per-index `consistency: "consistent" | "eventual"` that says whether a write waits for its
   index changes.
 
-`ShardedTable` gains a listing scoped to one route (`list({ route })`) and keeps its shard-order
-walk, renamed `walk`. The model is [specs/ordered-index.ts](../../specs/ordered-index.ts).
+`ShardedTable` gains a listing scoped to one route (`list({ route })`), and `list()` is its
+shard-order walk ([RFD0009](RFD0009-walks-in-shard-order.md)), with no `order` to pick. The model is [specs/ordered-index.ts](../../specs/ordered-index.ts).
 
 ## Motivation
 
@@ -92,7 +92,7 @@ await docs.apply("team-7/doc-42", "rename", { title: "Q3" });
 const page = await docs.list({ route: "team-7", index: "byCreated", direction: "desc", limit: 50 });
 
 // Every row once, a few shards a page; the order is the shards', not the table's.
-for await (const { row } of docs.walk()) await exportRow(row);
+for await (const { row } of docs.all()) await exportRow(row);
 ```
 
 What needs the whole table, ordered or counted, is an `IndexedTable` global index:
@@ -148,15 +148,16 @@ flowchart LR
 | call | shards a call asks | in this RFD |
 |---|---|---|
 | `get`, `getMany`, `put`, `putMany`, `patch`, `delete`, `apply` | the shards of its keys | kept |
-| `list({ order: "shard" })`, `all()` | a few a page, each once a walk | kept as `walk(query)` |
+| `list({ order: "shard" })`, `all()` | a few a page, each once a walk | kept, as `list()` and `all()` with no `order` (built) |
 | `list({ route })` | one | new |
-| `list()` in query order (the default today) | N a round, up to 3 rounds | removed |
-| `list({ withCount })` | N | removed |
-| `count()`, `countBy()` | N | removed, to `IndexedTable.count` |
+| `list()` in query order (the default until now) | N a round, up to 3 rounds | removed (built) |
+| `list({ withCount })` | N | removed (built) |
+| `count()`, `countBy()`, count groups | N | removed (built), to `IndexedTable.count` |
 | `verifyCounts()` | every shard, one at a time | kept, for operators |
 
-Row shards keep their per-prefix counts and count groups (RFD0002): splits, size checks and
-`verifyCounts` use them. Only the client calls that sum them across shards go.
+Row shards keep their per-prefix row counts (RFD0002): splits use them, `verifyCounts` repairs them,
+and a subclass reads its shard's with `ownedRowCount()`. Count groups served only `countBy`, and
+go with it.
 
 ### Route-scoped listings
 
@@ -294,13 +295,14 @@ consistent indexes, and all but read-your-writes for eventual ones.
 
 ### Compatibility and migration
 
-This is a breaking change, in one release with its replacements, so every removed call has
-somewhere to go the day it goes:
+This is a breaking change, with no migration: nothing runs on these tables in production, so the
+removed calls and their storage are deleted outright. Until phase 2, an order across the whole
+table is an `IndexedTable` index within a partition, and a count across it is a subclass's own:
 
 | was | becomes |
 |---|---|
-| `list()`, `list({ order: "query" })` | `list({ route })`, `walk()`, or an `IndexedTable` ordered index |
-| `list({ order: "shard" })`, `all()` | `walk()` |
+| `list()`, `list({ order: "query" })` | `list({ route })`, the walk `list()`, or an `IndexedTable` ordered index |
+| `list({ order: "shard" })`, `all({ order: "shard" })` | `list()`, `all()` |
 | `list({ withCount })` | a listing, and `count` on an `IndexedTable` index |
 | `count()` | `IndexedTable.count({ index })` |
 | `countBy(group)` | an index partitioned by the column, `count({ index, partition })` |
@@ -309,8 +311,6 @@ somewhere to go the day it goes:
 - Moving a table from `ShardedTable` to `IndexedTable` keeps its storage (RFD0003); a new global
   index is built in the background, and `indexStatus()` says when.
 - `IndexedTable.list` without `index` lists as `ShardedTable` now does: route-scoped or a walk.
-- Stored rows, local indexes of tables without a `routeOf`, count buckets and cursors of walks are
-  unchanged. Query-order cursors from before stop parsing, and say so.
 - The benchmarks' query-order listing series is replaced by ordered-index listings, at 1, 16 and
   64 row shards.
 
@@ -323,9 +323,13 @@ somewhere to go the day it goes:
 ### Rollout and validation
 
 1. **The spec** (done): `specs/ordered-index.ts`, checked with one and two faults.
-2. **Phase 1, ShardedTable:** `list({ route })` with route-led local indexes, `walk`, and the
-   removals. Tests under `cf dev`: a route listing reads one shard (counted shard calls) through
-   splits; a routed table's indexes rebuild while serving; walks unchanged.
+2. **Phase 1, ShardedTable.**
+   - The removals (built), and `specs/shard-walk.ts` now checks that a
+     shard lists only what it owns (`listOwnedOnly`), which `specs/table-listing.ts`, removed with
+     the query-order merge, checked before.
+   - `list({ route })` with route-led local indexes. Tests under `cf dev`: a route listing reads
+     one shard (counted shard calls) through splits; a routed table's indexes rebuild while
+     serving; walks unchanged.
 3. **Phase 2, range splits:** a spec of the core's range split and routing first (split keys in
    `moved`, cached by path, cursors pinned to a path), then the core change, then ordered indexes
    with consistency modes and per-range counts. Each rule of the specs gets a mutant in
@@ -364,7 +368,7 @@ spread, and the consistency mode lets each index decide what a write waits for.
   and it fails as the table grows. A call whose cost grows with the shard count should not look like
   a cheap one.
 - **Rename it (`scanAllShards`) instead of removing it.** Keeps an escape hatch, but it is a walk
-  with a merge: `walk()` does the scan, and an ordered index does the order.
+  with a merge: the walk does the scan, and an ordered index does the order.
 - **Only `list({ route })`, no ordered index.** Serves per-tenant listings, which are most of them,
   and leaves whole-table order with no answer.
 
@@ -402,9 +406,6 @@ past 64 shards; route listings keep asking every shard.
 
 ### Before acceptance
 
-- One RFD or two: the `ShardedTable` cut can ship before the ordered index, if route listings and
-  walks are enough for its users until phase 2.
-- Name the walk `walk()`, or keep `list({ order: "shard" })`?
 - Should `count({ index })` on an ordered index exist, given that it grows with index shards, or
   should a total be a counter kept apart?
 

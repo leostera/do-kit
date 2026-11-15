@@ -1,6 +1,6 @@
 // ShardedTable under cf dev: conditional writes and versions, listings every way checked against a
-// reference sort while the table splits and cleans up, sparse filters with a small budget, counts,
-// and schema changes on a live object.
+// reference sort (each shard's rows in order, shard after shard) while the table splits and cleans
+// up, sparse filters with a small budget, and schema changes on a live object.
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { post, shards, useWorker } from "./harness.ts";
@@ -10,7 +10,7 @@ useWorker();
 type Doc = { name: string; id: string; createdAt: number; lastEditAt: number | null; deleted: boolean; meta: unknown };
 type Versioned = { row: Doc; version: number };
 type Page = { rows: Versioned[]; cursor: string | null };
-type Query = { index?: string; direction?: "asc" | "desc"; where?: { column: string; op: string; value?: unknown }[]; limit?: number; budget?: number; cursor?: string | null; order?: "query" | "shard"; withCount?: boolean };
+type Query = { index?: string; direction?: "asc" | "desc"; where?: { column: string; op: string; value?: unknown }[]; limit?: number; budget?: number; cursor?: string | null };
 
 const op = <T>(name: string, operation: string, ...args: unknown[]) => post<T>("/table", { cls: "table", name, op: operation, args });
 const table = <T>(cls: string, name: string, operation: string, ...args: unknown[]) => post<T>("/table", { cls, name, op: operation, args });
@@ -128,29 +128,47 @@ test("a write conditional on a version from before a delete fails on the row wri
   expect((await op<{ version: number }>(name, "put", doc)).version).toBeGreaterThan(again.version);
 }, 60_000);
 
-test("listings match a reference sort, before, across and after splits", async () => {
+/** How often a listing goes back in its query's order: at most once a shard, walking the shards. */
+function breaks(names: string[], order: string[]): number {
+  const rank = new Map(order.map((n, i) => [n, i]));
+  return names.filter((n, i) => i > 0 && rank.get(n)! < rank.get(names[i - 1]!)!).length;
+}
+
+/**
+ * A listing of `query` is every matching row once, in the reference order within each shard: on
+ * one shard exactly the reference, on `shardCount` at most that many times back in it (a walk
+ * starts at any shard and wraps around).
+ */
+function expectListing(listed: string[], rows: Doc[], query: Query, shardCount: number): void {
+  const want = expected(rows, query);
+  if (shardCount === 1) return void expect(listed).toEqual(want);
+  expect([...listed].sort()).toEqual([...want].sort());
+  expect(breaks(listed, want)).toBeLessThanOrEqual(shardCount);
+}
+
+test("listings match a reference sort within each shard, before, across and after splits", async () => {
   const name = `listing-${Date.now()}`;
   const rows = makeDocs(160);
   for (let i = 0; i < rows.length; i += 40) await op(name, "putMany", rows.slice(i, i + 40).map((row) => ({ row })));
   expect(await op(name, "count")).toBe(rows.length);
 
-  for (const query of QUERIES) expect(await walk(name, query)).toEqual(expected(rows, query));
+  for (const query of QUERIES) expectListing(await walk(name, query), rows, query, 1);
   await op(name, "scan", "pauseCleanup", true);
 
-  // Split the root after the first page of every listing: the cursor carries on across it.
+  // Split the root after the first page of a listing: the cursor carries on across it.
   let first = true;
   const splitOnce = async () => {
     if (!first) return;
     first = false;
     expect(await split(name, "")).toBe(true);
   };
-  expect(await walk(name, QUERIES[1]!, splitOnce)).toEqual(expected(rows, QUERIES[1]!));
+  expectListing(await walk(name, QUERIES[1]!, splitOnce), rows, QUERIES[1]!, 2);
   // Cleanup is held back: the parent stores every row (a logical copy is sent its half only, a
   // snapshot every row), and each must be listed once.
   const [left, right] = await op<number[]>(name, "scan", "storedRows");
   expect(left).toBe(rows.length);
   expect(right!).toBeLessThanOrEqual(rows.length);
-  for (const query of QUERIES) expect(await walk(name, query)).toEqual(expected(rows, query));
+  for (const query of QUERIES) expectListing(await walk(name, query), rows, query, 2);
   expect(await op(name, "count")).toBe(rows.length);
 
   // Two more levels, mid-listing again.
@@ -160,9 +178,9 @@ test("listings match a reference sort, before, across and after splits", async (
     if (at === 1) expect(await split(name, "0")).toBe(true);
     if (at === 2) expect(await split(name, "1")).toBe(true);
   };
-  expect(await walk(name, QUERIES[3]!, splitMore)).toEqual(expected(rows, QUERIES[3]!));
+  expectListing(await walk(name, QUERIES[3]!, splitMore), rows, QUERIES[3]!, 4);
   expect((await shards("table", name)).length).toBe(4);
-  for (const query of QUERIES) expect(await walk(name, query)).toEqual(expected(rows, query));
+  for (const query of QUERIES) expectListing(await walk(name, query), rows, query, 4);
   expect(await op(name, "count")).toBe(rows.length);
 
   // Cleanup runs: each shard keeps only its own rows, and nothing changes for listings.
@@ -173,20 +191,14 @@ test("listings match a reference sort, before, across and after splits", async (
     if (i > 200) throw new Error(`cleanup did not finish: ${stored}`);
     await Bun.sleep(50);
   }
-  for (const query of QUERIES) expect(await walk(name, query)).toEqual(expected(rows, query));
+  for (const query of QUERIES) expectListing(await walk(name, query), rows, query, 4);
   expect(await op(name, "count")).toBe(rows.length);
 }, 120_000);
 
 /** Page calls the shards of a table answered, all told. */
 const pageCalls = async (name: string) => (await op<number[]>(name, "scan", "pageCalls")).reduce((a, b) => a + b, 0);
 
-/** How often a listing goes back in its query's order: at most once a shard, in shard order. */
-function breaks(names: string[], order: string[]): number {
-  const rank = new Map(order.map((n, i) => [n, i]));
-  return names.filter((n, i) => i > 0 && rank.get(n)! < rank.get(names[i - 1]!)!).length;
-}
-
-test("a walk in shard order lists every row once, in order within each shard, through splits, at one call a page", async () => {
+test("a listing walks the shards, every row once, through splits, at one call a page", async () => {
   const name = `by-shard-${Date.now()}`;
   const rows = makeDocs(160);
   for (let i = 0; i < rows.length; i += 40) await op(name, "putMany", rows.slice(i, i + 40).map((row) => ({ row })));
@@ -197,10 +209,10 @@ test("a walk in shard order lists every row once, in order within each shard, th
   for (const query of QUERIES) {
     const want = expected(rows, query);
     const before = await pageCalls(name);
-    const listed = await walk(name, { ...query, order: "shard" });
+    const listed = await walk(name, query);
     expect([...listed].sort()).toEqual([...want].sort());
     expect(breaks(listed, want)).toBeLessThanOrEqual(1);
-    // One shard a page, and another when one runs out partway: against two a page in query order.
+    // One shard a page, and another when one runs out partway: however many shards there are.
     const pages = Math.max(1, Math.ceil(want.length / query.limit!));
     expect(await pageCalls(name)).toBeLessThanOrEqual(before + pages + 2);
   }
@@ -213,19 +225,14 @@ test("a walk in shard order lists every row once, in order within each shard, th
     if (at === 4) expect(await split(name, "1")).toBe(true);
   };
   const query = QUERIES[1]!;
-  const listed = await walk(name, { ...query, order: "shard" }, splitMidWalk);
+  const listed = await walk(name, query, splitMidWalk);
   expect((await shards("table", name)).length).toBe(4);
   expect([...listed].sort()).toEqual([...expected(rows, query)].sort());
 
   // Walks start at any shard: walks begun together do not all ask the first one.
   const firsts = new Set<string>();
-  for (let i = 0; i < 24; i++) firsts.add((await op<Page>(name, "list", { ...query, order: "shard", limit: 1 })).rows[0]!.row.name);
+  for (let i = 0; i < 24; i++) firsts.add((await op<Page>(name, "list", { ...query, limit: 1 })).rows[0]!.row.name);
   expect(firsts.size).toBeGreaterThan(1);
-
-  // A cursor of one order does not continue the other.
-  const first = await op<Page>(name, "list", { ...query, order: "shard" });
-  expect(op(name, "list", { ...query, cursor: first.cursor })).rejects.toThrow(/another query/);
-  expect(op(name, "list", { ...query, order: "shard", withCount: true })).rejects.toThrow(/withCount/);
 }, 120_000);
 
 test("a sparse filter with a small budget returns short pages but every match", async () => {
@@ -235,7 +242,7 @@ test("a sparse filter with a small budget returns short pages but every match", 
   expect(await split(name, "")).toBe(true);
   const query: Query = { index: "byCreated", where: [{ column: "name", op: "contains", value: "doc-011" }], limit: 3, budget: 5 };
   const result = await walk(name, query);
-  expect(result).toEqual(expected(rows, query));
+  expectListing(result, rows, query, 2);
   expect(result.length).toBe(10);
 }, 60_000);
 
@@ -249,77 +256,6 @@ test("count follows inserts, deletes and splits", async () => {
   expect(await op(name, "count")).toBe(70);
   expect(await split(name, "1")).toBe(true);
   expect(await op(name, "count")).toBe(70);
-}, 60_000);
-
-type Counted = { value: unknown; count: number }[];
-const byValue = (counts: Counted) => Object.fromEntries(counts.map((c) => [String(c.value), c.count]));
-const reference = (rows: Map<string, Doc>) => {
-  const out: Record<string, number> = {};
-  for (const r of rows.values()) out[String(r.deleted)] = (out[String(r.deleted)] ?? 0) + 1;
-  return out;
-};
-
-test("counts per value follow puts, patches, deletes and splits, and come with a listing", async () => {
-  const name = `count-by-${Date.now()}`;
-  const rows = new Map(makeDocs(120).map((r) => [r.name, r]));
-  await op(name, "putMany", [...rows.values()].map((row) => ({ row })));
-  const check = async () => {
-    expect(byValue(await op<Counted>(name, "countBy", "byDeleted"))).toEqual(reference(rows));
-    const page = await op<Page & { total: number; counts: Counted }>(name, "list", { index: "byCreated", where: [{ column: "deleted", op: "=", value: false }], limit: 5, withCount: "byDeleted" });
-    expect(page.rows).toHaveLength(5);
-    expect(page.total).toBe(rows.size);
-    expect(byValue(page.counts)).toEqual(reference(rows));
-    expect((await op<Page & { total: number; counts?: Counted }>(name, "list", { limit: 3, withCount: true })).total).toBe(rows.size);
-  };
-  await check();
-
-  const names = [...rows.keys()];
-  // Patch some live rows to deleted, put whole rows back as live, delete a few of each.
-  for (const key of names.slice(1, 9)) {
-    await op(name, "patch", key, { deleted: true });
-    rows.set(key, { ...rows.get(key)!, deleted: true });
-  }
-  for (const key of names.filter((k) => rows.get(k)!.deleted).slice(0, 4)) {
-    await op(name, "put", { ...rows.get(key)!, deleted: false });
-    rows.set(key, { ...rows.get(key)!, deleted: false });
-  }
-  await op(name, "patch", names[20]!, { lastEditAt: 1 }); // not a counted column
-  rows.set(names[20]!, { ...rows.get(names[20]!)!, lastEditAt: 1 });
-  for (const key of names.slice(30, 45)) {
-    await op(name, "delete", key);
-    rows.delete(key);
-  }
-  await check();
-
-  // Splits with cleanup held back: both shards store rows they gave away, counted once.
-  await op(name, "scan", "pauseCleanup", true);
-  expect(await split(name, "")).toBe(true);
-  await check();
-  expect(await split(name, "1")).toBe(true);
-  await check();
-  await op(name, "scan", "pauseCleanup", false);
-  for (let i = 0; ; i++) {
-    const stored = await op<number[]>(name, "scan", "storedRows");
-    if (stored.reduce((a, b) => a + b, 0) === rows.size) break;
-    if (i > 200) throw new Error(`cleanup did not finish: ${stored}`);
-    await Bun.sleep(50);
-  }
-  await check();
-  await expect(op(name, "countBy", "nope")).rejects.toThrow("no count group nope");
-}, 120_000);
-
-test("a new count group counts the rows already stored", async () => {
-  const name = `count-group-evolve-${Date.now()}`;
-  const evolve = <T>(operation: string, ...args: unknown[]) => post<T>("/table", { cls: "evolving", name, op: operation, args });
-  const rows = makeDocs(40);
-  await evolve("putMany", rows.map((row) => ({ row })));
-  await evolve("upgrade");
-  const deleted = rows.filter((r) => r.deleted).length;
-  expect(byValue(await evolve<Counted>("countBy", "deletedAgain"))).toEqual({ false: rows.length - deleted, true: deleted });
-  expect(byValue(await evolve<Counted>("countBy", "byStars"))).toEqual({ null: rows.length });
-  await evolve("patch", rows[1]!.name, { stars: 3 });
-  expect(byValue(await evolve<Counted>("countBy", "byStars"))).toEqual({ null: rows.length - 1, 3: 1 });
-  await expect(evolve("countBy", "byDeleted")).rejects.toThrow("no count group byDeleted");
 }, 60_000);
 
 test("a cursor only continues the query it came from", async () => {

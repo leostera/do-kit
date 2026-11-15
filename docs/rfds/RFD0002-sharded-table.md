@@ -4,26 +4,29 @@
 - Status: Implemented (snapshot)
 - Author: `leostera`
 - Start Date: `2026-10-29`
-- Updated: `2026-10-30`
+- Updated: `2026-11-15`
 - Discussion PR: none (developed on `main`)
 - Tracking Issue: none
 
 This is a snapshot RFD: it records the contract of `ShardedTable` as built in
 [`src/table/`](../../src/table/). It replaces the earlier design note, `docs/design/sharded-table.md`.
+[RFD0012](RFD0012-shard-local-tables.md) removed what asked every shard: the listing in query order
+(a merge of one page from every shard), `withCount`, `count()`, `countBy()` and count groups.
+Listings walk the shards ([RFD0009](RFD0009-walks-in-shard-order.md)).
 
 ## Summary
 
 A `ShardedTable` is a table of typed rows on a sharded object ([RFD0001](RFD0001-sharded-object.md)).
 The primary key routes a row to its shard. Each shard keeps the table's indexes for its own rows,
-and a listing merges one page from every shard into a sorted page with a cursor that survives
-splits. Writes are conditional on a version per row. Counts, total and per value of a column,
-are kept with every write.
+and a listing walks the shards, each shard's rows in the query's order, one shard a page, with a
+cursor that survives splits. Writes are conditional on a version per row. Every call reaches the
+shards its keys are on, or one shard a page.
 
 ## Motivation
 
 Most users of a sharded object build the same thing by hand: a directory, a control plane, records
-listed several ways. They need typed rows, indexes, create-if-absent, compare-and-set, listings with
-a cursor, and totals. Built on raw keys and values, every one of them has to get pagination across
+listed several ways. They need typed rows, indexes, create-if-absent, compare-and-set, and listings
+with a cursor. Built on raw keys and values, every one of them has to get pagination across
 splits right. With no indexes, a sharded table is a key-value store.
 
 ## Goals
@@ -32,11 +35,13 @@ splits right. With no indexes, a sharded table is a key-value store.
   compare-and-set on it.
 - Indexes declared in the schema, kept by every shard for its own rows, in the same transaction
   as the write.
-- `list({ index, direction, where, limit, cursor })` across every shard: sorted, paged, with an
-  opaque cursor that survives splits. Across pages, no row is skipped or returned twice while shards
-  split and clean up.
-- Bounded work per page: a shard scans at most a budget of rows per page.
-- Exact counts without scanning rows: the total, and rows per value of declared columns.
+- `list({ index, direction, where, limit, cursor })` over every shard in turn: paged, each
+  shard's rows in order, with an opaque cursor that survives splits. Across pages, no row is skipped
+  or returned twice while shards split and clean up.
+- Bounded work per page: one shard a page (up to three, when one runs out partway), and a shard
+  scans at most a budget of rows per page.
+- No call whose number of shard calls grows with the number of shards, but the operators'
+  `verifyCounts`.
 - Subclassable: custom transactional methods use the same row helpers inside `transact`.
 
 ## Non-goals
@@ -44,8 +49,8 @@ splits right. With no indexes, a sharded table is a key-value store.
 - Unique constraints on columns other than the primary key, and lookups by them across shards:
   [RFD0003](RFD0003-indexed-table.md).
 - A snapshot across pages. Each page reflects its own moment, as any keyset pagination does.
-- Counts of arbitrary conditions (`count({ where })`). Count the values you filter on with a
-  count group instead.
+- An order or a count across the whole table: [RFD0012](RFD0012-shard-local-tables.md) gives them
+  to `IndexedTable`'s global indexes.
 - Joins, and transactions across rows on different shards.
 
 ## Guide-level explanation
@@ -56,7 +61,6 @@ const orders = defineTable<Order>({
   primaryKey: "id",
   columns: { id: "text", customer: "text", status: "text", createdAt: "integer" },
   indexes: { byCreated: ["createdAt"] },
-  counts: { byStatus: "status" },
 });
 
 export class Orders extends ShardedTable<Env, Order> {
@@ -67,9 +71,9 @@ export class Orders extends ShardedTable<Env, Order> {
 // A Worker
 const t = table(env.ORDERS, "shop-42", orders);
 await t.put({ id: "o_1001", customer: "ada", status: "pending", createdAt: Date.now() }, { ifVersion: 0 }); // only if new
-const page = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "cancelled" }], limit: 50, withCount: "byStatus" });
+// Newest first within each shard, one shard a page.
+const page = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "cancelled" }], limit: 50 });
 const next = await t.list({ index: "byCreated", direction: "desc", where: [{ column: "status", op: "!=", value: "cancelled" }], limit: 50, cursor: page.cursor });
-const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 812 }, ...]
 ```
 
 `where` conditions are `=`, `!=`, `<`, `<=`, `>`, `>=`, `isNull`, `notNull`, `prefix`, and
@@ -80,7 +84,7 @@ const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 81
 ### Schema
 
 - Column types: `text`, `integer`, `real`, `boolean` (stored 0/1) and `json` (stored as text,
-  not indexable or countable). Every column but the primary key may be null.
+  not indexable). Every column but the primary key may be null.
 - The primary key is a `text` column, and is what `keyHash` routes on.
 - An index is a list of columns. The primary key is appended to every index, so the order is
   total and a cursor names one position.
@@ -98,20 +102,17 @@ const perStatus = await t.countBy("byStatus"); // [{ value: "shipped", count: 81
 **Schema changes.** Each shard brings its storage up to the schema the first time it runs code
 of that version, with cheap statements only: it adds missing columns, makes an empty key table for
 each new index (see Positions and index keys) and records the build, renames the key tables of
-indexes no longer declared out of the way, and records dropped count groups. Removing or
+indexes no longer declared out of the way. Removing or
 retyping a column is not supported: add a new one. A cursor is refused once its index is
 redefined.
 
 What is proportional to the rows is done in build steps, each one transaction of at most
-`indexBuildRows` (10,000) rows: deleting a dropped group's counts, filling in a new index's keys
-in key order, deleting a dropped index's keys (and then its empty table), and counting a new
-group in key order. Each call takes a step (the call that
+`indexBuildRows` (10,000) rows: filling in a new index's keys in key order, deleting a dropped
+index's keys (and then its empty table). Each call takes a step (the call that
 migrates takes none), and so does the alarm, so a shard that gets few calls still finishes. A
 step that fails is rolled back and taken again; it never fails the call. Meanwhile the shard
-serves gets, writes and other listings: only a listing by an index being built, or a count of a
-group being counted, answers "not ready". A write during a count counts its change only for a
-row the count has passed: the count reaches the others with their value then. On a shard with
-no rows, what is new is built at once.
+serves gets, writes and other listings: only a listing by an index being built answers "not
+ready". On a shard with no rows, what is new is built at once.
 
 No statement of a schema change touches more than a step of rows. That is why an index keeps
 its keys in a table of its own rather than a column of the row table: SQLite makes an index over
@@ -131,9 +132,7 @@ schema, it reads that record, one statement, instead of checking every table and
 A shard records the highest it ran. Code with a lower one (a rollback, or a deploy halfway)
 leaves the indexes it doesn't know alone, and marks every row it writes. The newer code then
 refreshes the marked rows a step at a time (their index keys, and an IndexedTable's global
-entries), with listings by an index waiting until done, instead of rebuilding. Count groups the
-older code doesn't know are dropped, since its writes would not keep them, and counted again by
-the newer code. Without versions every schema is 0, and each deploy drops what it no longer
+entries), with listings by an index waiting until done, instead of rebuilding. Without versions every schema is 0, and each deploy drops what it no longer
 declares.
 
 ### Writes
@@ -143,7 +142,7 @@ declares.
 - Each returns `{ ok, version }`: the row's new version, or its current version when `ifVersion`
   did not match. `ifVersion: 0` means "only if absent".
 - Every write runs in the core's `transact`. It waits while a split copies the key, checks the
-  shard still owns it, and is one SQLite transaction with the index keys and the counts. A put
+  shard still owns it, and is one SQLite transaction with the index keys and the row counts. A put
   of a row that exists updates it in place, and touches an index only if its key changed.
 - The client sends a batch 1,000 rows a call at most, the calls at once: a shard's part of a
   larger batch is several transactions.
@@ -163,50 +162,36 @@ declares.
 
 ### Listing
 
-- A page in query order asks every shard each round. The client refuses a tree wider than
-  `maxShardsPerPage` (64) with `TooManyShards`: list such a tree in shard order, which asks a
-  few shards per page.
+A listing walks the shards: from the cursor's shard, a page asks one shard for the rows after the
+cursor's position in it, and moves on to the next shard when that one runs out (up to three shards
+a page). Rows come in the query's order within each shard, shard after shard. A walk begun without
+a cursor starts at a random shard and wraps around, so walks begun together spread over the
+shards. [RFD0009](RFD0009-walks-in-shard-order.md) has the cursor (the shard, the position in it,
+and a floor for each shard that split under the walk) and why it lists every row that existed
+when the walk began once, through splits.
 
-The cursor is the sort position of the last row returned, plus a fingerprint of the query (the
-index and its columns, the direction and the conditions), so it cannot continue another query. It
-holds no state per shard, so it does not care how many shards there are or whether they split.
+A shard's page:
+- Rows in index order after the position, scanning at most `budget` rows, up to the rows asked for,
+  or rows holding 4 MiB of text (it says `full`, and the client ends its page there). Its
+  **frontier** is the position up to which it reported every match: its last row, the last row
+  it scanned if it ran out of budget, or the end.
+- Only rows it owns (`_hash` in its range), even while cleanup has not deleted the rest.
+- Read in statements each read to its end before the next, seeking from the last row seen: the
+  first of the rows the page asks for, each after it twice the one before, up to 64. SQLite refuses
+  DROP and ALTER TABLE while any statement on the connection is unfinished, and a cursor left
+  part-read stays open until it is collected: a page that stopped early once blocked its shard's
+  key-table drops, compactions and schema changes, the alarm failing on them again and again.
+- A shard whose listings scanned 200,000 rows this second (`scanRowsPerSecond`, which a class may
+  change) answers the next "not ready" until the second is over, and the client backs off: a
+  burst of wide listings can't take the shard from its writes.
 
-A page:
+The cursor carries a fingerprint of the query (the index and its columns, the direction and the
+conditions), so it cannot continue another query. A row whose sort value changes during the walk
+may be seen twice or not at all, as with any keyset pagination.
 
-1. The client asks every shard (the core's `scan`) for its share of the page after the cursor:
-   twice `limit / shards`, plus two. Each shard returns matching rows in index order, scanning at
-   most `budget` rows.
-2. Each shard answers its rows and a **frontier**: the position up to which it has reported every
-   match. That is its last row if it returned its limit, or rows holding 4 MiB of text (it says
-   `full`, and the client ends its page there), the last row it scanned if it ran out of budget,
-   or the end.
-   A page reads its rows in statements each read to its end before the next, seeking from the
-   last row seen: the first of the rows the page asks for, each after it twice the one before,
-   up to 64. A shard of a wide table is asked for a few rows a page (50 over 64 shards is 4),
-   and statements of 64 from the start read and copied up to 16 times them, which on the edge
-   tripled a scan's CPU and halved a 64-shard table's listings. SQLite refuses DROP and ALTER TABLE while any statement on the
-   connection is unfinished, and a cursor left part-read stays open until it is collected: a
-   page that stopped early once blocked its shard's key-table drops, compactions and schema
-   changes, the alarm failing on them again and again.
-   A shard whose listings scanned 200,000 rows this second (`scanRowsPerSecond`, which a class may
-   change) answers the next "not ready" until the second is over, and the client backs off: a
-   burst of wide listings can't take the shard from its writes.
-3. The client merges. Every shard has reported everything up to the smallest frontier, so the rows
-   up to it are complete. It returns those, sorted, up to `limit`. If the page comes up short, it
-   asks again from the frontier, up to three rounds.
-
-Why no row is skipped or repeated across a split:
-
-- A row is owned by one shard at any moment, and a shard returns only rows it owns (`_hash` in
-  its range), even while cleanup has not deleted the rest.
-- The new shard answers `notReady` until it is activated, and the original answers `moved` for
-  the half it gave away, so a page covers each part of the key space once.
-- A cursor from before a split is a valid position in both halves.
-- The client drops a key it sees twice in one page.
-
-The guarantee is for rows whose sort columns do not change during the listing. A row whose sort
-value changes between pages moves in the order, and may be seen twice or not at all, as with any
-keyset pagination.
+Until RFD0012, a listing could also be in the query's order across the whole table: each page
+asked every shard for its share and merged them up to the smallest frontier. Every shard served
+every page, so it got slower as shards were added, and it was removed.
 
 **Positions and index keys.** Each index keeps a table of keys, one per row (`sharded_table_keys_*`:
 `_key`, its primary key, with the row's primary key and routing hash, and an index on the row's
@@ -225,36 +210,26 @@ primary key. A write changes an index's keys only if the row's key in it changed
 not seek, and got slower as the table grew. A property test checks the encoding against SQLite's
 order on random tuples.
 
-### Counting
+### Row counts
 
-- **The total.** Each shard keeps rows per 16-bit hash prefix (`sharded_table_counts`), updated
-  in the write's transaction. A shard's count sums the prefixes in its range, which is exact at
-  every depth up to 16 (the table's `maxDepth` limit). After a split both sides store all
-  prefixes but sum only their own, so nothing is recomputed. The sum is kept in memory once read,
-  and moved by each write; a write transaction that rolls back drops it, and the next count sums
-  again. So a count reads nothing after the first.
-- **Count groups.** `counts: { byStatus: "status" }` counts rows per value of a column the same
-  way, in `sharded_table_group_counts`. `countBy(group)` sums a shard's range per value. Count
-  groups are for columns of few values: past `maxCountValues` (1,000) values, `countBy` answers
-  `{ counts, truncated: true }` with the first that many, in order of their JSON text: each shard
-  reads its first ones in its key's order, with nothing sorted, and sends one more.
-- **With a listing.** `withCount: true`, or a group's name, returns `total`, and the group's
-  `counts`, from the shards' first-round pages: one call per shard for a page and its total.
-- **During a split.** The object's count is the sum over shards. It may count a row twice, or not
-  at all, at the instant a split commits.
+- Each shard keeps rows per 16-bit hash prefix (`sharded_table_counts`), updated in the write's
+  transaction. A shard's rows are the sum of the prefixes in its range, exact at every depth up to
+  16 (the table's `maxDepth` limit). After a split both sides store all prefixes but sum only
+  their own. Splits read them to decide and to name their halves, with no row read, and a subclass
+  reads its shard's with `ownedRowCount()`.
+- The client counts nothing across shards (RFD0012).
 - **Repairs.** Counts are kept by the library's writes only. A subclass that writes the table
-  directly, or a migration gone wrong, can make them drift. `client.verifyCounts(budget)` recounts
-  each shard's buckets from its rows, a slice of at most `budget` rows a call by the hash's index
-  (a bucket holding more, as a route's can, is counted whole), and sets each drifted bucket to
-  what its rows say. Group counts are not recounted.
+  directly, or a migration gone wrong, can make them drift. `client.verifyCounts(budget)`, for
+  operators, recounts each shard's buckets from its rows, one shard at a time, a slice of at most
+  `budget` rows a call by the hash's index (a bucket holding more, as a route's can, is counted
+  whole), and sets each drifted bucket to what its rows say.
 
 ### Invariants
 
-- A listing never returns a row twice, returns rows in order, and, once finished, has returned
-  every row. [`specs/table-listing.ts`](../../specs/table-listing.ts) model-checks this while the
-  shard splits, the copy waits for activation, and cleanup runs, including with a shard asked for
-  less than a page.
-- Index keys, versions and counts change in the same transaction as the row.
+- A listing never returns a row twice, returns each shard's rows in order, and, once finished, has
+  returned every row. [`specs/shard-walk.ts`](../../specs/shard-walk.ts) model-checks this while
+  shards split under the walk, before and after cleanup.
+- Index keys, versions and row counts change in the same transaction as the row.
 
 ### Compatibility and migration
 
@@ -265,34 +240,33 @@ the same way.
 
 - Tests under `cf dev` (`test/table.test.ts`) cover:
   - conditional writes and versions;
-  - listings every way against a reference sort, across splits and with cleanup held back;
+  - listings every way against a reference sort within each shard, across splits and with cleanup
+    held back;
   - sparse filters with a small budget;
-  - counts and count groups through every kind of write, across splits;
+  - row counts through every kind of write, across splits;
   - schema changes on a live object.
 - `test/index-key.test.ts` checks the encoding on 20,000 random tuples.
 - Benchmarks are in [docs/performance.md](../performance.md#sharded-tables).
 
 ## Drawbacks
 
-**Listings do not scale with shards.** Every page asks every shard, so listing throughput stays
-near one object's (about 370–400 pages/s at 1, 4 and 16 shards), and a page waits for its slowest
-shard. At 64 in flight a page's median is 805 ms on 64 shards against 231 ms on one. Keep
-list-heavy tables to 16 shards or fewer, or use the global indexes of
-[RFD0003](RFD0003-indexed-table.md).
+**No order across the whole table.** A listing's order holds within each shard only. An order, or
+a count, across the table needs an `IndexedTable`'s global index, a second class and another call
+per write ([RFD0012](RFD0012-shard-local-tables.md)).
 
 ## Rationale and alternatives
 
 - **A cursor with a position per shard.** It would let each shard resume exactly, but it grows
   with the shards, and breaks when they split.
 - **Offset pagination.** It skips and repeats rows as rows are added, deleted, and moved by splits.
-- **Counting with a scan.** It is exact but reads every row, which is what the per-prefix counts
-  avoid.
+- **A listing in the query's order across every shard** (built until RFD0012): every shard serves
+  every page, so it does not scale with shards.
 
 ## Prior art
 
 Keyset pagination with a total order (index columns plus the primary key) is the standard way to
-page without offsets. The k-way merge with a frontier is the scatter-gather of sharded query
-routers (Vitess, Citus), made safe across splits by ownership filtering.
+page without offsets. A walk shard by shard is the parallel scan of DynamoDB and Cassandra, made safe
+across splits by ownership filtering and the cursor's floors.
 
 ## Unresolved questions
 

@@ -23,8 +23,12 @@ const entries = defineTable<Entry>({
 
 export class Store extends ShardedTable<Env, Entry> {
   protected table = entries;
+  /** This shard's rows, for the shard panel: an RPC to one shard, from its kept counts. */
+  rowCount(): number {
+    return this.ownedRowCount();
+  }
   // 16 shards from the first call, and never more: keys are spread by hash, so each takes 1/16 of
-  // the load, and a listing asks 16 shards, not more.
+  // the load.
   protected override splitPolicy: SplitPolicy = { callsPerSecond: 400, windowSeconds: 5, maxDepth: 4, initialDepth: 4 };
 
   protected nodes() {
@@ -45,7 +49,8 @@ const conditionOf = (header: (name: string) => string | undefined) => condition(
 
 app.get("/api/kv", async (c) => {
   const prefix = c.req.query("prefix");
-  // In key order across all 16 shards; the cursor carries on even if the shards split.
+  // Shard by shard, in key order within each, a few shards a page; the cursor carries on even if
+  // the shards split. A page may hold no keys and still have a cursor.
   const page = await kv(c.env).list({ where: prefix ? [{ column: "key", op: "prefix", value: prefix }] : [], limit: 100, cursor: c.req.query("cursor") ?? null });
   return c.json({ keys: page.rows.map((r) => r.row.key), cursor: page.cursor });
 });
