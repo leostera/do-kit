@@ -94,7 +94,8 @@ test("kv: ETags make writes conditional, and listings page by prefix", async () 
     cursor = page.cursor;
   }
   expect(keys.sort()).toEqual([`${run}-user:alice`, `${run}-user:bob`]);
-  // The shard panel counts each shard's rows: 16 shards, the three keys among them and others'.
+  // The shard panel shows the 16 presplit shards, made or not, and counts each one's rows: the
+  // three keys among them, and others' from earlier runs.
   const panel = (await (await fetch(`${base}/api/shards`)).json()) as { rows: number }[];
   expect(panel.length).toBe(16);
   expect(panel.reduce((n, s) => n + s.rows, 0)).toBeGreaterThanOrEqual(3);

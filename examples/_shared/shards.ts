@@ -21,15 +21,18 @@ export type CountRows = (shard: any) => Promise<number>;
 
 export const tableRows: CountRows = (shard) => shard.rowCount();
 
-export async function describeShards<T extends ShardedObject<any, any>>(ns: DurableObjectNamespace<T>, name: string, countRows?: CountRows, bits = ""): Promise<ShardInfo[]> {
+export async function describeShards<T extends ShardedObject<any, any>>(ns: DurableObjectNamespace<T>, name: string, countRows?: CountRows, bits = "", presplit = 0): Promise<ShardInfo[]> {
   const node = ns.get(ns.idFromName(shardObjectName(name, bits))) as unknown as { shardedDescribe(): Promise<NodeDescription> };
   const d = await node.shardedDescribe();
+  // The tree's presplit depth, from the root: no node above it is ever made, so a node there that
+  // says "new" still has shards below it.
+  const depth = bits === "" ? d.presplit : presplit;
   // The object hosting `bits` hosts a deeper shard once `bits` has split.
-  if (d.state === "new" || d.bits === bits) {
+  if ((d.state === "new" && bits.length >= depth) || d.bits === bits) {
     const own = countRows && d.state === "shard" ? await countRows(node) : null;
     const [rows, storedRows] = own === null ? [d.rows, d.storedRows] : [own, own];
     return [{ bits: bits || "(root)", state: d.state, rows, storedRows, callsPerSecond: Math.round(d.callsPerSecond), splits: d.splits.length, lastSplitMs: d.lastSplit?.ms ?? null }];
   }
-  const [left, right] = await Promise.all([describeShards(ns, name, countRows, `${bits}0`), describeShards(ns, name, countRows, `${bits}1`)]);
+  const [left, right] = await Promise.all([describeShards(ns, name, countRows, `${bits}0`, depth), describeShards(ns, name, countRows, `${bits}1`, depth)]);
   return [...left, ...right];
 }
