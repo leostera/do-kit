@@ -276,7 +276,9 @@ test("splits of the rows and of the index while writing: every row is found thro
   expect((await shards("users", t)).length).toBe(3);
   expect((await shards("userIndexes", t)).length).toBe(3);
 
-  // The rows as stored are the truth; check every index against them.
+  // A write may have returned IndexPending under the splits: its row shard's alarm delivers the
+  // rest. Once every outbox is empty, the rows as stored are the truth; check every index against them.
+  expect(await eventually(() => op<number>(t, "outbox"), (left) => left === 0, 30_000)).toBe(0);
   const stored = await ok(op<Result<(Versioned | null)[]>>(t, "getMany", [...model.keys()]));
   const rows = stored.filter((s): s is Versioned => s !== null).map((s) => s.row);
   const emails = new Map<string, string>();
@@ -295,7 +297,6 @@ test("splits of the rows and of the index while writing: every row is found thro
     const expected = rows.filter((r) => r.team === team).sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
     expect(listed.map((r) => r.row.id)).toEqual(expected.map((r) => r.id));
   }
-  expect(await op<number>(t, "outbox")).toBe(0);
 }, 120_000);
 
 test("a unique index added to a table that has rows is built over them, and reports the rows that share a value", async () => {
